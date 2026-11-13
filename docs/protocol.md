@@ -2,7 +2,7 @@
 
 HTTP and JSON. Everything under `/api/v1`. The server also publishes an OpenAPI description at `/docs` (generated;
 the text here is the contract that the three parts are written against). This file grows with the stages of the
-[plan](plan.md); it now covers stage 1.
+[plan](plan.md); it now covers stage 2.
 
 Conventions: JSON bodies are UTF-8. Times are UTC, written exactly as `YYYY-MM-DDTHH:MM:SSZ`
 (`2026-11-14T09:30:00Z`): a literal `Z`, no numeric offset, no fractions of a second. Identifiers of
@@ -32,7 +32,7 @@ type or value. `detail` is always one string, also for `422`.
 ```json
 {
   "name": "LR Remote Previews",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "api": 1,
   "auth": "token",
   "converter": {
@@ -46,7 +46,8 @@ type or value. `detail` is always one string, also for `422`.
   "capabilities": {
     "extensions": [".arw", ".cr2"],
     "previewLongEdge": 2560,
-    "maxItemsPerJob": 5000
+    "maxItemsPerJob": 5000,
+    "jobRetentionDays": 30
   }
 }
 ```
@@ -61,7 +62,8 @@ type or value. `detail` is always one string, also for `422`.
 | `roots[]` | The folders with originals the server can read. `id` is what a client uses to name a root; server-side paths are never exposed. `available` is false when the folder is missing, for example an unmounted volume |
 | `capabilities.extensions` | Lower-case file extensions the server accepts as camera raw files |
 | `capabilities.previewLongEdge` | Long edge of the smart previews it builds, in pixels |
-| `capabilities.maxItemsPerJob` | The most items one job may have |
+| `capabilities.maxItemsPerJob` | The most items one job, or one lookup, may have |
+| `capabilities.jobRetentionDays` | A job is deleted this many days after it left `active`. Its DNGs stay in the cache |
 
 ## Paths
 
@@ -111,6 +113,7 @@ file the server is not permitted to read is `not_found`.
   "seq": 687,
   "error": null,
   "result": {
+    "key": "5d41…",
     "size": 359310,
     "sha256": "9f2c…",
     "originalName": "IMG_0001.ARW",
@@ -125,7 +128,7 @@ file the server is not permitted to read is `not_found`.
 | `ref` | A string of at most 64 characters chosen by the client and echoed back unchanged. The server does not interpret it. Unique within a job |
 | `seq` | The job's change counter at the item's last state change (see polling) |
 | `error` | `null`, or `{"code": "...", "message": "..."}` for `failed` and `rejected` |
-| `result` | `null` until `ready`. `size` and `sha256` (lower-case hex) of the DNG; `originalName` and the original pixel size as the DNG records them (`OriginalRawFileName`, `OriginalDefaultFinalSize`), `null` where the DNG has no such tag |
+| `result` | `null` until `ready`. `key` names the DNG in the server's cache (64 lower-case hex characters; see `GET /api/v1/files/{key}`); `size` and `sha256` (lower-case hex) of the DNG; `originalName` and the original pixel size as the DNG records them (`OriginalRawFileName`, `OriginalDefaultFinalSize`), `null` where the DNG has no such tag |
 
 ### The job object
 
@@ -133,7 +136,8 @@ file the server is not permitted to read is `not_found`.
 {
   "id": 7,
   "label": "Lightroom selection",
-  "client": "lr-plugin/0.2.0",
+  "client": "lr-plugin/0.3.0",
+  "clientId": "c1f0a6e2-7d0b-4c55-9d0e-3f6a1b2c4d5e",
   "state": "active",
   "created": "2026-11-14T09:30:00Z",
   "finished": null,
@@ -142,7 +146,10 @@ file the server is not permitted to read is `not_found`.
 }
 ```
 
-`label` and `client` are always present: the text the client sent, or `null` when it sent none.
+`label`, `client` and `clientId` are always present: the text the client sent, or `null` when it sent none.
+`clientId` is a string of at most 64 characters that a client makes up once and sends with every job, so that it
+can find its own jobs again later (for example a random UUID kept in the plug-in's settings per catalog). The
+server does not interpret it.
 `state`: `active` while any item is `queued` or `building`; `done` when none is; `cancelled` after a cancel.
 `finished` is the time the job left `active`, or `null`. `seq` is the job's change counter: it grows by one with
 every state change of any of its items.
@@ -151,7 +158,8 @@ every state change of any of its items.
 
 ```json
 {
-  "client": "lr-plugin/0.2.0",
+  "client": "lr-plugin/0.3.0",
+  "clientId": "c1f0a6e2-7d0b-4c55-9d0e-3f6a1b2c4d5e",
   "label": "Lightroom selection",
   "items": [
     {"ref": "17", "root": "archive", "path": "2026/2026.06.20 - shoot/IMG_0001.ARW"}
@@ -159,7 +167,7 @@ every state change of any of its items.
 }
 ```
 
-`client` and `label` are optional free text (at most 100 characters each). `items` has 1 to
+`client` and `label` are optional free text (at most 100 characters each); `clientId` is optional (at most 64). `items` has 1 to
 `capabilities.maxItemsPerJob` entries with unique `ref`s.
 
 `201`:
@@ -177,7 +185,8 @@ be built. `413` with `"code": "too_many_items"`. `422` for a malformed body; dup
 
 ### `GET /api/v1/jobs`
 
-Query: `limit` (1–200, default 50), `state` (`active`, `done`, `cancelled`; default all). `200`
+Query: `limit` (1–200, default 50), `state` (`active`, `done`, `cancelled`; default all), `clientId` (only the
+jobs created with this `clientId`). `200`
 `{"jobs": [ …job objects, newest first… ]}`.
 
 ### `GET /api/v1/jobs/{id}`
@@ -211,10 +220,60 @@ an unknown item, `409` with `"code": "not_ready"` when the item is not `ready`, 
 `"code": "not_in_cache"` when the item is `ready` but its DNG is gone from the cache (ask for the file in a new job;
 it is built again).
 
+### `POST /api/v1/jobs/{id}/retry`
+
+Gives every `failed` item of the job another attempt: they become `queued` (each with a new `seq`), and the job
+becomes `active` again. Items in other states are untouched. `200` `{"job": { … }}`. A job without failed items is
+returned unchanged. `409` with `"code": "job_cancelled"` for a cancelled job.
+
 ### `DELETE /api/v1/jobs/{id}`
 
 Cancels the job: `queued` items become `cancelled`; items already `building` finish and their results stay in the
 cache. `200` `{"job": { … }}`. Cancelling a job that is not `active` changes nothing and returns it.
+
+## Asking for files without a job
+
+A job makes the server build. A lookup only asks what the server already has, so a client can collect finished
+smart previews for files it (or anything else: the dashboard, an automatic scan) asked for earlier, without knowing
+which job built them.
+
+### `POST /api/v1/lookup`
+
+```json
+{"items": [{"ref": "17", "root": "archive", "path": "2026/2026.06.20 - shoot/IMG_0001.ARW"}]}
+```
+
+1 to `capabilities.maxItemsPerJob` items with unique `ref`s. Nothing is queued and nothing is stored.
+
+`200`:
+
+```json
+{
+  "items": [
+    {"ref": "17", "state": "ready", "error": null,
+     "result": {"key": "5d41…", "size": 359310, "sha256": "9f2c…",
+                "originalName": "IMG_0001.ARW", "originalWidth": 6000, "originalHeight": 4000}}
+  ]
+}
+```
+
+One entry per requested item, in request order. `state` is one of:
+
+| State | Meaning |
+|---|---|
+| `ready` | The DNG for this file, as it is now (same size and modification time), is in the cache; `result` as in an item object |
+| `pending` | Not in the cache, but an item of some job for this file is `queued` or `building` |
+| `absent` | Not in the cache and nothing is on its way |
+| `rejected` | The request for this file is not acceptable; `error` as for a rejected item |
+
+`result` is `null` unless `ready`; `error` is `null` unless `rejected`. Errors: `413` `too_many_items`, `422` for a
+malformed body, `422` `duplicate_ref`.
+
+### `GET /api/v1/files/{key}`
+
+The DNG with this cache key, with the same headers as `GET /api/v1/items/{id}/file`. `404` with
+`"code": "not_in_cache"` when there is no such DNG (a `key` is only valid as long as the original has not changed and
+the cache still holds the file; look the file up again). `422` for a key that is not 64 lower-case hex characters.
 
 ## `GET /api/v1/status`
 
