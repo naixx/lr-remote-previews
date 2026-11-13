@@ -94,12 +94,14 @@ The thinnest path through every part, usable for real work.
 ### Stage 2. Background work and delivery on request
 
 - **Server:** jobs survive a restart; states per file with reasons (unsupported format, file missing, converter
-  failed); cancel and retry; a second request for a file already built costs nothing; download of many files in one
-  stream.
-- **Plug-in:** two commands instead of one: «Send to the server» returns at once (Lightroom may be closed
-  afterwards); «Fetch ready smart previews» for the selection or for everything this catalog is waiting for; optional
-  automatic fetch while Lightroom runs; a status dialog with a link to the dashboard; what is pending survives a
-  restart.
+  failed); cancel and retry; a second request for a file already built costs nothing; a lookup that tells which of
+  a list of files are already built, without building; jobs a client can find again by its own identifier; old jobs
+  expire.
+- **Plug-in:** «Send to the server» returns at once (Lightroom may be closed afterwards); «Fetch ready smart
+  previews» for the selection or for everything this catalog sent, resumable, several downloads at once; the
+  send-and-wait command stays; optional automatic fetch while Lightroom runs; a status dialog with retry and a link
+  to the dashboard. (A download of many files in one stream was planned here; several downloads at once do the job
+  without a new format. It comes back only if measurements ask for it.)
 - Done when: 2000 photos are sent, Lightroom is closed, and the next day one command delivers all; an interrupted
   fetch continues; a server restart in the middle loses nothing.
 
