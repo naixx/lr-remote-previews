@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from conftest import Harness, items_by_path, post_job, wait_for, wait_job
+from conftest import Harness, Poller, items_by_path, lookup, post_job, wait_for, wait_job
 from fake_converter import ORIGINAL_HEIGHT, ORIGINAL_WIDTH, dng_bytes
 from lrrp.app import MAX_ITEMS_PER_JOB
 
@@ -27,7 +27,9 @@ def check_download(client: TestClient, item: dict[str, Any], name: str, content:
     assert response.headers["content-length"] == str(len(body))
     digest = hashlib.sha256(body).hexdigest()
     assert response.headers["x-lrrp-sha256"] == digest
+    assert re.fullmatch(r"[0-9a-f]{64}", item["result"]["key"]), item["result"]
     assert item["result"] == {
+        "key": item["result"]["key"],
         "size": len(body),
         "sha256": digest,
         "originalName": name,
@@ -444,6 +446,7 @@ def test_two_jobs_asking_for_the_same_file_build_it_once(harness: Harness) -> No
         two = items_by_path(client, second["job"]["id"])["IMG_0001.ARW"]
         assert one["state"] == two["state"] == "ready"
         assert one["result"] == two["result"]
+        assert one["result"]["key"] == two["result"]["key"]
     assert harness.runs_with("IMG_0001.ARW") == 1
 
 
@@ -600,7 +603,10 @@ def test_client_and_label_are_kept(harness: Harness) -> None:
         assert job["label"] == "Selection"
 
 
-@pytest.mark.parametrize("fields", [{}, {"client": "", "label": ""}, {"client": None}])
+@pytest.mark.parametrize(
+    "fields",
+    [{}, {"client": "", "label": "", "clientId": ""}, {"client": None, "clientId": None}],
+)
 def test_a_missing_or_empty_client_and_label_are_null(
     harness: Harness, fields: dict[str, Any]
 ) -> None:
@@ -608,9 +614,57 @@ def test_a_missing_or_empty_client_and_label_are_null(
         job = post_job(client, ["photo.jpg"], **fields)["job"]
         assert "client" in job and job["client"] is None
         assert "label" in job and job["label"] is None
+        assert "clientId" in job and job["clientId"] is None
         listed = client.get("/api/v1/jobs").json()["jobs"][0]
         assert listed["client"] is None
         assert listed["label"] is None
+        assert listed["clientId"] is None
+
+
+def test_client_id_is_kept_and_filters_the_job_list(harness: Harness) -> None:
+    mine = "c1f0a6e2-7d0b-4c55-9d0e-3f6a1b2c4d5e"
+    other = "x" * 64
+    with harness.client() as client:
+        created = post_job(client, ["photo.jpg"], clientId=mine)
+        assert created["job"]["clientId"] == mine
+        first = created["job"]["id"]
+        foreign = post_job(client, ["photo.jpg"], clientId=other)["job"]["id"]
+        anonymous = post_job(client, ["photo.jpg"])["job"]["id"]
+        second = post_job(client, ["photo.jpg"], clientId=mine, label="Later")["job"]["id"]
+        assert client.get(f"/api/v1/jobs/{first}").json()["job"]["clientId"] == mine
+        items = client.get(f"/api/v1/jobs/{first}/items").json()
+        assert items["job"]["clientId"] == mine
+
+        def ids(**params: Any) -> list[int]:
+            response = client.get("/api/v1/jobs", params=params)
+            assert response.status_code == 200, response.text
+            return [job["id"] for job in response.json()["jobs"]]
+
+        assert ids() == [second, anonymous, foreign, first]
+        assert ids(clientId=mine) == [second, first]
+        assert ids(clientId=other) == [foreign]
+        assert ids(clientId=mine, limit=1) == [second]
+        assert ids(clientId=mine, state="done") == [second, first]
+        assert ids(clientId=mine, state="active") == []
+        # Exact matches only: no prefixes, no case folding, and no job is stored with "".
+        assert ids(clientId=mine[:8]) == []
+        assert ids(clientId=mine.upper()) == []
+        assert ids(clientId="") == []
+        jobs = client.get("/api/v1/jobs", params={"clientId": mine}).json()["jobs"]
+        assert all(job["clientId"] == mine for job in jobs)
+
+
+@pytest.mark.parametrize(
+    ("client_id", "fragment"),
+    [("x" * 65, "clientId: Value should have at most 64"), (7, "clientId")],
+)
+def test_a_bad_client_id_is_refused(harness: Harness, client_id: Any, fragment: str) -> None:
+    with harness.client() as client:
+        body = {"clientId": client_id, "items": [{"ref": "1", "root": "archive", "path": "a.jpg"}]}
+        response = client.post("/api/v1/jobs", json=body)
+        assert response.status_code == 422, response.text
+        assert fragment in response.json()["detail"]
+        assert client.get("/api/v1/jobs").json()["jobs"] == []
 
 
 def test_times_are_utc_seconds_with_a_z(harness: Harness) -> None:
@@ -731,10 +785,302 @@ def test_new_endpoints_need_the_token(harness: Harness, token: str, auth: dict[s
             ("GET", "/api/v1/jobs/1"),
             ("DELETE", "/api/v1/jobs/1"),
             ("GET", "/api/v1/jobs/1/items"),
+            ("POST", "/api/v1/jobs/1/retry"),
             ("GET", "/api/v1/items/1/file"),
+            ("POST", "/api/v1/lookup"),
+            ("GET", "/api/v1/files/" + "0" * 64),
             ("GET", "/api/v1/status"),
         ]:
             response = client.request(method, path)
             assert response.status_code == 401, (method, path)
             assert response.json() == {"detail": "Missing bearer token"}
         assert client.get("/api/v1/status", headers=auth).status_code == 200
+
+
+# --- Retry -----------------------------------------------------------------------------------
+
+
+def retry(client: TestClient, job_id: int, expect: int = 200) -> dict[str, Any]:
+    response = client.post(f"/api/v1/jobs/{job_id}/retry")
+    assert response.status_code == expect, response.text
+    return response.json()
+
+
+def test_retry_builds_the_failed_items_again(harness: Harness) -> None:
+    for name in ("IMG_0001.ARW", "BAD.ARW"):
+        harness.raw(name)
+    harness.switch("FAKE_CONVERTER_FAIL", "BAD.ARW")
+    with harness.client(workers=1) as client:
+        created = post_job(client, ["IMG_0001.ARW", "BAD.ARW"])
+        job_id = created["job"]["id"]
+        poller = Poller(job_id, created["job"]["seq"])
+        done = poller.until_finished(client)
+        assert done["counts"]["failed"] == 1
+        assert done["counts"]["ready"] == 1
+        bad = items_by_path(client, job_id)["BAD.ARW"]
+        assert bad["state"] == "failed"
+        assert bad["error"]["code"] == "converter_failed"
+        before = poller.since
+        runs = len(harness.runs())
+
+        harness.switch("FAKE_CONVERTER_FAIL", None)
+        harness.hold()
+        job = retry(client, job_id)["job"]
+        assert job["state"] == "active"
+        assert job["finished"] is None
+        # Back into the queue, and maybe already taken by the scheduler: one or two changes.
+        assert job["seq"] in (before + 1, before + 2)
+        counts = job["counts"]
+        assert counts["failed"] == 0
+        assert counts["ready"] == 1
+        assert counts["queued"] + counts["building"] == 1
+
+        # A client polling with its old since sees the item go back into the queue.
+        poller.poll(client)
+        again = poller.changes[-1]
+        assert again["path"] == "BAD.ARW"
+        assert again["seq"] > before
+        assert again["state"] in ("queued", "building")
+        assert again["error"] is None
+        assert again["result"] is None
+
+        harness.release()
+        final = poller.until_finished(client)
+        assert final["state"] == "done"
+        assert final["finished"] is not None
+        assert final["counts"]["ready"] == 2
+        assert final["counts"]["failed"] == 0
+        later = [change for change in poller.changes if change["seq"] > before]
+        assert {change["path"] for change in later} == {"BAD.ARW"}
+        assert later[-1]["state"] == "ready"
+        check_download(client, items_by_path(client, job_id)["BAD.ARW"], "BAD.ARW", b"BAD.ARW")
+    assert harness.runs()[runs:] == [["BAD.ARW"]], "only the failed file ran again"
+
+
+def test_a_retried_item_that_fails_again_is_failed_with_the_new_reason(harness: Harness) -> None:
+    harness.raw("BAD.ARW")
+    harness.switch("FAKE_CONVERTER_FAIL", "BAD.ARW")
+    with harness.client(workers=1) as client:
+        job_id = post_job(client, ["BAD.ARW"])["job"]["id"]
+        wait_job(client, job_id)
+        first = items_by_path(client, job_id)["BAD.ARW"]
+        assert first["error"]["code"] == "converter_failed"
+
+        harness.switch("FAKE_CONVERTER_FAIL", None)
+        harness.switch("FAKE_CONVERTER_WRONG_NAME", "BAD.ARW")
+        harness.hold()
+        assert retry(client, job_id)["job"]["state"] == "active"
+        harness.release()
+        job = wait_job(client, job_id)
+        assert job["state"] == "done"
+        assert job["counts"]["failed"] == 1
+        second = items_by_path(client, job_id)["BAD.ARW"]
+        assert second["state"] == "failed"
+        assert second["error"]["code"] == "output_mismatch"
+        assert second["seq"] > first["seq"]
+        assert second["result"] is None
+
+        # And a third time, still failing: the job is active, then done again.
+        harness.hold()
+        assert retry(client, job_id)["job"]["state"] == "active"
+        harness.release()
+        assert wait_job(client, job_id)["counts"]["failed"] == 1
+    assert harness.runs_with("BAD.ARW") == 4, "two in the first round, one per retry"
+
+
+def test_retry_of_a_cancelled_job_is_refused(harness: Harness) -> None:
+    for name in ("BAD.ARW", "IMG_0002.ARW", "IMG_0003.ARW"):
+        harness.raw(name)
+    harness.switch("FAKE_CONVERTER_FAIL", "BAD.ARW")
+    harness.hold("IMG_0002.ARW")
+    with harness.client(workers=1, batch_size=1) as client:
+        job_id = post_job(client, ["BAD.ARW", "IMG_0002.ARW", "IMG_0003.ARW"])["job"]["id"]
+
+        def failed_and_building() -> bool:
+            counts = client.get(f"/api/v1/jobs/{job_id}").json()["job"]["counts"]
+            return counts["failed"] == 1 and counts["building"] == 1
+
+        wait_for(failed_and_building, what="a failed and a building item")
+        cancelled = client.delete(f"/api/v1/jobs/{job_id}").json()["job"]
+        assert cancelled["state"] == "cancelled"
+        body = retry(client, job_id, expect=409)
+        assert body["code"] == "job_cancelled"
+        assert isinstance(body["detail"], str)
+        job = client.get(f"/api/v1/jobs/{job_id}").json()["job"]
+        assert job == cancelled, "nothing changed"
+        harness.release()
+    assert harness.runs_with("BAD.ARW") == 2
+    assert harness.runs_with("IMG_0003.ARW") == 0
+
+
+def test_retry_of_a_job_without_failures_changes_nothing(harness: Harness) -> None:
+    harness.raw("IMG_0001.ARW")
+    with harness.client() as client:
+        job_id = post_job(client, ["IMG_0001.ARW", "photo.jpg"])["job"]["id"]
+        job = wait_job(client, job_id)
+        items = client.get(f"/api/v1/jobs/{job_id}/items").json()["items"]
+        assert retry(client, job_id)["job"] == job
+        assert client.get(f"/api/v1/jobs/{job_id}/items").json()["items"] == items
+        assert retry(client, 999, expect=404) == {"detail": "No such job"}
+    assert harness.runs_with("IMG_0001.ARW") == 1
+
+
+def test_retry_builds_the_file_as_it_is_now(harness: Harness) -> None:
+    for name in ("IMG_0001.ARW", "IMG_0002.ARW", "IMG_0003.ARW"):
+        harness.raw(name)
+    harness.hold("IMG_0001.ARW")
+    with harness.client(workers=1, batch_size=1) as client:
+        job_id = post_job(client, ["IMG_0001.ARW", "IMG_0002.ARW", "IMG_0003.ARW"])["job"]["id"]
+        wait_for(lambda: building(client, job_id), what="the first build")
+        changed = harness.raw("IMG_0002.ARW", b"edited in the meantime")
+        info = changed.stat()
+        os.utime(changed, ns=(info.st_atime_ns, info.st_mtime_ns + 10**9))
+        (harness.originals / "IMG_0003.ARW").unlink()
+        harness.release()
+        wait_job(client, job_id)
+        before = items_by_path(client, job_id)
+        for name in ("IMG_0002.ARW", "IMG_0003.ARW"):
+            assert before[name]["error"]["code"] == "source_changed"
+
+        retry(client, job_id)
+        job = wait_job(client, job_id)
+        assert job["counts"] == {
+            "total": 3,
+            "queued": 0,
+            "building": 0,
+            "ready": 2,
+            "failed": 1,
+            "rejected": 0,
+            "cancelled": 0,
+        }
+        after = items_by_path(client, job_id)
+        edited = after["IMG_0002.ARW"]
+        check_download(client, edited, "IMG_0002.ARW", b"edited in the meantime")
+        [found] = lookup(client, ["IMG_0002.ARW"])
+        assert found["state"] == "ready"
+        assert found["result"] == edited["result"]
+        # A file that is gone fails again, with a new seq.
+        gone = after["IMG_0003.ARW"]
+        assert gone["state"] == "failed"
+        assert gone["error"]["code"] == "source_changed"
+        assert gone["seq"] > before["IMG_0003.ARW"]["seq"]
+    assert harness.runs_with("IMG_0002.ARW") == 1
+    assert harness.runs_with("IMG_0003.ARW") == 0
+
+
+# --- Restarts --------------------------------------------------------------------------------
+
+
+def test_a_restart_in_the_middle_of_a_multi_wave_job_loses_nothing(harness: Harness) -> None:
+    names = [f"IMG_{index:04d}.ARW" for index in range(1, 15)]
+    paths = [f"shoot/{name}" for name in names]
+    for path in paths:
+        harness.raw(path)
+    # Waves of 3 processes x 2 files: 6, 6 and 2 files. The second wave is held.
+    first_wave, second_wave, third_wave = names[:6], names[6:12], names[12:]
+    harness.hold(",".join(second_wave))
+    with harness.client(workers=3, batch_size=2) as client:
+        job_id = post_job(client, paths)["job"]["id"]
+        poller = Poller(job_id)
+
+        def second_wave_running() -> bool:
+            counts = poller.poll(client)["counts"]
+            return counts["ready"] == 6 and counts["building"] == 6 and counts["queued"] == 2
+
+        wait_for(second_wave_running, what="the second wave")
+        # "building" is set before the converter processes exist; wait until they have started.
+        wait_for(
+            lambda: all(harness.runs_with(name) == 1 for name in second_wave),
+            what="the held converters to start",
+        )
+        page = client.get(f"/api/v1/jobs/{job_id}/items", params={"state": "building"}).json()
+        were_building = {item["path"] for item in page["items"]}
+        assert were_building == {f"shoot/{name}" for name in second_wave}
+        before = poller.poll(client)["seq"]
+        assert before == poller.since
+    # The server stopped with the second wave running (its converters were killed) and the
+    # third wave queued.
+    harness.release()
+    with harness.client(workers=3, batch_size=2) as client:
+        job = poller.poll(client)
+        assert job["seq"] > before, "going back to the queue is a state change"
+        changed = {change["path"] for change in poller.changes if change["seq"] > before}
+        assert were_building <= changed
+        final = poller.until_finished(client)
+        assert final["state"] == "done"
+        assert final["seq"] == poller.since
+        assert final["counts"]["ready"] == len(paths)
+        assert final["counts"]["building"] == final["counts"]["queued"] == 0
+        assert poller.last_states() == {path: "ready" for path in paths}
+        everything = client.get(f"/api/v1/jobs/{job_id}/items", params={"limit": 1000}).json()
+        assert {item["state"] for item in everything["items"]} == {"ready"}
+        assert len({item["seq"] for item in everything["items"]}) == len(paths)
+        for item in everything["items"]:
+            check_download(client, item, item["path"].rsplit("/", 1)[-1], item["path"].encode())
+        assert client.get("/api/v1/status").json()["queue"] == {"queued": 0, "building": 0}
+    for name in first_wave + third_wave:
+        assert harness.runs_with(name) == 1, name
+    for name in second_wave:
+        assert harness.runs_with(name) == 2, f"{name}: the interrupted run and one after it"
+    assert list((harness.tmp / "cache" / "work").iterdir()) == []
+
+
+def test_jobs_survive_restarts_with_shared_files_and_a_cancelled_job(harness: Harness) -> None:
+    names = [f"IMG_{index:04d}.ARW" for index in range(1, 8)]
+    for name in names:
+        harness.raw(name)
+    # Waves of 3 files. Everything is held until the three jobs exist, then only the second
+    # wave (files 4, 5 and 6).
+    held = names[3:6]
+    harness.hold()
+    with harness.client(workers=3, batch_size=1) as client:
+        a = post_job(client, names[:5], label="A")["job"]["id"]
+        b = post_job(client, names[3:], label="B")["job"]["id"]
+        c = post_job(client, names[5:], label="C")["job"]["id"]
+        harness.hold(",".join(held))
+        pollers = {job_id: Poller(job_id) for job_id in (a, b, c)}
+
+        def second_wave_running() -> bool:
+            # Building: 4 and 5 of A, 4, 5 and 6 of B, 6 of C. Queued: 7 of B and of C.
+            queue = client.get("/api/v1/status").json()["queue"]
+            return queue == {"queued": 2, "building": 6}
+
+        wait_for(second_wave_running, what="the second wave")
+        # "building" is set before the converter processes exist; wait until each of them has
+        # really started, or the stop below kills them before they are counted as a run.
+        wait_for(
+            lambda: all(harness.runs_with(name) == 1 for name in held),
+            what="the held converters to start",
+        )
+        # Cancelling C cancels only its queued item (7); 6 is building and finishes.
+        assert client.delete(f"/api/v1/jobs/{c}").json()["job"]["counts"]["cancelled"] == 1
+        for poller in pollers.values():
+            poller.poll(client)
+        before = {job_id: poller.since for job_id, poller in pollers.items()}
+    harness.release()
+    with harness.client(workers=3, batch_size=1) as client:
+        for job_id in (a, b):
+            assert pollers[job_id].until_finished(client)["state"] == "done"
+        wait_for(lambda: pollers[c].poll(client)["counts"]["building"] == 0, what="job C")
+        pollers[c].poll(client)
+        jobs = {job["id"]: job for job in client.get("/api/v1/jobs").json()["jobs"]}
+    assert jobs[a]["counts"]["ready"] == 5
+    assert jobs[b]["counts"]["ready"] == 4
+    assert jobs[c]["state"] == "cancelled"
+    assert jobs[c]["counts"]["ready"] == 1, "the item that was building finished"
+    assert jobs[c]["counts"]["cancelled"] == 1
+    for job_id, poller in pollers.items():
+        assert jobs[job_id]["seq"] == poller.since > before[job_id]
+    assert pollers[c].last_states() == {"IMG_0006.ARW": "ready", "IMG_0007.ARW": "cancelled"}
+    for name in names:
+        assert harness.runs_with(name) == (2 if name in held else 1), name
+
+    # One more restart, with nothing to do, changes nothing.
+    with harness.client(workers=3, batch_size=1) as client:
+        again = {job["id"]: job for job in client.get("/api/v1/jobs").json()["jobs"]}
+        for poller in pollers.values():
+            changes = len(poller.changes)
+            poller.poll(client)
+            assert len(poller.changes) == changes
+    assert again == jobs
+    assert len(harness.runs()) == 3 + 3 + 3 + 1, "nothing was built a third time"

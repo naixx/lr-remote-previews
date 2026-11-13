@@ -20,7 +20,8 @@ WORK_DIR_NAME = "work"
 WORK_PREFIXES = ("batch-", "warm-up-")
 """Prefixes of the folders the runner makes under the work folder; only those are cleaned up."""
 
-_KEY = re.compile(r"[0-9a-f]{64}")
+CACHE_KEY = re.compile(r"[0-9a-f]{64}")
+"""A cache key: SHA-256 in lower-case hex (``lrrp.sources.cache_key``)."""
 
 
 @dataclass(frozen=True)
@@ -48,7 +49,7 @@ class Cache:
                 shutil.rmtree(entry, ignore_errors=True)
 
     def path(self, key: str) -> Path:
-        if not _KEY.fullmatch(key):
+        if not CACHE_KEY.fullmatch(key):
             raise ValueError(f"not a cache key: {key!r}")
         return self.root / key[:2] / f"{key}.dng"
 

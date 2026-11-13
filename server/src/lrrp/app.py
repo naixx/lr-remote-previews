@@ -7,6 +7,7 @@ with the application's lifespan (``Services``).
 import asyncio
 import logging
 import mimetypes
+import re
 import secrets
 import time
 from collections.abc import AsyncIterator, Sequence
@@ -14,7 +15,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, Protocol
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
@@ -23,7 +24,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import AfterValidator, BaseModel, Field
 
 from lrrp import __version__, converter, sources
-from lrrp.cache import Cache
+from lrrp.cache import CACHE_KEY, Cache, CacheEntry
 from lrrp.display import Display, Xvfb
 from lrrp.runner import Runner, RunnerConfig, default_config
 from lrrp.scheduler import Scheduler
@@ -117,6 +118,8 @@ def _valid_unicode(value: str) -> str:
 
 
 Text = Annotated[str, AfterValidator(_valid_unicode)]
+Ref = Annotated[Text, Field(max_length=64)]
+ShortText = Annotated[Text, Field(max_length=100)]
 
 
 class Health(BaseModel):
@@ -139,6 +142,7 @@ class Capabilities(BaseModel):
     extensions: list[str]
     preview_long_edge: int = Field(serialization_alias="previewLongEdge")
     max_items_per_job: int = Field(serialization_alias="maxItemsPerJob")
+    job_retention_days: int = Field(serialization_alias="jobRetentionDays")
 
 
 class Info(BaseModel):
@@ -152,14 +156,19 @@ class Info(BaseModel):
 
 
 class ItemRequest(BaseModel):
-    ref: Annotated[Text, Field(max_length=64)]
+    ref: Ref
     root: Text
     path: Text
 
 
 class JobRequest(BaseModel):
-    client: Annotated[Text, Field(max_length=100)] | None = None
-    label: Annotated[Text, Field(max_length=100)] | None = None
+    client: ShortText | None = None
+    client_id: Ref | None = Field(default=None, alias="clientId")
+    label: ShortText | None = None
+    items: list[ItemRequest] = Field(min_length=1)
+
+
+class LookupRequest(BaseModel):
     items: list[ItemRequest] = Field(min_length=1)
 
 
@@ -169,6 +178,7 @@ class ItemError(BaseModel):
 
 
 class ItemResult(BaseModel):
+    key: str
     size: int
     sha256: str
     original_name: str | None = Field(serialization_alias="originalName")
@@ -201,6 +211,7 @@ class JobOut(BaseModel):
     id: int
     label: str | None
     client: str | None
+    client_id: str | None = Field(serialization_alias="clientId")
     state: JobState
     created: str
     finished: str | None
@@ -225,6 +236,17 @@ class ItemPage(BaseModel):
     job: JobOut
     items: list[ItemOut]
     more: bool
+
+
+class LookupItem(BaseModel):
+    ref: str
+    state: Literal["ready", "pending", "absent", "rejected"]
+    error: ItemError | None
+    result: ItemResult | None
+
+
+class LookupAnswer(BaseModel):
+    items: list[LookupItem]
 
 
 class QueueStatus(BaseModel):
@@ -289,7 +311,13 @@ class Services:
             log.info("put %d item(s) left building by the last run back into the queue", recovered)
         runner = Runner(runner_config, cache.new_work_dir, display)
         scheduler = Scheduler(
-            store, cache, runner, settings.roots, settings.workers, settings.batch_size
+            store,
+            cache,
+            runner,
+            settings.roots,
+            settings.workers,
+            settings.batch_size,
+            job_retention_days=settings.job_retention_days,
         )
         scheduler.start()
         return cls(store=store, cache=cache, runner=runner, scheduler=scheduler, display=display)
@@ -359,35 +387,15 @@ def get_info(settings: SettingsDep) -> Info:
             extensions=list(converter.RAW_EXTENSIONS),
             preview_long_edge=converter.PREVIEW_LONG_EDGE,
             max_items_per_job=MAX_ITEMS_PER_JOB,
+            job_retention_days=settings.job_retention_days,
         ),
     )
 
 
 @api.post("/v1/jobs", status_code=201)
 def create_job(body: JobRequest, settings: SettingsDep, services: ServicesDep) -> JobCreated:
-    if len(body.items) > MAX_ITEMS_PER_JOB:
-        raise ApiError(
-            413,
-            f"A job may have at most {MAX_ITEMS_PER_JOB} items; this one has {len(body.items)}",
-            "too_many_items",
-        )
-    seen: set[str] = set()
-    for item in body.items:
-        if item.ref in seen:
-            raise ApiError(
-                422, f"The ref {item.ref!r} is used by more than one item", "duplicate_ref"
-            )
-        seen.add(item.ref)
-
-    roots = {root.id: root for root in settings.roots}
-    recipe = converter.recipe()
-    checked = [sources.resolve(roots, item.root, item.path) for item in body.items]
-    keys = [
-        sources.cache_key(found.root, found.path, found.size, found.mtime_ns, recipe)
-        if isinstance(found, sources.Source)
-        else None
-        for found in checked
-    ]
+    _check_requests(body.items, "A job")
+    checked, keys = _identify(settings, body.items)
     entries = services.store.cache_entries(key for key in keys if key is not None)
     new_items: list[NewItem] = []
     to_build = False
@@ -425,9 +433,13 @@ def create_job(body: JobRequest, settings: SettingsDep, services: ServicesDep) -
             "Adobe DNG Converter is not installed on the server, so these files cannot be built",
             "converter_not_installed",
         )
-    # An empty label or client counts as none (null in the job object).
+    # An empty label, client or clientId counts as none (null in the job object).
     job, items = services.store.create_job(
-        body.client or None, body.label or None, new_items, time.time()
+        body.client or None,
+        body.label or None,
+        new_items,
+        time.time(),
+        client_id=body.client_id or None,
     )
     if to_build:
         services.scheduler.wake()
@@ -439,8 +451,10 @@ def list_jobs(
     services: ServicesDep,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     state: JobState | None = None,
+    client_id: Annotated[str | None, Query(alias="clientId")] = None,
 ) -> JobList:
-    return JobList(jobs=[_job_out(job) for job in services.store.list_jobs(limit, state)])
+    jobs = services.store.list_jobs(limit, state, client_id)
+    return JobList(jobs=[_job_out(job) for job in jobs])
 
 
 @api.get("/v1/jobs/{job_id}")
@@ -464,6 +478,30 @@ def get_job_items(
     )
 
 
+@api.post("/v1/jobs/{job_id}/retry")
+def retry_job(job_id: int, settings: SettingsDep, services: ServicesDep) -> JobEnvelope:
+    job = _existing_job(services, job_id)
+    if job.state == "cancelled":
+        raise _job_cancelled()
+    # Each failed item is tried again with its file as it is now, so that an item that failed
+    # because its file changed gets built from the changed file.
+    failed = services.store.items_of_job(job_id, "failed")
+    checked, keys = _identify(settings, failed)
+    identities = {
+        item.id: (key, found.size, found.mtime_ns)
+        for item, found, key in zip(failed, checked, keys, strict=True)
+        if isinstance(found, sources.Source) and key is not None
+    }
+    outcome = services.store.retry_job(job_id, identities, time.time())
+    if outcome == "unknown":
+        raise _no_job()
+    if outcome == "cancelled":
+        raise _job_cancelled()
+    if outcome == "retried":
+        services.scheduler.wake()
+    return JobEnvelope(job=_job_out(_existing_job(services, job_id)))
+
+
 @api.delete("/v1/jobs/{job_id}")
 def cancel_job(job_id: int, services: ServicesDep) -> JobEnvelope:
     if not services.store.cancel_job(job_id, time.time()):
@@ -479,14 +517,48 @@ def get_item_file(item_id: int, services: ServicesDep) -> FileResponse:
     if item.state != "ready" or item.result is None:
         raise ApiError(409, f"The item is {item.state}, not ready", "not_ready")
     entry = item.result
-    path = services.cache.path(entry.key)
     if not services.cache.has(entry.key, entry.size):
-        log.error("item %d is ready, but its DNG %s is missing or has another size", item_id, path)
-        raise ApiError(404, "The DNG is no longer in the server's cache", "not_in_cache")
-    name = PurePosixPath(item.path).stem + ".dng"
-    return FileResponse(
-        path, media_type=DNG_MEDIA_TYPE, filename=name, headers={SHA256_HEADER: entry.sha256}
-    )
+        log.error(
+            "item %d is ready, but its DNG %s is missing or has another size",
+            item_id,
+            services.cache.path(entry.key),
+        )
+        raise _not_in_cache()
+    return _dng_response(services, entry, PurePosixPath(item.path).stem)
+
+
+@api.post("/v1/lookup")
+def lookup(body: LookupRequest, settings: SettingsDep, services: ServicesDep) -> LookupAnswer:
+    _check_requests(body.items, "A lookup")
+    checked, keys = _identify(settings, body.items)
+    wanted = [key for key in keys if key is not None]
+    entries = services.store.cache_entries(wanted)
+    ready = {key for key, entry in entries.items() if services.cache.has(key, entry.size)}
+    pending = services.store.pending_keys(key for key in wanted if key not in ready)
+    answers: list[LookupItem] = []
+    for item, found, key in zip(body.items, checked, keys, strict=True):
+        if isinstance(found, sources.Rejection):
+            error = ItemError(code=found.code, message=found.message)
+            answers.append(LookupItem(ref=item.ref, state="rejected", error=error, result=None))
+        elif key in ready:
+            result = _result_out(entries[key])
+            answers.append(LookupItem(ref=item.ref, state="ready", error=None, result=result))
+        else:
+            state: Literal["pending", "absent"] = "pending" if key in pending else "absent"
+            answers.append(LookupItem(ref=item.ref, state=state, error=None, result=None))
+    return LookupAnswer(items=answers)
+
+
+@api.get("/v1/files/{key}", response_class=FileResponse)
+def get_file(key: str, services: ServicesDep) -> FileResponse:
+    if not CACHE_KEY.fullmatch(key):
+        raise ApiError(422, "A cache key is 64 lower-case hexadecimal characters")
+    entry = services.store.cache_entry(key)
+    if entry is None or not services.cache.has(key, entry.size):
+        raise _not_in_cache()
+    # The DNG records its original's name (checked against the request when it was built).
+    original = re.split(r"[\\/]", entry.original_name or "")[-1]
+    return _dng_response(services, entry, PurePosixPath(original).stem or key)
 
 
 @api.get("/v1/status")
@@ -525,12 +597,71 @@ def _no_job() -> ApiError:
     return ApiError(404, "No such job")
 
 
+def _job_cancelled() -> ApiError:
+    return ApiError(409, "The job is cancelled; ask for its files in a new job", "job_cancelled")
+
+
+def _not_in_cache() -> ApiError:
+    return ApiError(404, "The DNG is not in the server's cache", "not_in_cache")
+
+
+class _Requested(Protocol):
+    @property
+    def root(self) -> str: ...
+
+    @property
+    def path(self) -> str: ...
+
+
+def _check_requests(items: Sequence[ItemRequest], what: str) -> None:
+    """The limits of a list of requested files: their number and unique refs."""
+    if len(items) > MAX_ITEMS_PER_JOB:
+        raise ApiError(
+            413,
+            f"{what} may have at most {MAX_ITEMS_PER_JOB} items; this one has {len(items)}",
+            "too_many_items",
+        )
+    seen: set[str] = set()
+    for item in items:
+        if item.ref in seen:
+            raise ApiError(
+                422, f"The ref {item.ref!r} is used by more than one item", "duplicate_ref"
+            )
+        seen.add(item.ref)
+
+
+def _identify(
+    settings: Settings, items: Sequence[_Requested]
+) -> tuple[list[sources.Source | sources.Rejection], list[str | None]]:
+    """Check each requested file as it is now; the cache key of each acceptable one."""
+    resolver = sources.Resolver({root.id: root for root in settings.roots})
+    recipe = converter.recipe()
+    checked = [resolver.resolve(item.root, item.path) for item in items]
+    keys = [
+        sources.cache_key(found.root, found.path, found.size, found.mtime_ns, recipe)
+        if isinstance(found, sources.Source)
+        else None
+        for found in checked
+    ]
+    return checked, keys
+
+
+def _dng_response(services: Services, entry: CacheEntry, stem: str) -> FileResponse:
+    return FileResponse(
+        services.cache.path(entry.key),
+        media_type=DNG_MEDIA_TYPE,
+        filename=stem + ".dng",
+        headers={SHA256_HEADER: entry.sha256},
+    )
+
+
 def _job_out(job: Job) -> JobOut:
     counts = {state: job.counts.get(state, 0) for state in ITEM_STATES}
     return JobOut(
         id=job.id,
         label=job.label,
         client=job.client,
+        client_id=job.client_id,
         state=job.state,
         created=_iso(job.created),
         finished=None if job.finished is None else _iso(job.finished),
@@ -549,13 +680,7 @@ def _item_out(item: Item) -> ItemOut:
         error = ItemError(code=item.error_code, message=item.error_message or "")
     result = None
     if item.state == "ready" and item.result is not None:
-        result = ItemResult(
-            size=item.result.size,
-            sha256=item.result.sha256,
-            original_name=item.result.original_name,
-            original_width=item.result.original_width,
-            original_height=item.result.original_height,
-        )
+        result = _result_out(item.result)
     return ItemOut(
         id=item.id,
         ref=item.ref,
@@ -565,6 +690,17 @@ def _item_out(item: Item) -> ItemOut:
         seq=item.seq,
         error=error,
         result=result,
+    )
+
+
+def _result_out(entry: CacheEntry) -> ItemResult:
+    return ItemResult(
+        key=entry.key,
+        size=entry.size,
+        sha256=entry.sha256,
+        original_name=entry.original_name,
+        original_width=entry.original_width,
+        original_height=entry.original_height,
     )
 
 

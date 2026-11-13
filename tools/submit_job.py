@@ -38,12 +38,21 @@ class Client:
         if data is not None:
             headers["Content-Type"] = "application/json"
         request = urllib.request.Request(self.base + path, data=data, headers=headers, method=method)
-        try:
-            with self.opener.open(request, timeout=60) as response:
-                return response.read(), {k.lower(): v for k, v in response.headers.items()}
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", "replace")
-            raise SystemExit(f"error: {method} {path}: HTTP {exc.code}: {detail}") from None
+        # A GET is repeated for a while when the server cannot be reached, so that following a job
+        # survives a restart of the server. Other methods are tried once.
+        deadline = time.monotonic() + (120 if method == "GET" else 0)
+        while True:
+            try:
+                with self.opener.open(request, timeout=60) as response:
+                    return response.read(), {k.lower(): v for k, v in response.headers.items()}
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode("utf-8", "replace")
+                raise SystemExit(f"error: {method} {path}: HTTP {exc.code}: {detail}") from None
+            except (urllib.error.URLError, ConnectionError, TimeoutError) as exc:
+                if time.monotonic() >= deadline:
+                    raise SystemExit(f"error: {method} {path}: {exc}") from None
+                print(f"  server not reachable ({exc}); trying again")
+                time.sleep(2)
 
     def json(self, method: str, path: str, body: object | None = None) -> dict:
         return json.loads(self.request(method, path, body)[0])

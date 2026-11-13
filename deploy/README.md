@@ -64,7 +64,7 @@ docker run -d --name lr-remote-previews \
 
 | Path | What | Access |
 |---|---|---|
-| `/data` | The server's state: the database `lrrp.sqlite3` (jobs, items, cache index), the Wine prefix with the converter (`/data/wine`) and the home folder (`/data/home`) | read-write |
+| `/data` | The server's state: the database `lrrp.sqlite3` (jobs, items, cache index; jobs are deleted `LRRP_JOB_RETENTION_DAYS` days after they finish), the Wine prefix with the converter (`/data/wine`) and the home folder (`/data/home`) | read-write |
 | `/cache` | Built smart previews (`<key[0:2]>/<key>.dng`) and the converter's temporary batch folders (`work/`, emptied at every start) | read-write |
 | `/sources` | The originals, one mount per root, for example `/sources/archive` | **read-only** |
 

@@ -27,6 +27,7 @@ DEFAULT_CACHE_DIR = "/cache"
 DEFAULT_WEB_DIR = "/app/web"
 DEFAULT_BATCH_SIZE = 8
 MAX_BATCH_SIZE = 64
+DEFAULT_JOB_RETENTION_DAYS = 30
 
 ROOT_ID_PATTERN = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
 ROOT_ID_RULE = "1 to 32 lower-case letters, digits, '-' or '_', starting with a letter or digit"
@@ -58,6 +59,7 @@ class Settings:
     roots: tuple[Root, ...]
     workers: int = 1
     batch_size: int = DEFAULT_BATCH_SIZE
+    job_retention_days: int = DEFAULT_JOB_RETENTION_DAYS
 
     @classmethod
     def from_env(
@@ -100,6 +102,7 @@ class Settings:
                 get("LRRP_WORKERS"), available_cpus() if cpu_count is None else cpu_count
             ),
             batch_size=_parse_batch_size(get("LRRP_BATCH_SIZE")),
+            job_retention_days=_parse_job_retention_days(get("LRRP_JOB_RETENTION_DAYS")),
         )
 
 
@@ -153,6 +156,20 @@ def _parse_batch_size(value: str | None) -> int:
     if not 1 <= size <= MAX_BATCH_SIZE:
         raise SettingsError(f"LRRP_BATCH_SIZE must be between 1 and {MAX_BATCH_SIZE}, got {size}")
     return size
+
+
+def _parse_job_retention_days(value: str | None) -> int:
+    if value is None:
+        return DEFAULT_JOB_RETENTION_DAYS
+    try:
+        days = int(value)
+    except ValueError:
+        raise SettingsError(
+            f"LRRP_JOB_RETENTION_DAYS must be a whole number of days, got {value!r}"
+        ) from None
+    if days < 1:
+        raise SettingsError(f"LRRP_JOB_RETENTION_DAYS must be at least 1, got {days}")
+    return days
 
 
 def _reject_dirs_under_roots(dirs: Mapping[str, Path], roots: tuple[Root, ...]) -> None:

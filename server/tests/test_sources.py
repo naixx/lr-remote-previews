@@ -1,3 +1,5 @@
+import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -6,6 +8,7 @@ from lrrp.settings import Root
 from lrrp.sources import (
     MAX_PATH_LENGTH,
     Rejection,
+    Resolver,
     Source,
     cache_key,
     identity,
@@ -142,6 +145,75 @@ def test_a_root_reached_through_a_symbolic_link(root: Root, tmp_path: Path) -> N
     _symlink(tmp_path / "mounted", root.path)
     linked = Root(id="archive", path=tmp_path / "mounted", label="Archive")
     assert isinstance(resolve({"archive": linked}, "archive", "2026/shoot/IMG_0001.ARW"), Source)
+
+
+def _check_by_real_path(root: Root, path: str) -> Source | Rejection:
+    """The check as server 0.2.0 made it for an acceptable path: the real path of every file,
+    then a ``stat``. The resolver must answer the same."""
+    file = locate(root, path)
+    if file is None:
+        return Rejection("bad_path", "The path leads outside its root")
+    try:
+        info = os.stat(file)
+    except (FileNotFoundError, NotADirectoryError):
+        return Rejection("not_found", "No such file")
+    except (OSError, ValueError):
+        return Rejection("not_found", "The file cannot be read")
+    if not stat.S_ISREG(info.st_mode):
+        return Rejection("not_a_file", "Not a regular file")
+    return Source("archive", path, file, info.st_size, info.st_mtime_ns)
+
+
+def test_one_resolver_for_many_files_answers_like_separate_checks(
+    root: Root, tmp_path: Path
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "IMG_0009.ARW").write_bytes(b"x")
+    (root.path / "2026" / "shoot" / "IMG_0002.ARW").write_bytes(b"more raw bytes")
+    (root.path / "2026" / "shoot" / "folder.ARW").mkdir()
+    _symlink(root.path / "escape", outside)
+    _symlink(root.path / "2026" / "alias.ARW", root.path / "2026" / "shoot" / "IMG_0002.ARW")
+    _symlink(root.path / "2026" / "shoot" / "out.ARW", outside / "IMG_0009.ARW")
+    paths = [
+        "2026/shoot/IMG_0001.ARW",
+        "2026/shoot/IMG_0002.ARW",
+        "2026/shoot/IMG_0003.ARW",
+        "2026/shoot/folder.ARW",
+        "2026/shoot/out.ARW",
+        "2026/alias.ARW",
+        "escape/IMG_0009.ARW",
+        "escape/IMG_0010.ARW",
+        "escape/deeper/IMG_0011.ARW",
+        "missing/IMG_0001.ARW",
+    ]
+    roots = {"archive": root}
+    resolver = Resolver(roots)
+    together = [resolver.resolve("archive", path) for path in paths * 2]
+    assert together == [resolve(roots, "archive", path) for path in paths * 2]
+    assert together == [_check_by_real_path(root, path) for path in paths * 2]
+    codes = [found.code if isinstance(found, Rejection) else "ok" for found in together]
+    assert codes == 2 * [
+        "ok",
+        "ok",
+        "not_found",
+        "not_a_file",
+        "bad_path",
+        "ok",
+        "bad_path",
+        "bad_path",
+        "bad_path",
+        "not_found",
+    ]
+
+
+def test_a_name_with_a_drive_is_a_bad_path_on_windows(root: Root) -> None:
+    (root.path / "x.ARW").write_bytes(b"x")
+    found = Resolver({"archive": root}).resolve("archive", "C:x.ARW")
+    assert isinstance(found, Rejection)
+    # On Windows "C:x.ARW" names x.ARW in the current folder of drive C:; elsewhere it is a
+    # plain (missing) name.
+    assert found.code == ("bad_path" if os.name == "nt" else "not_found")
 
 
 def test_identity_of_missing_and_odd_files(tmp_path: Path) -> None:

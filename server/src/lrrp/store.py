@@ -6,25 +6,33 @@ change runs in one ``BEGIN IMMEDIATE`` transaction.
 The change counter (``seq``, ``docs/protocol.md``): every state change of an item, including its
 creation, adds one to its job's ``seq`` and gives the item the new value. So the items of a job
 have distinct ``seq`` values, and a client that asks for ``seq > since`` sees every change once.
+The counter lives in the database, so a restart of the server never sets it back.
+
+Schema versions (``PRAGMA user_version``): 1 is server 0.2.0; 2 (server 0.3.0) adds
+``jobs.client_id``. An older database is brought up to date in place when it is opened; nothing
+is dropped.
 """
 
 import sqlite3
 import threading
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 from lrrp.cache import CacheEntry
 
 DATABASE_NAME = "lrrp.sqlite3"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 ITEM_STATES = ("queued", "building", "ready", "failed", "rejected", "cancelled")
 JOB_STATES = ("active", "done", "cancelled")
 PENDING_STATES = ("queued", "building")
 
-_SCHEMA = """
+RetryOutcome = Literal["unknown", "cancelled", "unchanged", "retried"]
+
+_TABLES = """
 CREATE TABLE IF NOT EXISTS jobs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     client TEXT,
@@ -32,7 +40,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     state TEXT NOT NULL,
     created REAL NOT NULL,
     finished REAL,
-    seq INTEGER NOT NULL DEFAULT 0
+    seq INTEGER NOT NULL DEFAULT 0,
+    client_id TEXT
 );
 CREATE TABLE IF NOT EXISTS items (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -50,9 +59,6 @@ CREATE TABLE IF NOT EXISTS items (
     updated REAL NOT NULL,
     UNIQUE (job_id, ref)
 );
-CREATE INDEX IF NOT EXISTS items_by_job ON items (job_id, seq);
-CREATE INDEX IF NOT EXISTS items_by_state ON items (state, cache_key);
-CREATE INDEX IF NOT EXISTS items_by_key ON items (cache_key, state);
 CREATE TABLE IF NOT EXISTS cache (
     key TEXT PRIMARY KEY,
     size INTEGER NOT NULL,
@@ -67,7 +73,18 @@ CREATE TABLE IF NOT EXISTS builds (
     finished REAL NOT NULL,
     ok INTEGER NOT NULL
 );
+"""
+
+_ADDED_COLUMNS = (("jobs", "client_id", "TEXT"),)
+"""Columns added after schema 1: (table, column, type). Added to an older database in place."""
+
+_INDEXES = """
+CREATE INDEX IF NOT EXISTS items_by_job ON items (job_id, seq);
+CREATE INDEX IF NOT EXISTS items_by_state ON items (state, cache_key);
+CREATE INDEX IF NOT EXISTS items_by_key ON items (cache_key, state);
 CREATE INDEX IF NOT EXISTS builds_by_time ON builds (finished);
+CREATE INDEX IF NOT EXISTS jobs_by_client ON jobs (client_id, id);
+CREATE INDEX IF NOT EXISTS jobs_by_finished ON jobs (finished);
 """
 
 _ITEM_COLUMNS = """
@@ -104,6 +121,7 @@ class Job:
     finished: float | None
     seq: int
     counts: dict[str, int] = field(default_factory=dict)
+    client_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -154,7 +172,10 @@ class Store:
         self._db = sqlite3.connect(path, check_same_thread=False, isolation_level=None, timeout=30)
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA journal_mode = WAL")
-        self._db.execute("PRAGMA synchronous = NORMAL")
+        # FULL: a committed change survives a power cut. With NORMAL the last commits can be lost,
+        # and a job's seq would then reuse values a client has already seen, so that client would
+        # miss changes. The cost is one fsync per commit, a few per second at most here.
+        self._db.execute("PRAGMA synchronous = FULL")
         self._db.execute("PRAGMA foreign_keys = ON")
         (version,) = self._db.execute("PRAGMA user_version").fetchone()
         if version > SCHEMA_VERSION:
@@ -164,9 +185,20 @@ class Store:
                 f"{SCHEMA_VERSION})"
             )
         if version < SCHEMA_VERSION:
-            self._db.executescript(
-                f"BEGIN; {_SCHEMA} PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;"
-            )
+            self._migrate()
+
+    def _migrate(self) -> None:
+        """Create what is missing (tables, columns, indexes) in one transaction."""
+        with self._transaction() as db:
+            for statement in _statements(_TABLES):
+                db.execute(statement)
+            for table, column, kind in _ADDED_COLUMNS:
+                present = {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
+                if column not in present:
+                    db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
+            for statement in _statements(_INDEXES):
+                db.execute(statement)
+            db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def close(self) -> None:
         with self._lock:
@@ -190,23 +222,33 @@ class Store:
     # --- Jobs and items, for the API ------------------------------------------------------------
 
     def create_job(
-        self, client: str | None, label: str | None, items: Sequence[NewItem], now: float
+        self,
+        client: str | None,
+        label: str | None,
+        items: Sequence[NewItem],
+        now: float,
+        client_id: str | None = None,
     ) -> tuple[Job, list[Item]]:
         """Add a job; return it and its items as created, before the scheduler can touch them."""
         with self._lock:
-            job_id = self._insert_job(client, label, items, now)
+            job_id = self._insert_job(client, label, client_id, items, now)
             job = self.get_job(job_id)
             assert job is not None
             return job, self.items_of_job(job_id)
 
     def _insert_job(
-        self, client: str | None, label: str | None, items: Sequence[NewItem], now: float
+        self,
+        client: str | None,
+        label: str | None,
+        client_id: str | None,
+        items: Sequence[NewItem],
+        now: float,
     ) -> int:
         with self._transaction() as db:
             cursor = db.execute(
-                "INSERT INTO jobs (client, label, state, created, seq)"
-                " VALUES (?, ?, 'active', ?, 0)",
-                (client, label, now),
+                "INSERT INTO jobs (client, label, client_id, state, created, seq)"
+                " VALUES (?, ?, ?, 'active', ?, 0)",
+                (client, label, client_id, now),
             )
             job_id = cursor.lastrowid or 0
             db.executemany(
@@ -239,15 +281,25 @@ class Store:
             rows = self._query("SELECT * FROM jobs WHERE id = ?", (job_id,))
             return self._jobs_with_counts(rows)[0] if rows else None
 
-    def list_jobs(self, limit: int, state: str | None = None) -> list[Job]:
+    def list_jobs(
+        self, limit: int, state: str | None = None, client_id: str | None = None
+    ) -> list[Job]:
+        """Jobs, newest first; only those in ``state`` and with ``client_id``, when given."""
+        sql = "SELECT * FROM jobs"
+        conditions: list[str] = []
+        params: list[object] = []
+        if state is not None:
+            conditions.append("state = ?")
+            params.append(state)
+        if client_id is not None:
+            conditions.append("client_id = ?")
+            params.append(client_id)
+        if conditions:
+            sql += " WHERE " + " AND ".join(conditions)
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
         with self._lock:
-            if state is None:
-                rows = self._query("SELECT * FROM jobs ORDER BY id DESC LIMIT ?", (limit,))
-            else:
-                rows = self._query(
-                    "SELECT * FROM jobs WHERE state = ? ORDER BY id DESC LIMIT ?", (state, limit)
-                )
-            return self._jobs_with_counts(rows)
+            return self._jobs_with_counts(self._query(sql, params))
 
     def _jobs_with_counts(self, rows: list[sqlite3.Row]) -> list[Job]:
         counts: dict[int, dict[str, int]] = {row["id"]: {} for row in rows}
@@ -269,13 +321,19 @@ class Store:
                 finished=row["finished"],
                 seq=row["seq"],
                 counts=counts[row["id"]],
+                client_id=row["client_id"],
             )
             for row in rows
         ]
 
-    def items_of_job(self, job_id: int) -> list[Item]:
-        """All items of a job in the order they were requested."""
-        rows = self._query(f"SELECT {_ITEM_COLUMNS} WHERE i.job_id = ? ORDER BY i.id", (job_id,))
+    def items_of_job(self, job_id: int, state: str | None = None) -> list[Item]:
+        """The items of a job (only those in ``state``, when given) in request order."""
+        sql = f"SELECT {_ITEM_COLUMNS} WHERE i.job_id = ?"
+        params: list[object] = [job_id]
+        if state is not None:
+            sql += " AND i.state = ?"
+            params.append(state)
+        rows = self._query(sql + " ORDER BY i.id", params)
         return [_item(row) for row in rows]
 
     def items_since(
@@ -312,6 +370,56 @@ class Store:
             ).fetchall()
             _change(db, rows, "cancelled", now)
         return True
+
+    def retry_job(
+        self, job_id: int, identities: Mapping[int, tuple[str, int, int]], now: float
+    ) -> RetryOutcome:
+        """Put the failed items of a job back into the queue and make the job active again.
+
+        ``identities`` maps item ids to the file as it is now: (cache key, size, mtime in ns).
+        A failed item missing from it keeps the identity it was requested with (its file is
+        gone or no longer acceptable, so the build fails again with ``source_changed``).
+        """
+        with self._transaction() as db:
+            row = db.execute("SELECT state FROM jobs WHERE id = ?", (job_id,)).fetchone()
+            if row is None:
+                return "unknown"
+            if row["state"] == "cancelled":
+                return "cancelled"
+            rows = db.execute(
+                "SELECT id, job_id FROM items WHERE job_id = ? AND state = 'failed'", (job_id,)
+            ).fetchall()
+            if not rows:
+                return "unchanged"
+            db.executemany(
+                "UPDATE items SET cache_key = ?, size = ?, mtime_ns = ? WHERE id = ?",
+                [(*identities[item_id], item_id) for item_id, _ in rows if item_id in identities],
+            )
+            db.execute("UPDATE jobs SET state = 'active', finished = NULL WHERE id = ?", (job_id,))
+            _change(db, rows, "queued", now)
+        return "retried"
+
+    def delete_expired_jobs(self, finished_before: float) -> int:
+        """Delete the jobs that left ``active`` before this time, with their items.
+
+        A cancelled job whose last items are still building is kept until they finish. The cache
+        index is not touched. Returns the number of jobs deleted.
+        """
+        with self._transaction() as db:
+            ids = [
+                job_id
+                for (job_id,) in db.execute(
+                    "SELECT id FROM jobs WHERE state != 'active' AND finished < ?"
+                    " AND NOT EXISTS (SELECT 1 FROM items WHERE items.job_id = jobs.id"
+                    " AND items.state IN ('queued', 'building'))",
+                    (finished_before,),
+                )
+            ]
+            for chunk in _chunks(ids):
+                marks = ",".join("?" * len(chunk))
+                db.execute(f"DELETE FROM items WHERE job_id IN ({marks})", chunk)
+                db.execute(f"DELETE FROM jobs WHERE id IN ({marks})", chunk)
+        return len(ids)
 
     # --- The queue, for the scheduler -----------------------------------------------------------
 
@@ -395,6 +503,19 @@ class Store:
 
     def cache_entry(self, key: str) -> CacheEntry | None:
         return self.cache_entries([key]).get(key)
+
+    def pending_keys(self, keys: Iterable[str]) -> set[str]:
+        """The cache keys among ``keys`` that an item of any job is queued or building for."""
+        found: set[str] = set()
+        for chunk in _chunks(list(set(keys))):
+            marks = ",".join("?" * len(chunk))
+            for (key,) in self._query(
+                "SELECT DISTINCT cache_key FROM items"
+                f" WHERE cache_key IN ({marks}) AND state IN ('queued', 'building')",
+                chunk,
+            ):
+                found.add(key)
+        return found
 
     def status(self, recent_since: float, today_since: float) -> Status:
         with self._lock:
@@ -493,3 +614,8 @@ def _item(row: sqlite3.Row) -> Item:
 def _chunks(values: list[str] | list[int]) -> Iterator[list]:
     for start in range(0, len(values), _CHUNK):
         yield values[start : start + _CHUNK]
+
+
+def _statements(script: str) -> list[str]:
+    """The statements of a script of plain DDL (no ``;`` inside a statement)."""
+    return [statement.strip() for statement in script.split(";") if statement.strip()]

@@ -29,7 +29,7 @@ def test_info_without_a_token_configured(make_client: MakeClient) -> None:
     assert response.status_code == 200
     assert response.json() == {
         "name": "LR Remote Previews",
-        "version": "0.2.0",
+        "version": "0.3.0",
         "api": 1,
         "auth": "none",
         "converter": {"installed": False, "path": DEFAULT_CONVERTER_EXE, "version": None},
@@ -38,8 +38,14 @@ def test_info_without_a_token_configured(make_client: MakeClient) -> None:
             "extensions": list(RAW_EXTENSIONS),
             "previewLongEdge": 2560,
             "maxItemsPerJob": 5000,
+            "jobRetentionDays": 30,
         },
     }
+
+
+def test_info_reports_the_job_retention(make_client: MakeClient) -> None:
+    capabilities = make_client(LRRP_JOB_RETENTION_DAYS="7").get("/api/v1/info").json()
+    assert capabilities["capabilities"]["jobRetentionDays"] == 7
 
 
 def test_info_with_the_right_token(
@@ -160,7 +166,10 @@ def test_openapi_describes_the_api(make_client: MakeClient) -> None:
         "/api/v1/jobs",
         "/api/v1/jobs/{job_id}",
         "/api/v1/jobs/{job_id}/items",
+        "/api/v1/jobs/{job_id}/retry",
         "/api/v1/items/{item_id}/file",
+        "/api/v1/lookup",
+        "/api/v1/files/{key}",
         "/api/v1/status",
     ]:
         assert path in paths

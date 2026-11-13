@@ -21,6 +21,11 @@ Environment variables (names are base names with extension, comma-separated, any
 - ``FAKE_CONVERTER_SKIP`` names it writes nothing for, exiting with code 0.
 - ``FAKE_CONVERTER_HANG`` names that make the run hang.
 - ``FAKE_CONVERTER_WRONG_NAME`` names whose DNG records another original name.
+- ``FAKE_CONVERTER_HOLD`` names (``*``: every name): a run with one of them waits, before it
+  writes anything, for as long as the name stays listed. Only useful with the switches folder.
+- ``FAKE_CONVERTER_SWITCHES`` a folder: a file in it named like one of the name variables above
+  adds the names it holds (same format), read at every run (and while a run is held), so that a
+  test can change the behaviour while the server runs.
 - ``FAKE_CONVERTER_FRESH_PREFIX=1``: behave like the real converter in a Wine prefix where it
   never ran: while ``Camera Raw GPU Config.txt`` is missing from the GPU folder of
   ``$WINEPREFIX`` and ``$USER``, abort with exit code 3 after writing that file.
@@ -104,7 +109,27 @@ def native_path(argument: str) -> Path:
 
 
 def names(variable: str) -> set[str]:
-    return {name.strip().casefold() for name in os.environ.get(variable, "").split(",") if name}
+    text = os.environ.get(variable, "")
+    switches = os.environ.get("FAKE_CONVERTER_SWITCHES")
+    if switches:
+        text += "," + switch(Path(switches, variable))
+    return {name.strip().casefold() for name in text.split(",") if name.strip()}
+
+
+def switch(file: Path) -> str:
+    for _ in range(100):
+        try:
+            return file.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return ""
+        except PermissionError:  # Windows, while the test replaces the file
+            time.sleep(0.01)
+    raise SystemExit(f"fake converter: cannot read {file}")
+
+
+def held(inputs: Sequence[Path]) -> bool:
+    listed = names("FAKE_CONVERTER_HOLD")
+    return "*" in listed or bool(listed & {path.name.casefold() for path in inputs})
 
 
 def parse(arguments: list[str]) -> tuple[Path, list[Path]]:
@@ -170,6 +195,8 @@ def main(arguments: list[str]) -> int:
             return 1
         if names("FAKE_CONVERTER_HANG") & {path.name.casefold() for path in inputs}:
             time.sleep(3600)
+        while held(inputs):
+            time.sleep(0.02)
         time.sleep(float(os.environ.get("FAKE_CONVERTER_DELAY", "0")))
         failed = False
         for path in inputs:

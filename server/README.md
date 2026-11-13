@@ -3,7 +3,7 @@
 The server part of LR Remote Previews: a FastAPI application (Python package `lrrp`) that runs next to the photo
 originals, answers the plug-in and the dashboard, and serves the built dashboard. It takes jobs (lists of raw files),
 builds their smart preview DNGs with Adobe DNG Converter under Wine in the background, keeps them in a cache and
-serves them (stage 1 of the [plan](../docs/plan.md)).
+serves them, by job or by a lookup that needs no job (stages 1 and 2 of the [plan](../docs/plan.md)).
 
 In production it runs in the container built from [`deploy/`](../deploy/). This page is about running it from source.
 
@@ -41,7 +41,9 @@ The tests need neither Wine nor Xvfb. `tests/fake_converter.py` stands in for Ad
 command line (`-lossy -side 2560 -p0 -d Z:\out Z:\in\x.ARW ...`), writes a small DNG with the identity tags for each
 input, exits with code 1 when an input is missing, and can be told through environment variables to fail a file,
 skip an output, hang, record a wrong original name, behave like a fresh Wine prefix, or record how many copies of
-itself run at the same time. The end-to-end tests drive the HTTP API with it.
+itself run at the same time. Through files in a switches folder a test can change that behaviour while the server
+runs, and hold the runs of chosen files until it lets them go (`Harness.switch`, `Harness.hold`). The end-to-end
+tests drive the HTTP API with it, including restarts of the server in the middle of a job.
 
 ## Settings
 
@@ -60,6 +62,7 @@ Environment variables. An empty variable counts as unset.
 | `LRRP_CONVERTER_EXE` | `C:\Program Files\Adobe\Adobe DNG Converter\Adobe DNG Converter.exe` | The converter, as a Windows path inside the Wine prefix |
 | `LRRP_WORKERS` | `auto` | Converter processes run side by side: `auto` or a number. `auto` is 6 with 16 or more CPU threads, 4 with 8 or more, 3 with 6 or more, else 1. **2 is refused**: two converter processes side by side take twice the CPU time per photo (measured; the cause is unknown) |
 | `LRRP_BATCH_SIZE` | `8` | Files given to one converter process at a time, 1 to 64 |
+| `LRRP_JOB_RETENTION_DAYS` | `30` | Days a job is kept after it finished (or was cancelled), a whole number of at least 1. Its DNGs stay in the cache |
 
 The converter is found when that Windows path exists in the prefix: `C:\x\y` is looked up as
 `<LRRP_WINEPREFIX>/drive_c/x/y`. Adobe DNG Converter is not part of this project; see
@@ -112,8 +115,25 @@ the entry.
   `Camera Raw GPU Config.txt` next to the `TempDisableGPU2` marker), warms the prefix up with one run on an input that
   does not exist: the first run in a fresh prefix always aborts. If the file still does not appear, the wave's items
   fail with `converter_failed` and the converter's last output.
-- **A restart** puts items that were `building` back into the queue. Cancelling a job cancels its queued items; items
-  already building finish and stay in the cache.
+- **A restart** puts items that were `building` back into the queue (a state change, so pollers see it) and builds
+  them again: only the files of the interrupted wave run twice. Jobs, items and the per-job `seq` live in the
+  database, so a client that polls with the `since` it had before the restart still gets every change. Cancelling a
+  job cancels its queued items; items already building finish and stay in the cache.
+- **Retry** puts the failed items of a job back into the queue and makes the job active again. Each file is checked
+  again as it is now, so an item that failed with `source_changed` is built from the changed file; a file that is
+  gone or no longer acceptable fails again with `source_changed`.
+- **A lookup** answers, for a list of files, whether the DNG of each file as it is now (same size and modification
+  time) is in the cache, is on its way (an item of any job is queued or building for it), or neither. It stores and
+  queues nothing. Each file costs one `stat` (the real paths of the root and of each folder are looked up once per
+  request), the cache index and the queue are asked in batches, and a cached DNG is `stat`ed to make sure it is
+  still there.
+- **Job retention.** At start and then once a day the scheduler deletes the jobs (with their items) that finished
+  or were cancelled more than `LRRP_JOB_RETENTION_DAYS` days ago; a cancelled job whose last items are still
+  building waits for them. The cache and its index are not touched, so the DNGs stay available through a lookup or
+  a new job, and their keys stay valid. Job ids are never reused.
+- **The database** carries a schema version. A database of an older server is brought up to date in place at start
+  (0.3.0 adds a column for `clientId` to a 0.2.0 database); nothing is dropped. A database of a newer server stops
+  the start with a message.
 
 ## API
 
@@ -123,12 +143,15 @@ The contract is [docs/protocol.md](../docs/protocol.md); every call in it is imp
 |---|---|---|
 | `GET /healthz` | never | `{"status": "ok"}` |
 | `GET /api/v1/info` | when configured | Name, version, protocol version, auth mode, converter state, roots, capabilities |
-| `POST /api/v1/jobs` | when configured | Create a job from a list of files |
-| `GET /api/v1/jobs` | when configured | Jobs, newest first |
+| `POST /api/v1/jobs` | when configured | Create a job from a list of files, optionally with the client's `clientId` |
+| `GET /api/v1/jobs` | when configured | Jobs, newest first; `state` and `clientId` filter them |
 | `GET /api/v1/jobs/{id}` | when configured | One job |
 | `GET /api/v1/jobs/{id}/items` | when configured | A job's items changed since `since` |
+| `POST /api/v1/jobs/{id}/retry` | when configured | Queue a job's failed items again |
 | `DELETE /api/v1/jobs/{id}` | when configured | Cancel a job |
 | `GET /api/v1/items/{id}/file` | when configured | The DNG of a ready item |
+| `POST /api/v1/lookup` | when configured | For a list of files: `ready` (with the result), `pending`, `absent` or `rejected`, without a job |
+| `GET /api/v1/files/{key}` | when configured | The DNG with this cache key (`result.key` of an item or a lookup) |
 | `GET /api/v1/status` | when configured | Queue, workers, rate, today's counts, cache, active jobs |
 | `GET /docs`, `GET /openapi.json` | no | Generated OpenAPI description |
 
@@ -137,7 +160,7 @@ The contract is [docs/protocol.md](../docs/protocol.md); every call in it is imp
 ```json
 {
   "name": "LR Remote Previews",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "api": 1,
   "auth": "token",
   "converter": {
@@ -146,14 +169,19 @@ The contract is [docs/protocol.md](../docs/protocol.md); every call in it is imp
     "version": null
   },
   "roots": [{"id": "archive", "label": "Archive", "available": true}],
-  "capabilities": {"extensions": [".arw", ".cr2", "..."], "previewLongEdge": 2560, "maxItemsPerJob": 5000}
+  "capabilities": {
+    "extensions": [".arw", ".cr2", "..."],
+    "previewLongEdge": 2560,
+    "maxItemsPerJob": 5000,
+    "jobRetentionDays": 30
+  }
 }
 ```
 
 `roots[].available` is `true` when the root's folder exists. A missing or wrong token gives `401` with
 `{"detail": "Missing bearer token"}` or `{"detail": "Invalid token"}`. Unknown paths under `/api/` give a JSON `404`.
 Every error body has a `detail` text; validation errors (`422`) are described in one line, such as
-`items[0].ref: String should have at most 64 characters`.
+`items[0].path: Field required`.
 
 Every other `GET` path serves the dashboard from `LRRP_WEB_DIR`: an existing file is sent as it is, anything else gets
 `index.html`, so the dashboard's own routes work on reload.

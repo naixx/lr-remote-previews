@@ -186,7 +186,7 @@ be built. `413` with `"code": "too_many_items"`. `422` for a malformed body; dup
 ### `GET /api/v1/jobs`
 
 Query: `limit` (1–200, default 50), `state` (`active`, `done`, `cancelled`; default all), `clientId` (only the
-jobs created with this `clientId`). `200`
+jobs created with exactly this `clientId`; an empty value matches nothing). `200`
 `{"jobs": [ …job objects, newest first… ]}`.
 
 ### `GET /api/v1/jobs/{id}`
@@ -224,7 +224,9 @@ it is built again).
 
 Gives every `failed` item of the job another attempt: they become `queued` (each with a new `seq`), and the job
 becomes `active` again. Items in other states are untouched. `200` `{"job": { … }}`. A job without failed items is
-returned unchanged. `409` with `"code": "job_cancelled"` for a cancelled job.
+returned unchanged. `409` with `"code": "job_cancelled"` for a cancelled job. Each retried file is checked again
+as it is now, so an item that failed with `source_changed` is built from the changed file; a file that is gone
+fails again. The answer may already show a retried item as `building`.
 
 ### `DELETE /api/v1/jobs/{id}`
 

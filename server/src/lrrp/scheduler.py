@@ -11,6 +11,8 @@ One thread for the whole server, so the event loop never waits for the converter
 
 Items of a wave that a shutdown interrupts stay ``building``; the next start puts them back into
 the queue (``Store.recover``).
+
+The same thread deletes expired jobs: at start and then once a day, between waves.
 """
 
 import logging
@@ -21,13 +23,18 @@ from collections.abc import Callable, Mapping, Sequence
 from lrrp import sources
 from lrrp.cache import Cache
 from lrrp.runner import BatchFile, FileResult, Runner, plan_wave
-from lrrp.settings import Root
+from lrrp.settings import DEFAULT_JOB_RETENTION_DAYS, Root
 from lrrp.store import Candidate, Store
 
 log = logging.getLogger(__name__)
 
 IDLE_WAIT = 10.0
 """Seconds the scheduler sleeps when the queue is empty, unless woken earlier."""
+
+DAY = 24 * 3600.0
+
+EXPIRY_INTERVAL = DAY
+"""Seconds between two clean-ups of expired jobs."""
 
 
 class Scheduler:
@@ -40,6 +47,7 @@ class Scheduler:
         workers: int,
         batch_size: int,
         clock: Callable[[], float] = time.time,
+        job_retention_days: int = DEFAULT_JOB_RETENTION_DAYS,
     ) -> None:
         self._store = store
         self._cache = cache
@@ -48,13 +56,30 @@ class Scheduler:
         self._workers = workers
         self._batch_size = batch_size
         self._clock = clock
+        self._job_retention = job_retention_days * DAY
+        self._next_expiry = float("-inf")
         self._wake = threading.Event()
         self._stopping = threading.Event()
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
+        """Delete expired jobs, then start the thread."""
+        self.expire_jobs_if_due()
         self._thread = threading.Thread(target=self._loop, name="lrrp-scheduler", daemon=True)
         self._thread.start()
+
+    def expire_jobs_if_due(self) -> int:
+        """Delete the jobs that left ``active`` more than the retention time ago, if the last
+        clean-up was ``EXPIRY_INTERVAL`` or longer ago. Returns the number of jobs deleted."""
+        now = self._clock()
+        if now < self._next_expiry:
+            return 0
+        self._next_expiry = now + EXPIRY_INTERVAL
+        deleted = self._store.delete_expired_jobs(now - self._job_retention)
+        if deleted:
+            days = self._job_retention / DAY
+            log.info("deleted %d job(s) that finished more than %g days ago", deleted, days)
+        return deleted
 
     def wake(self) -> None:
         """Something was queued: look at the queue now."""
@@ -73,6 +98,10 @@ class Scheduler:
     def _loop(self) -> None:
         while not self._stopping.is_set():
             self._wake.clear()
+            try:
+                self.expire_jobs_if_due()
+            except Exception:
+                log.exception("cannot delete expired jobs; trying again in a day")
             try:
                 worked = self.run_wave()
             except Exception:

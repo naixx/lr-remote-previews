@@ -28,6 +28,7 @@ def test_defaults() -> None:
     assert settings.roots == ()
     assert settings.batch_size == 8
     assert settings.workers in (1, 3, 4, 6)
+    assert settings.job_retention_days == 30
 
 
 @pytest.mark.parametrize(
@@ -71,6 +72,21 @@ def test_batch_size() -> None:
 def test_bad_batch_size(value: str, message: str) -> None:
     with pytest.raises(SettingsError, match=message):
         Settings.from_env({"LRRP_BATCH_SIZE": value})
+
+
+def test_job_retention_days() -> None:
+    assert Settings.from_env({"LRRP_JOB_RETENTION_DAYS": "1"}).job_retention_days == 1
+    assert Settings.from_env({"LRRP_JOB_RETENTION_DAYS": "365"}).job_retention_days == 365
+    assert Settings.from_env({"LRRP_JOB_RETENTION_DAYS": ""}).job_retention_days == 30
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [("0", "at least 1"), ("-5", "at least 1"), ("1.5", "whole number"), ("month", "whole number")],
+)
+def test_bad_job_retention_days(value: str, message: str) -> None:
+    with pytest.raises(SettingsError, match=f"LRRP_JOB_RETENTION_DAYS must be .*{message}"):
+        Settings.from_env({"LRRP_JOB_RETENTION_DAYS": value})
 
 
 @pytest.mark.parametrize("variable", ["LRRP_DATA_DIR", "LRRP_CACHE_DIR"])

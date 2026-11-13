@@ -29,6 +29,8 @@ services:
     #   # 2 is refused. Fewer processes: less heat and noise, slower builds.
     #   LRRP_WORKERS: auto
     #   LRRP_BATCH_SIZE: "8"
+    #   # Days a finished job is kept; its DNGs stay in the cache.
+    #   LRRP_JOB_RETENTION_DAYS: "30"
     ports:
       - "8787:8787"
     volumes:
