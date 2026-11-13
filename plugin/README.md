@@ -53,14 +53,15 @@ All under **Library > Plug-in Extras**.
   `failed`) and the smart preview before and after. It does what **Library > Previews > Build Smart Previews** does
   for those photos, so try it on a test catalog.
 
-The plug-in logs to `LRRemotePreviews.log` in Lightroom's log folder (in recent versions the `LrClassicLogs` folder in
-your Documents folder). The access token is never logged.
+The plug-in logs to `LRRemotePreviews.log` in Lightroom's log folder. With Lightroom Classic 15.6 on Windows that is
+`%LOCALAPPDATA%\Adobe\Lightroom\Logs\LrClassicLogs`; older versions used an `LrClassicLogs` folder in your Documents
+folder. The access token is never logged.
 
 ## Layout
 
 All modules sit at the top level of `LRRemotePreviews.lrplugin/`, because Lightroom's `require` takes a script name,
 not a path: the plug-in sandbox of Lightroom Classic 15.6 contains the error "require: invalid characters in script
-name" for names with `/`, `\` or `:` (seen in its code; not yet tried with a running plug-in). The pure modules say so
+name" for names with `/`, `\` or `:` (seen in its code, not tried). Top-level modules do load by bare name there (tried). The pure modules say so
 in their header and have no `import` of Lightroom namespaces, so they run under plain Lua 5.1:
 
 | Module | Pure | Purpose |
@@ -113,3 +114,17 @@ pull request on which Lightroom version and platform.
   pixel size), place it into the smart preview store under a temporary name and rename it (never over an existing
   file), call `buildSmartPreview()` so Lightroom registers it, and show a summary.
 - More than one path mapping.
+
+## What has been tried in Lightroom
+
+Lightroom Classic 15.6 on Windows, 2026-11-14, version 0.1.0 of the plug-in:
+
+| What | Result |
+|---|---|
+| Adding the plug-in in the Plug-in Manager; the settings section; saving the settings | works |
+| «Test connection» against a server with a token | works |
+| «Server status...» | works |
+| «Diagnostics: smart preview report (all photos)» | works |
+| «Diagnostics: try buildSmartPreview on selected photos» | not tried in this plug-in (the same code ran in the earlier probe plug-in) |
+| A wrong token, an unreachable server, a server without a token | not tried |
+| macOS, other Lightroom versions | not tried |

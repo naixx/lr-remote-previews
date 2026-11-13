@@ -1,5 +1,6 @@
--- Thin wrapper over LrLogger. Messages go to LRRemotePreviews.log in Lightroom's log folder
--- (in recent versions: the LrClassicLogs folder inside the user's Documents folder).
+-- Thin wrapper over LrLogger. Messages go to LRRemotePreviews.log in Lightroom's log folder. Seen with
+-- Lightroom Classic 15.6 on Windows: %LOCALAPPDATA%\Adobe\Lightroom\Logs\LrClassicLogs (older versions used a
+-- LrClassicLogs folder inside the user's Documents folder).
 -- Usage: local Log = require 'Log'; Log.info('built %d previews', n)
 local LrLogger = import 'LrLogger'
 
