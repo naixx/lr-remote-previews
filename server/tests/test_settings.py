@@ -5,7 +5,7 @@ import pytest
 import yaml
 
 from lrrp.converter import DEFAULT_CONVERTER_EXE
-from lrrp.settings import Root, Settings, SettingsError
+from lrrp.settings import Root, Settings, SettingsError, auto_workers
 
 
 def write_config(tmp_path: Path, data: Any) -> Path:
@@ -26,6 +26,60 @@ def test_defaults() -> None:
     assert settings.converter_exe == DEFAULT_CONVERTER_EXE
     assert settings.converter_exe.endswith(r"\Adobe DNG Converter\Adobe DNG Converter.exe")
     assert settings.roots == ()
+    assert settings.batch_size == 8
+    assert settings.workers in (1, 3, 4, 6)
+
+
+@pytest.mark.parametrize(
+    ("cpus", "workers"),
+    [(1, 1), (4, 1), (5, 1), (6, 3), (7, 3), (8, 4), (15, 4), (16, 6), (64, 6)],
+)
+def test_workers_auto(cpus: int, workers: int) -> None:
+    assert Settings.from_env({}, cpu_count=cpus).workers == workers
+    assert Settings.from_env({"LRRP_WORKERS": "auto"}, cpu_count=cpus).workers == workers
+    assert Settings.from_env({"LRRP_WORKERS": "AUTO"}, cpu_count=cpus).workers == workers
+    assert auto_workers(cpus) == workers
+
+
+@pytest.mark.parametrize("value", ["1", "3", "4", "6", "12"])
+def test_workers_explicit(value: str) -> None:
+    assert Settings.from_env({"LRRP_WORKERS": value}, cpu_count=2).workers == int(value)
+
+
+def test_two_workers_are_refused() -> None:
+    with pytest.raises(SettingsError, match=r"LRRP_WORKERS=2 is not allowed.*twice the CPU time"):
+        Settings.from_env({"LRRP_WORKERS": "2"})
+
+
+@pytest.mark.parametrize(
+    ("value", "message"), [("0", "at least 1"), ("-3", "at least 1"), ("many", "'auto' or a")]
+)
+def test_bad_workers(value: str, message: str) -> None:
+    with pytest.raises(SettingsError, match=message):
+        Settings.from_env({"LRRP_WORKERS": value})
+
+
+def test_batch_size() -> None:
+    assert Settings.from_env({"LRRP_BATCH_SIZE": "1"}).batch_size == 1
+    assert Settings.from_env({"LRRP_BATCH_SIZE": "64"}).batch_size == 64
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [("0", "between 1 and 64"), ("65", "between 1 and 64"), ("eight", "must be a number")],
+)
+def test_bad_batch_size(value: str, message: str) -> None:
+    with pytest.raises(SettingsError, match=message):
+        Settings.from_env({"LRRP_BATCH_SIZE": value})
+
+
+@pytest.mark.parametrize("variable", ["LRRP_DATA_DIR", "LRRP_CACHE_DIR"])
+def test_server_folders_inside_a_root_are_refused(tmp_path: Path, variable: str) -> None:
+    config = write_config(tmp_path, {"roots": [{"id": "archive", "path": str(tmp_path / "a")}]})
+    with pytest.raises(SettingsError, match=f"{variable} .* is inside the root 'archive'"):
+        Settings.from_env({"LRRP_CONFIG": str(config), variable: str(tmp_path / "a" / "x")})
+    settings = Settings.from_env({"LRRP_CONFIG": str(config), variable: str(tmp_path / "b")})
+    assert len(settings.roots) == 1
 
 
 def test_environment_overrides_everything() -> None:

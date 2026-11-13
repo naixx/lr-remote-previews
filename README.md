@@ -2,7 +2,7 @@
 
 Build Lightroom Classic smart previews on the machine that holds your originals, not on the computer you edit on.
 
-**Status: early development (stage 0 of the [plan](docs/plan.md)).** Nothing here is ready for use yet. The idea
+**Status: early development (stage 1 of the [plan](docs/plan.md) in progress).** Nothing here is ready for use yet. The idea
 itself is proven by experiment; see [docs/research/smart-previews.md](docs/research/smart-previews.md).
 
 ## The problem

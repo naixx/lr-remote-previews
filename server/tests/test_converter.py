@@ -6,10 +6,16 @@ from lrrp.converter import (
     DEFAULT_CONVERTER_EXE,
     PREVIEW_LONG_EDGE,
     RAW_EXTENSIONS,
+    base_name_key,
     build_command,
+    converter_arguments,
+    converter_options,
+    gpu_config_path,
+    gpu_folder,
     is_drive_c_path,
     is_installed,
     prefix_path,
+    recipe,
     wine_path,
 )
 
@@ -161,3 +167,49 @@ def test_raw_extensions() -> None:
     )
     assert set(RAW_EXTENSIONS) == {f".{ext}" for ext in expected.split(" ")}
     assert PREVIEW_LONG_EDGE == 2560
+
+
+def test_gpu_folder_matches_the_entrypoint() -> None:
+    # deploy/entrypoint.sh: "$WINEPREFIX/drive_c/users/$USER" +
+    # "/AppData/Roaming/Adobe/CameraRaw/GPU/Adobe DNG Converter"
+    prefix = PurePosixPath("/data/wine")
+    folder = gpu_folder(Path(prefix), "lrrp")
+    assert folder.as_posix().endswith(
+        "/data/wine/drive_c/users/lrrp/AppData/Roaming/Adobe/CameraRaw/GPU/Adobe DNG Converter"
+    )
+    assert gpu_config_path(Path(prefix), "lrrp") == folder / "Camera Raw GPU Config.txt"
+    assert gpu_config_path(Path("/p"), "someone").parent == gpu_folder(Path("/p"), "someone")
+
+
+def test_the_entrypoint_creates_the_marker_in_that_folder() -> None:
+    entrypoint = Path(__file__).resolve().parents[2] / "deploy" / "entrypoint.sh"
+    if not entrypoint.is_file():
+        pytest.skip("deploy/entrypoint.sh is not next to the server")
+    text = entrypoint.read_text(encoding="utf-8")
+    assert 'marker_dir="$profile/AppData/Roaming/Adobe/CameraRaw/GPU/Adobe DNG Converter"' in text
+    assert '"$WINEPREFIX/drive_c/users/$USER"' in text
+    assert 'export USER="${USER:-lrrp}"' in text
+
+
+def test_options_and_recipe() -> None:
+    assert converter_options() == ["-lossy", "-side", "2560", "-p0"]
+    assert converter_options(1024) == ["-lossy", "-side", "1024", "-p0"]
+    assert recipe() == "adobe-dng-converter -lossy -side 2560 -p0"
+    assert recipe(1024) != recipe()
+
+
+def test_converter_arguments_with_another_path_form() -> None:
+    arguments = converter_arguments(
+        [Path("/s/a.nef"), "/s/b.nef"], "/out", to_converter_path=lambda path: f"<{path}>"
+    )
+    assert arguments[:5] == ["-lossy", "-side", "2560", "-p0", "-d"]
+    assert arguments[5] == "</out>"
+    assert arguments[6:] == [f"<{Path('/s/a.nef')}>", "</s/b.nef>"]
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [("/s/IMG_0001.ARW", "img_0001"), (Path("x/IMG_0001.CR2"), "img_0001"), ("a.b.nef", "a.b")],
+)
+def test_base_name_key(path: str | Path, expected: str) -> None:
+    assert base_name_key(path) == expected

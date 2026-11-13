@@ -1,0 +1,220 @@
+"""The background scheduler: takes queued files in waves, runs the converter, publishes results.
+
+One thread for the whole server, so the event loop never waits for the converter. A wave:
+
+1. take up to ``workers * batch_size`` distinct files from the head of the queue (two jobs that
+   ask for the same file share one build); a file already in the cache becomes ready at once;
+2. make sure the converter can run (``Runner.prepare``: display, warm-up of a fresh prefix);
+3. check every source again (changed or gone: ``source_changed``), plan the batches, mark the
+   items ``building`` and run the batches together;
+4. publish what succeeded, retry once what failed as a batch, one file per process, publish that.
+
+Items of a wave that a shutdown interrupts stay ``building``; the next start puts them back into
+the queue (``Store.recover``).
+"""
+
+import logging
+import threading
+import time
+from collections.abc import Callable, Mapping, Sequence
+
+from lrrp import sources
+from lrrp.cache import Cache
+from lrrp.runner import BatchFile, FileResult, Runner, plan_wave
+from lrrp.settings import Root
+from lrrp.store import Candidate, Store
+
+log = logging.getLogger(__name__)
+
+IDLE_WAIT = 10.0
+"""Seconds the scheduler sleeps when the queue is empty, unless woken earlier."""
+
+
+class Scheduler:
+    def __init__(
+        self,
+        store: Store,
+        cache: Cache,
+        runner: Runner,
+        roots: Sequence[Root],
+        workers: int,
+        batch_size: int,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
+        self._store = store
+        self._cache = cache
+        self._runner = runner
+        self._roots: Mapping[str, Root] = {root.id: root for root in roots}
+        self._workers = workers
+        self._batch_size = batch_size
+        self._clock = clock
+        self._wake = threading.Event()
+        self._stopping = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._loop, name="lrrp-scheduler", daemon=True)
+        self._thread.start()
+
+    def wake(self) -> None:
+        """Something was queued: look at the queue now."""
+        self._wake.set()
+
+    def stop(self, timeout: float = 30.0) -> None:
+        """Kill running converters, finish the current step and end the thread."""
+        self._stopping.set()
+        self._wake.set()
+        self._runner.abort()
+        if self._thread is not None:
+            self._thread.join(timeout)
+            if self._thread.is_alive():
+                log.error("the scheduler did not stop within %g s", timeout)
+
+    def _loop(self) -> None:
+        while not self._stopping.is_set():
+            self._wake.clear()
+            try:
+                worked = self.run_wave()
+            except Exception:
+                log.exception("the scheduler failed; trying again shortly")
+                # Only this thread makes items building, and it is between waves now.
+                try:
+                    self._store.recover(self._clock())
+                except Exception:
+                    log.exception("cannot put the building items back into the queue")
+                self._stopping.wait(5.0)
+                continue
+            if not worked:
+                self._wake.wait(IDLE_WAIT)
+
+    def run_wave(self) -> bool:
+        """Run one wave. Returns False when the queue was empty."""
+        candidates = self._store.queued_candidates(self._workers * self._batch_size)
+        if not candidates:
+            return False
+        entries = self._store.cache_entries(c.key for c in candidates)
+        waiting: list[Candidate] = []
+        for candidate in candidates:
+            entry = entries.get(candidate.key)
+            if entry is not None and self._cache.has(candidate.key, entry.size):
+                self._store.complete(candidate.key, None, self._clock())
+            else:
+                waiting.append(candidate)
+        if not waiting:
+            return True
+
+        problem = self._runner.prepare()
+        if self._stopping.is_set():
+            return True
+        if problem is not None:
+            keys = [c.key for c in waiting]
+            self._store.mark_building(keys, self._clock())
+            for key in keys:
+                self._store.fail(key, "converter_failed", problem, self._clock())
+            return True
+
+        files, changed = self._check_sources(waiting)
+        batches, _later = plan_wave(files, self._workers, self._batch_size)
+        planned = [file for batch in batches for file in batch]
+        self._store.mark_building([f.key for f in planned] + changed, self._clock())
+        for key in changed:
+            self._fail_changed(key)
+        if not batches:
+            return True
+
+        started = time.monotonic()
+        results = self._runner.run(batches, final=False)
+        if self._stopping.is_set():
+            return True
+        retry = self._publish(results)
+        built = sum(result.ok for result in results)
+        log.info(
+            "wave: %d file(s) in %d converter process(es), %d built, %d to retry, %.1f s",
+            len(planned),
+            len(batches),
+            built,
+            len(retry),
+            time.monotonic() - started,
+        )
+        while retry and not self._stopping.is_set():
+            files, changed = self._check_files(retry)
+            for key in changed:
+                self._fail_changed(key)
+            batches, retry = plan_wave(files, self._workers, 1)
+            if not batches:
+                break
+            results = self._runner.run(batches, final=True)
+            if self._stopping.is_set():
+                return True
+            self._publish(results)
+        return True
+
+    def _check_sources(self, candidates: Sequence[Candidate]) -> tuple[list[BatchFile], list[str]]:
+        """The files whose source is unchanged since the request, and the keys of the others."""
+        files: list[BatchFile] = []
+        changed: list[str] = []
+        for candidate in candidates:
+            requested = (candidate.size, candidate.mtime_ns)
+            root = self._roots.get(candidate.root)
+            file = sources.locate(root, candidate.path) if root is not None else None
+            if file is None or sources.identity(file) != requested:
+                changed.append(candidate.key)
+                continue
+            name = candidate.path.rsplit("/", 1)[-1]
+            files.append(BatchFile(key=candidate.key, file=file, name=name, identity=requested))
+        return files, changed
+
+    @staticmethod
+    def _check_files(files: Sequence[BatchFile]) -> tuple[list[BatchFile], list[str]]:
+        unchanged: list[BatchFile] = []
+        changed: list[str] = []
+        for file in files:
+            if sources.identity(file.file) == file.identity:
+                unchanged.append(file)
+            else:
+                changed.append(file.key)
+        return unchanged, changed
+
+    def _publish(self, results: Sequence[FileResult]) -> list[BatchFile]:
+        """Store the results; return the files to run again on their own."""
+        retry: list[BatchFile] = []
+        try:
+            for result in results:
+                key = result.file.key
+                if result.retry:
+                    retry.append(result.file)
+                elif result.ok and result.output is not None and result.tags is not None:
+                    # The source must not have changed while the converter read it.
+                    if sources.identity(result.file.file) != result.file.identity:
+                        self._fail_changed(key)
+                        continue
+                    try:
+                        entry = self._cache.store(key, result.output, result.tags, self._clock())
+                    except OSError as exc:
+                        log.error("cannot store the DNG for %s in the cache: %s", result.file, exc)
+                        self._store.fail(
+                            key,
+                            "converter_failed",
+                            "The server could not store the DNG in its cache",
+                            self._clock(),
+                        )
+                        continue
+                    self._store.complete(key, entry, self._clock())
+                else:
+                    self._store.fail(
+                        key,
+                        result.error or "converter_failed",
+                        result.message or "Adobe DNG Converter failed",
+                        self._clock(),
+                    )
+        finally:
+            self._runner.discard(results)
+        return retry
+
+    def _fail_changed(self, key: str) -> None:
+        self._store.fail(
+            key,
+            "source_changed",
+            "The file changed or disappeared after it was requested",
+            self._clock(),
+        )

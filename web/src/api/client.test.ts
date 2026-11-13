@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { authHeaderOf, jsonResponse, mockFetch, sampleInfo } from '../test/fixtures';
+import {
+  authHeaderOf,
+  busyStatus,
+  jsonResponse,
+  mockFetch,
+  sampleInfo,
+  sampleJob,
+  sampleJobs,
+} from '../test/fixtures';
 import { createApiClient } from './client';
 import { ApiError } from './errors';
 
@@ -101,5 +109,78 @@ describe('createApiClient().getInfo', () => {
     );
     const error = await captureError(createApiClient({ fetch: fetchMock }).getInfo());
     expect(error).toMatchObject({ kind: 'bad-response', status: 200 });
+  });
+});
+
+describe('createApiClient().getStatus', () => {
+  it('returns the checked status on success, with the token', async () => {
+    const fetchMock = mockFetch().mockResolvedValue(jsonResponse(busyStatus()));
+
+    const status = await createApiClient({ token: 'secret-token', fetch: fetchMock }).getStatus();
+
+    expect(status).toEqual(busyStatus());
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('api/v1/status');
+    expect(authHeaderOf(fetchMock)).toBe('Bearer secret-token');
+  });
+
+  it('reports a body with the wrong shape as a bad response naming the field', async () => {
+    const body = { ...busyStatus(), rate: { perMinute: '172.5', windowSeconds: 60 } };
+    const fetchMock = mockFetch().mockResolvedValue(jsonResponse(body));
+
+    const error = await captureError(createApiClient({ fetch: fetchMock }).getStatus());
+
+    expect(error).toMatchObject({ kind: 'bad-response', status: 200 });
+    expect((error as ApiError).detail).toBe('rate.perMinute: expected a number, got string "172.5"');
+  });
+
+  it('reports 401 as unauthorized', async () => {
+    const fetchMock = mockFetch().mockResolvedValue(
+      jsonResponse({ detail: 'Missing or invalid token.' }, 401),
+    );
+    const error = await captureError(createApiClient({ fetch: fetchMock }).getStatus());
+    expect(error).toMatchObject({
+      kind: 'unauthorized',
+      status: 401,
+      detail: 'Missing or invalid token.',
+    });
+  });
+});
+
+describe('createApiClient().getJobs', () => {
+  it('returns the checked jobs on success', async () => {
+    const fetchMock = mockFetch().mockResolvedValue(jsonResponse(sampleJobs()));
+
+    const list = await createApiClient({ fetch: fetchMock }).getJobs();
+
+    expect(list.jobs.map((job) => job.id)).toEqual([7, 6, 5]);
+    expect(list.jobs[0]).toEqual(sampleJob());
+    expect(list.jobs[1]?.label).toBeNull();
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('api/v1/jobs');
+  });
+
+  it('sends limit and state as query parameters on a relative path', async () => {
+    const fetchMock = mockFetch().mockResolvedValue(jsonResponse({ jobs: [] }));
+
+    await createApiClient({ fetch: fetchMock }).getJobs({ limit: 10, state: 'active' });
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('api/v1/jobs?limit=10&state=active');
+  });
+
+  it('reports a body with the wrong shape as a bad response naming the field', async () => {
+    const body = { jobs: [sampleJob(), sampleJob({ id: 6, state: 'paused' })] };
+    const fetchMock = mockFetch().mockResolvedValue(jsonResponse(body));
+
+    const error = await captureError(createApiClient({ fetch: fetchMock }).getJobs());
+
+    expect(error).toMatchObject({ kind: 'bad-response', status: 200 });
+    expect((error as ApiError).detail).toContain('jobs[1].state');
+  });
+
+  it('reports 401 as unauthorized', async () => {
+    const fetchMock = mockFetch().mockResolvedValue(
+      jsonResponse({ detail: 'Missing or invalid token.' }, 401),
+    );
+    const error = await captureError(createApiClient({ fetch: fetchMock }).getJobs({ limit: 10 }));
+    expect(error).toMatchObject({ kind: 'unauthorized', status: 401 });
   });
 });

@@ -187,6 +187,23 @@ describe('PathMap.map', function()
     end)
 end)
 
+describe('PathMap.fileKey', function()
+    it('gives one key for every spelling of the same Windows path', function()
+        assert.are.equal(PathMap.fileKey('Z:\\Photos\\A.ARW'), PathMap.fileKey('z:/photos//a.arw'))
+        assert.are.equal(PathMap.fileKey('\\\\nas\\photos\\a.arw'), PathMap.fileKey('//NAS/Photos/A.ARW'))
+    end)
+
+    it('keeps POSIX paths case-sensitive', function()
+        assert.are_not.equal(PathMap.fileKey('/Volumes/P/a.arw'), PathMap.fileKey('/Volumes/P/A.arw'))
+        assert.are.equal(PathMap.fileKey('/Volumes/P/a.arw'), PathMap.fileKey('/Volumes//P/a.arw'))
+    end)
+
+    it('returns nil for no path', function()
+        assert.is_nil(PathMap.fileKey(nil))
+        assert.is_nil(PathMap.fileKey(''))
+    end)
+end)
+
 describe('PathMap.checkMapping', function()
     it('accepts drive, UNC and POSIX prefixes', function()
         assert.is_true(PathMap.checkMapping('Z:\\', 'archive'))

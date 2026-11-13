@@ -25,6 +25,8 @@ DEFAULT_PORT = 8787
 DEFAULT_DATA_DIR = "/data"
 DEFAULT_CACHE_DIR = "/cache"
 DEFAULT_WEB_DIR = "/app/web"
+DEFAULT_BATCH_SIZE = 8
+MAX_BATCH_SIZE = 64
 
 ROOT_ID_PATTERN = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
 ROOT_ID_RULE = "1 to 32 lower-case letters, digits, '-' or '_', starting with a letter or digit"
@@ -54,12 +56,17 @@ class Settings:
     wineprefix: Path
     converter_exe: str
     roots: tuple[Root, ...]
+    workers: int = 1
+    batch_size: int = DEFAULT_BATCH_SIZE
 
     @classmethod
-    def from_env(cls, environ: Mapping[str, str] | None = None) -> Self:
+    def from_env(
+        cls, environ: Mapping[str, str] | None = None, *, cpu_count: int | None = None
+    ) -> Self:
         """Read the settings from ``environ`` (default: the process environment).
 
-        An empty variable counts as unset. Raises ``SettingsError`` for invalid values.
+        An empty variable counts as unset. ``cpu_count`` replaces the number of CPU threads the
+        process may use (for ``LRRP_WORKERS=auto``). Raises ``SettingsError`` for invalid values.
         """
         env = os.environ if environ is None else environ
 
@@ -76,17 +83,96 @@ class Settings:
                 f"prefix, such as {DEFAULT_CONVERTER_EXE!r}; got {converter_exe!r}"
             )
         config = get("LRRP_CONFIG")
+        cache_dir = Path(get("LRRP_CACHE_DIR") or DEFAULT_CACHE_DIR)
+        roots = load_roots(Path(config)) if config else ()
+        _reject_dirs_under_roots({"LRRP_DATA_DIR": data_dir, "LRRP_CACHE_DIR": cache_dir}, roots)
         return cls(
             host=get("LRRP_HOST") or DEFAULT_HOST,
             port=_parse_port(get("LRRP_PORT")),
             token=get("LRRP_TOKEN"),
             data_dir=data_dir,
-            cache_dir=Path(get("LRRP_CACHE_DIR") or DEFAULT_CACHE_DIR),
+            cache_dir=cache_dir,
             web_dir=Path(get("LRRP_WEB_DIR") or DEFAULT_WEB_DIR),
             wineprefix=Path(wineprefix) if wineprefix else data_dir / "wine",
             converter_exe=converter_exe,
-            roots=load_roots(Path(config)) if config else (),
+            roots=roots,
+            workers=_parse_workers(
+                get("LRRP_WORKERS"), available_cpus() if cpu_count is None else cpu_count
+            ),
+            batch_size=_parse_batch_size(get("LRRP_BATCH_SIZE")),
         )
+
+
+def auto_workers(cpu_count: int) -> int:
+    """The number of converter processes ``LRRP_WORKERS=auto`` chooses for ``cpu_count`` threads.
+
+    Never 2: two converter processes side by side take twice the CPU time per photo.
+    """
+    if cpu_count >= 16:
+        return 6
+    if cpu_count >= 8:
+        return 4
+    if cpu_count >= 6:
+        return 3
+    return 1
+
+
+def available_cpus() -> int:
+    """CPU threads this process may run on (the container's CPU set, where the OS tells it)."""
+    try:
+        return len(os.sched_getaffinity(0))
+    except AttributeError:  # not on Linux
+        return os.cpu_count() or 1
+
+
+def _parse_workers(value: str | None, cpu_count: int) -> int:
+    if value is None or value.lower() == "auto":
+        return auto_workers(cpu_count)
+    try:
+        workers = int(value)
+    except ValueError:
+        raise SettingsError(f"LRRP_WORKERS must be 'auto' or a number, got {value!r}") from None
+    if workers < 1:
+        raise SettingsError(f"LRRP_WORKERS must be at least 1, got {workers}")
+    if workers == 2:
+        raise SettingsError(
+            "LRRP_WORKERS=2 is not allowed: two converter processes side by side take twice the "
+            "CPU time per photo (measured with Adobe DNG Converter 17.2 under Wine 8.0; the cause "
+            "is unknown). Use 1, or 3 or more, or 'auto'"
+        )
+    return workers
+
+
+def _parse_batch_size(value: str | None) -> int:
+    if value is None:
+        return DEFAULT_BATCH_SIZE
+    try:
+        size = int(value)
+    except ValueError:
+        raise SettingsError(f"LRRP_BATCH_SIZE must be a number, got {value!r}") from None
+    if not 1 <= size <= MAX_BATCH_SIZE:
+        raise SettingsError(f"LRRP_BATCH_SIZE must be between 1 and {MAX_BATCH_SIZE}, got {size}")
+    return size
+
+
+def _reject_dirs_under_roots(dirs: Mapping[str, Path], roots: tuple[Root, ...]) -> None:
+    # The server writes into these folders; nothing may ever be written under a root.
+    for name, folder in dirs.items():
+        for root in roots:
+            if _is_within(folder, root.path):
+                raise SettingsError(
+                    f"{name} ({folder}) is inside the root {root.id!r}; the server writes there, "
+                    "and it never writes under a root of originals"
+                )
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    if path.is_relative_to(root):
+        return True
+    try:
+        return Path(os.path.realpath(path)).is_relative_to(os.path.realpath(root))
+    except (OSError, ValueError):
+        return False
 
 
 def _parse_port(value: str | None) -> int:

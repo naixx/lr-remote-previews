@@ -4,12 +4,18 @@ import { describe, expect, it } from 'vitest';
 import { TOKEN_STORAGE_KEY } from '../../api/token';
 import { ApiProvider } from '../../app/ApiProvider';
 import { Layout } from '../../app/Layout';
-import { authHeaderOf, jsonResponse, mockFetch, sampleInfo } from '../../test/fixtures';
+import {
+  fakeServer,
+  idleStatus,
+  installedInfo,
+  sampleInfo,
+  type FakeServer,
+} from '../../test/fixtures';
 import { OverviewPage } from './OverviewPage';
 
-function renderOverview(fetchMock: ReturnType<typeof mockFetch>) {
+function renderOverview(server: FakeServer) {
   return render(
-    <ApiProvider fetch={fetchMock}>
+    <ApiProvider fetch={server.fetch}>
       <Layout>
         <OverviewPage />
       </Layout>
@@ -17,27 +23,28 @@ function renderOverview(fetchMock: ReturnType<typeof mockFetch>) {
   );
 }
 
-function unauthorized() {
-  return jsonResponse({ detail: 'Missing or invalid token.' }, 401);
+function idleServer(info: unknown = sampleInfo()) {
+  return fakeServer({ info, status: idleStatus(), jobs: { jobs: [] } });
 }
+
+const UNAUTHORIZED = { detail: 'Missing or invalid token.' };
 
 describe('OverviewPage', () => {
   it('shows a loading state, then the server details', async () => {
-    const fetchMock = mockFetch().mockResolvedValue(jsonResponse(sampleInfo()));
-    renderOverview(fetchMock);
+    renderOverview(idleServer());
 
     expect(screen.getByRole('status').textContent).toContain('Connecting to the server');
 
     const server = await screen.findByRole('region', { name: 'Server' });
     expect(within(server).getByText('LR Remote Previews')).toBeTruthy();
-    expect(within(server).getByText('0.1.0')).toBeTruthy();
+    expect(within(server).getByText('0.2.0')).toBeTruthy();
     expect(within(server).getByText('Token required')).toBeTruthy();
     expect(within(server).getByText('1')).toBeTruthy();
-    expect(screen.queryByRole('status')).toBeNull();
+    expect(screen.queryByText('Connecting to the server…')).toBeNull();
   });
 
   it('shows a missing converter with its expected path and the install hint', async () => {
-    renderOverview(mockFetch().mockResolvedValue(jsonResponse(sampleInfo())));
+    renderOverview(idleServer());
 
     const converter = await screen.findByRole('region', { name: 'DNG converter' });
     expect(within(converter).getByText('Not installed')).toBeTruthy();
@@ -52,9 +59,7 @@ describe('OverviewPage', () => {
   });
 
   it('shows an installed converter with its version', async () => {
-    const body = sampleInfo();
-    const info = { ...body, converter: { ...body.converter, installed: true, version: '17.5' } };
-    renderOverview(mockFetch().mockResolvedValue(jsonResponse(info)));
+    renderOverview(idleServer(installedInfo()));
 
     const converter = await screen.findByRole('region', { name: 'DNG converter' });
     expect(within(converter).getByText('Installed')).toBeTruthy();
@@ -63,7 +68,7 @@ describe('OverviewPage', () => {
   });
 
   it('lists roots with their availability and the supported extensions', async () => {
-    renderOverview(mockFetch().mockResolvedValue(jsonResponse(sampleInfo())));
+    renderOverview(idleServer());
 
     const roots = await screen.findByRole('region', { name: 'Library roots' });
     const items = within(roots).getAllByRole('listitem');
@@ -81,27 +86,38 @@ describe('OverviewPage', () => {
         .map((item) => item.textContent),
     ).toEqual(['.arw', '.cr2']);
     expect(screen.getByText(/2560 px on the long edge/)).toBeTruthy();
+    expect(screen.getByText(/up to 5,000 photos/)).toBeTruthy();
+  });
+
+  it('leaves out the job size limit when an older server does not send it', async () => {
+    const info = sampleInfo();
+    const capabilities: Record<string, unknown> = { ...info.capabilities };
+    delete capabilities.maxItemsPerJob;
+    renderOverview(idleServer({ ...info, capabilities }));
+
+    expect(await screen.findByText(/2560 px on the long edge/)).toBeTruthy();
+    expect(screen.queryByText(/One job can hold/)).toBeNull();
   });
 
   it('offers a retry when the server is unreachable', async () => {
-    const fetchMock = mockFetch()
-      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
-      .mockResolvedValue(jsonResponse(sampleInfo()));
+    const server = idleServer();
+    server.failNetwork('info');
     const user = userEvent.setup();
-    renderOverview(fetchMock);
+    renderOverview(server);
 
     const alert = await screen.findByRole('alert');
     expect(alert.textContent).toContain('Server unreachable');
+    expect(server.calls('status')).toBe(0);
 
+    server.reply('info', sampleInfo());
     await user.click(within(alert).getByRole('button', { name: 'Retry' }));
 
     expect(await screen.findByRole('region', { name: 'Server' })).toBeTruthy();
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(server.calls('info')).toBe(2);
   });
 
   it('reports an unexpected response shape with the offending field', async () => {
-    const fetchMock = mockFetch().mockResolvedValue(jsonResponse({ ...sampleInfo(), api: 'one' }));
-    renderOverview(fetchMock);
+    renderOverview(idleServer({ ...sampleInfo(), api: 'one' }));
 
     const alert = await screen.findByRole('alert');
     expect(alert.textContent).toContain('Unexpected response');
@@ -110,49 +126,52 @@ describe('OverviewPage', () => {
   });
 
   it('asks for a token on 401, stores it and retries with it', async () => {
-    const fetchMock = mockFetch()
-      .mockResolvedValueOnce(unauthorized())
-      .mockResolvedValue(jsonResponse(sampleInfo()));
+    const server = idleServer();
+    server.reply('info', UNAUTHORIZED, 401);
     const user = userEvent.setup();
-    renderOverview(fetchMock);
+    renderOverview(server);
 
     expect(await screen.findByRole('heading', { name: 'Access token required' })).toBeTruthy();
     expect(screen.getByText('Server message: Missing or invalid token.')).toBeTruthy();
-    expect(authHeaderOf(fetchMock, 0)).toBeNull();
+    expect(server.authOf('info', 0)).toBeNull();
 
+    server.reply('info', sampleInfo());
     await user.type(screen.getByLabelText('Access token'), 'secret-token');
     await user.click(screen.getByRole('button', { name: 'Save token' }));
 
     expect(await screen.findByRole('region', { name: 'Server' })).toBeTruthy();
     expect(window.localStorage.getItem(TOKEN_STORAGE_KEY)).toBe('secret-token');
-    expect(authHeaderOf(fetchMock, 1)).toBe('Bearer secret-token');
+    expect(server.authOf('info', 1)).toBe('Bearer secret-token');
+    expect(await screen.findByText(/No jobs yet/)).toBeTruthy();
+    expect(server.authOf('status', -1)).toBe('Bearer secret-token');
+    expect(server.authOf('jobs', -1)).toBe('Bearer secret-token');
   });
 
   it('says so when the saved token is rejected', async () => {
     window.localStorage.setItem(TOKEN_STORAGE_KEY, 'old-token');
-    const fetchMock = mockFetch().mockResolvedValue(unauthorized());
-    renderOverview(fetchMock);
+    const server = idleServer();
+    server.reply('info', UNAUTHORIZED, 401);
+    renderOverview(server);
 
     expect(
       await screen.findByText('The server did not accept the saved token. Enter the current one.'),
     ).toBeTruthy();
-    expect(authHeaderOf(fetchMock, 0)).toBe('Bearer old-token');
+    expect(server.authOf('info', 0)).toBe('Bearer old-token');
   });
 
   it('forgets the token on request and asks for it again', async () => {
     window.localStorage.setItem(TOKEN_STORAGE_KEY, 'secret-token');
-    const fetchMock = mockFetch()
-      .mockResolvedValueOnce(jsonResponse(sampleInfo()))
-      .mockResolvedValue(unauthorized());
+    const server = idleServer();
     const user = userEvent.setup();
-    renderOverview(fetchMock);
+    renderOverview(server);
 
     await screen.findByRole('region', { name: 'Server' });
+    server.reply('info', UNAUTHORIZED, 401);
     await user.click(screen.getByRole('button', { name: 'Forget token' }));
 
     expect(await screen.findByRole('heading', { name: 'Access token required' })).toBeTruthy();
     expect(window.localStorage.getItem(TOKEN_STORAGE_KEY)).toBeNull();
-    expect(authHeaderOf(fetchMock, 1)).toBeNull();
+    expect(server.authOf('info', -1)).toBeNull();
     expect(screen.queryByRole('button', { name: 'Forget token' })).toBeNull();
   });
 });

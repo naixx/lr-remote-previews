@@ -1,11 +1,11 @@
 -- The server's GET /api/v1/info answer: building the request, checking the response, and the text the
 -- status dialog shows. Pure Lua 5.1: no Lightroom imports, so it runs in unit tests.
 --
--- Contract (API 1):
---   {"name": "LR Remote Previews", "version": "0.1.0", "api": 1, "auth": "token",
+-- Contract (API 1, docs/protocol.md):
+--   {"name": "LR Remote Previews", "version": "0.2.0", "api": 1, "auth": "token",
 --    "converter": {"installed": false, "path": "C:\\...\\Adobe DNG Converter.exe", "version": null},
 --    "roots": [{"id": "archive", "label": "Archive", "available": true}],
---    "capabilities": {"extensions": [".arw", ".cr2"], "previewLongEdge": 2560}}
+--    "capabilities": {"extensions": [".arw", ".cr2"], "previewLongEdge": 2560, "maxItemsPerJob": 5000}}
 -- A 401 answer carries {"detail": "..."}.
 local Json = require 'Json'
 
@@ -147,6 +147,7 @@ local function build(decoded)
     info.capabilities = {
         extensions = {},
         previewLongEdge = optionalOfType(capabilities, 'previewLongEdge', 'capabilities.previewLongEdge', 'number'),
+        maxItemsPerJob = optionalOfType(capabilities, 'maxItemsPerJob', 'capabilities.maxItemsPerJob', 'number'),
     }
     for i, extension in ipairs(optionalList(capabilities, 'extensions', 'capabilities.extensions') or {}) do
         if type(extension) ~= 'string' then
@@ -161,7 +162,7 @@ end
 --   { name, version, api, apiSupported, auth ('unknown' when missing),
 --     converter = { installed (boolean), path (or nil), version (or nil) },
 --     roots = { { id, label (defaults to id), available (boolean) }, ... },
---     capabilities = { extensions = { lower-case strings }, previewLongEdge (or nil) } }
+--     capabilities = { extensions = { lower-case strings }, previewLongEdge (or nil), maxItemsPerJob (or nil) } }
 -- Unknown fields are ignored. Returns nil plus a message when a field is missing or has the wrong type.
 function ServerInfo.normalize(decoded)
     local ok, result = pcall(build, decoded)
@@ -277,7 +278,19 @@ function ServerInfo.summary(info)
         info.converter.installed and 'installed' or 'not installed', roots)
 end
 
--- The status dialog's text. settings (optional) gives serverUrl, localPrefix and rootId to show.
+-- What the server says about a root id: 'available', 'not on this server' or 'on this server but not available'.
+function ServerInfo.rootState(info, rootId)
+    local root = ServerInfo.findRoot(info, rootId)
+    if not root then
+        return 'not on this server'
+    elseif root.available then
+        return 'available'
+    end
+    return 'on this server but not available'
+end
+
+-- The status dialog's text. settings (optional) gives serverUrl and the path mappings to show: mappings =
+-- { { localPrefix, rootId }, ... } (Settings.mappings), or a single localPrefix / rootId.
 function ServerInfo.formatReport(info, settings)
     settings = settings or {}
     local lines = {}
@@ -318,18 +331,13 @@ function ServerInfo.formatReport(info, settings)
         end
     end
 
-    local rootId = settings.rootId
-    if rootId and rootId ~= '' then
-        local root = ServerInfo.findRoot(info, rootId)
-        local state
-        if not root then
-            state = 'not on this server'
-        elseif root.available then
-            state = 'available'
-        else
-            state = 'on this server but not available'
-        end
-        add(string.format('Path mapping: %s -> %s (%s)', settings.localPrefix or '', rootId, state))
+    local mappings = settings.mappings
+    if mappings == nil and settings.rootId and settings.rootId ~= '' then
+        mappings = { { localPrefix = settings.localPrefix or '', rootId = settings.rootId } }
+    end
+    for _, mapping in ipairs(mappings or {}) do
+        add(string.format('Path mapping: %s -> %s (%s)', mapping.localPrefix, mapping.rootId,
+            ServerInfo.rootState(info, mapping.rootId)))
     end
     return table.concat(lines, '\n')
 end

@@ -4,7 +4,8 @@ HTTP and JSON. Everything under `/api/v1`. The server also publishes an OpenAPI 
 the text here is the contract that the three parts are written against). This file grows with the stages of the
 [plan](plan.md); it now covers stage 1.
 
-Conventions: JSON bodies are UTF-8. Times are UTC in ISO 8601 with a `Z` (`2026-11-14T09:30:00Z`). Identifiers of
+Conventions: JSON bodies are UTF-8. Times are UTC, written exactly as `YYYY-MM-DDTHH:MM:SSZ`
+(`2026-11-14T09:30:00Z`): a literal `Z`, no numeric offset, no fractions of a second. Identifiers of
 jobs and items are positive integers. A field described as «or null» is always present. Clients ignore fields they
 do not know.
 
@@ -20,7 +21,7 @@ request; that is meant for development only.
 Every error response has a JSON body `{"detail": "<text for a person>"}`; where a program has to tell cases apart it
 also has `"code": "<identifier>"`. Status codes: `400` malformed request, `401` token, `404` unknown job, item or
 path, `409` the request cannot be served in the current state, `413` too many items, `422` a field has the wrong
-type or value.
+type or value. `detail` is always one string, also for `422`.
 
 ## `GET /healthz`
 
@@ -67,8 +68,9 @@ type or value.
 A client never sends a server-side path. It sends a root `id` and a path relative to that root, with forward
 slashes and no leading slash (`2026/2026.06.20 - shoot/IMG_0001.ARW`). The plug-in derives both from the local path
 of the original with a mapping the user configures (for example local prefix `Z:\` → root `archive`). The server
-rejects a relative path that is empty, absolute, contains a backslash, a NUL, or a `.` or `..` segment, or that
-resolves outside the root (symbolic links included).
+rejects a relative path that is empty, absolute, longer than 4096 characters, contains a backslash, a NUL, an empty
+segment (`a//b`, a trailing slash) or a `.` or `..` segment, or that resolves outside the root (symbolic links
+included).
 
 ## Jobs and items
 
@@ -93,6 +95,10 @@ A request for a file whose DNG is already in the cache becomes `ready` at once.
 `output_mismatch` (the DNG does not name this file as its original), `source_changed` (the file changed or vanished
 between the request and the build).
 
+When several reasons to reject apply, the first of these wins: `unknown_root`, `bad_path` (the form of the path),
+`unsupported_format`, `root_unavailable`, `bad_path` (the path leads outside the root), `not_found`, `not_a_file`. A
+file the server is not permitted to read is `not_found`.
+
 ### The item object
 
 ```json
@@ -102,7 +108,7 @@ between the request and the build).
   "root": "archive",
   "path": "2026/2026.06.20 - shoot/IMG_0001.ARW",
   "state": "ready",
-  "seq": 58,
+  "seq": 687,
   "error": null,
   "result": {
     "size": 359310,
@@ -131,11 +137,12 @@ between the request and the build).
   "state": "active",
   "created": "2026-11-14T09:30:00Z",
   "finished": null,
-  "seq": 58,
+  "seq": 692,
   "counts": {"total": 500, "queued": 300, "building": 8, "ready": 190, "failed": 2, "rejected": 0, "cancelled": 0}
 }
 ```
 
+`label` and `client` are always present: the text the client sent, or `null` when it sent none.
 `state`: `active` while any item is `queued` or `building`; `done` when none is; `cancelled` after a cancel.
 `finished` is the time the job left `active`, or `null`. `seq` is the job's change counter: it grows by one with
 every state change of any of its items.
@@ -165,7 +172,8 @@ Each item is checked when the job is created: an unacceptable one is `rejected` 
 cache is `ready`, the others are `queued`. A job is created even if every item is rejected.
 
 `409` with `"code": "converter_not_installed"` when the server has no converter and at least one item would have to
-be built. `413` when there are too many items. `422` for a malformed body or duplicate `ref`s.
+be built. `413` with `"code": "too_many_items"`. `422` for a malformed body; duplicate `ref`s give `422` with
+`"code": "duplicate_ref"`.
 
 ### `GET /api/v1/jobs`
 
@@ -190,11 +198,18 @@ Query: `since` (default 0), `limit` (1–1000, default 500), `state` (optional; 
 changes when its state changes, every state change reaches the client exactly once. `more` is true when the limit
 cut the list; ask again with the new largest `seq`.
 
+Items get their first `seq` when the job is created: every item in the answer to `POST /api/v1/jobs` carries a
+`seq` of at least 1, whatever its state, and the job's `seq` in that answer is the largest of them. A client that
+has processed that answer polls with `since=<the job's seq from that answer>` and receives only later changes.
+`since=0` returns every item of the job.
+
 ### `GET /api/v1/items/{id}/file`
 
-`200` with the DNG as the body, `Content-Type: image/x-adobe-dng`, `Content-Length`, and `X-LRRP-SHA256` with the
-same value as `result.sha256`. `404` for an unknown item, `409` with `"code": "not_ready"` when the item is not
-`ready`.
+`200` with the DNG as the body, `Content-Type: image/x-adobe-dng`, `Content-Length`, `X-LRRP-SHA256` with the same
+value as `result.sha256`, and `Content-Disposition: attachment` with the original's base name and `.dng`. `404` for
+an unknown item, `409` with `"code": "not_ready"` when the item is not `ready`, `404` with
+`"code": "not_in_cache"` when the item is `ready` but its DNG is gone from the cache (ask for the file in a new job;
+it is built again).
 
 ### `DELETE /api/v1/jobs/{id}`
 
@@ -218,7 +233,8 @@ For the dashboard.
 
 `queue`: items over all jobs. `workers.configured`: the number of converter processes the server may run side by
 side; `busy`: how many run now. `rate.perMinute`: items built in the last `windowSeconds`, scaled to a minute; 0
-when idle. `today`: since local midnight of the server. `cache`: the DNGs kept.
+when idle. `today`: since local midnight of the server. `rate` and `today` count conversions, not items: a file two
+jobs asked for counts once, and `rate` counts successful conversions only. `cache`: the DNGs kept.
 
 ## What a client must do with a delivered file
 

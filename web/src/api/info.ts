@@ -1,12 +1,14 @@
 import {
   asArray,
   asBoolean,
+  asCount,
   asInteger,
   asNullableString,
   asObject,
   asOneOf,
   asString,
   fieldPath,
+  optional,
 } from './validate';
 
 /** The API version this dashboard was written against (`api` in the info response). */
@@ -38,6 +40,8 @@ export interface Capabilities {
   extensions: string[];
   /** Long edge of the smart previews the server builds, in pixels. */
   previewLongEdge: number;
+  /** The most items one job may have; null from an older server (0.1) that does not send it. */
+  maxItemsPerJob: number | null;
 }
 
 /** Response of `GET /api/v1/info`. */
@@ -74,6 +78,7 @@ function parseCapabilities(value: unknown, path: string): Capabilities {
   return {
     extensions: asArray(obj.extensions, fieldPath(path, 'extensions'), asString),
     previewLongEdge: asInteger(obj.previewLongEdge, fieldPath(path, 'previewLongEdge')),
+    maxItemsPerJob: optional(obj.maxItemsPerJob, fieldPath(path, 'maxItemsPerJob'), asCount),
   };
 }
 

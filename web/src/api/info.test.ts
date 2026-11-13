@@ -47,6 +47,19 @@ describe('parseServerInfo', () => {
     expect(shapeErrorOf({ ...data, api: '1' }).path).toBe('api');
   });
 
+  it('accepts an older server that does not send maxItemsPerJob', () => {
+    const data = sampleInfo();
+    const capabilities: Record<string, unknown> = { ...data.capabilities };
+    delete capabilities.maxItemsPerJob;
+    expect(parseServerInfo({ ...data, capabilities }).capabilities.maxItemsPerJob).toBeNull();
+  });
+
+  it('rejects a maxItemsPerJob that is not a count', () => {
+    const data = sampleInfo();
+    const capabilities = { ...data.capabilities, maxItemsPerJob: '5000' };
+    expect(shapeErrorOf({ ...data, capabilities }).path).toBe('capabilities.maxItemsPerJob');
+  });
+
   it('rejects a missing section', () => {
     const withoutRoots: Record<string, unknown> = sampleInfo();
     delete withoutRoots.roots;

@@ -46,6 +46,7 @@ Compared with the smart previews Lightroom built from the same raw files (`tools
 |---|---|---|
 | On Windows, 7 photos | 18–26 of 28 per photo; the rest the same size within a few bytes | program name and version, dates, document ids, `RawDataUniqueID`, `NewRawImageDigest` |
 | Under Wine 8.0 on Linux, 1 photo | 28 of 28; raw image directory identical, both identifiers identical | program name and version, dates, document ids, the 256 px thumbnail (5891 against 6049 bytes) |
+| Under Wine 8.0 on Linux through the server's queue, 7 photos | 28 of 28 for six photos; 27 of 28 for one, whose two identifiers also differ | as above |
 
 Why the Windows run differs in a few tiles and the Wine run does not was not investigated.
 
@@ -96,7 +97,10 @@ Speed on a 14-core (20-thread) desktop CPU, 60 raw files of 24 MP, wall time per
 | The converter's own `-mp` option | 1.3–1.5 s | 26 s |
 | Exactly 2 processes | 0.67–0.76 s | 11–14 s |
 
-The last two are repeatable and unexplained. For comparison, Lightroom on a laptop built the same smart previews in
+Through the server's queue (stage 1 code, 4 processes, waves of 32 files, the same machine): 154 raw files of
+24 MP built in 51 s, 0.32 s per photo, no failures.
+
+The last two rows of the table are repeatable and unexplained. For comparison, Lightroom on a laptop built the same smart previews in
 0.9–1.2 s per photo with the originals on the NAS over Wi-Fi; that time was the network.
 
 ## What Lightroom itself does

@@ -6,6 +6,7 @@ Helpers for development and verification. Python 3, standard library only.
 |---|---|
 | `dng_compare.py <a.dng> <b.dng> [--all]` | Compares two DNG files: tags, compressed image tiles, XMP. Used to prove that a server-built smart preview equals the one Lightroom Classic builds from the same raw file, and to repeat the proof after an update of Lightroom or of the converter. |
 | `package_plugin.py` | Packs `plugin/LRRemotePreviews.lrplugin` into `dist/LRRemotePreviews-<version>.zip`. |
+| `submit_job.py` | A small client of the protocol: sends a list of files to a server as a job, follows it, optionally downloads the DNGs and checks their size and SHA-256. For trying a server without Lightroom. |
 
 ## Checking a server-built smart preview against Lightroom
 

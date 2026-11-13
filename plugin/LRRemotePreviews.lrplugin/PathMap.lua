@@ -75,6 +75,16 @@ function PathMap.checkMapping(localPrefix, rootId)
     return true
 end
 
+-- A key that is the same for two spellings of the same file path: Windows paths with either slash kind and
+-- any letter case, repeated slashes collapsed. Returns nil for a missing or empty path.
+function PathMap.fileKey(path)
+    if type(path) ~= 'string' or path == '' then
+        return nil
+    end
+    local canon, windows = canonical(path)
+    return comparable(canon, windows)
+end
+
 -- Maps localPath with a list of { localPrefix = ..., rootId = ... }. Invalid mappings are skipped.
 -- Returns { rootId = ..., relativePath = ... }, or nil plus a message.
 function PathMap.map(localPath, mappings)

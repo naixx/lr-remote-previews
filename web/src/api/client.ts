@@ -1,5 +1,7 @@
 import { ApiError } from './errors';
 import { parseServerInfo, type ServerInfo } from './info';
+import { parseJobList, type JobList, type JobState } from './jobs';
+import { parseServerStatus, type ServerStatus } from './status';
 import { ShapeError } from './validate';
 
 /**
@@ -8,7 +10,16 @@ import { ShapeError } from './validate';
  */
 export const API_PATHS = {
   info: 'api/v1/info',
+  status: 'api/v1/status',
+  jobs: 'api/v1/jobs',
 } as const;
+
+export interface JobsQuery {
+  /** How many jobs to return, 1 to 200; the server's default is 50. */
+  limit?: number;
+  /** Only jobs in this state; all states when omitted. */
+  state?: JobState;
+}
 
 export interface ApiClientOptions {
   /** Access token sent as `Authorization: Bearer <token>`; omitted when empty or null. */
@@ -20,6 +31,10 @@ export interface ApiClientOptions {
 export interface ApiClient {
   /** `GET /api/v1/info`: server name, version, converter state, roots, capabilities. */
   getInfo: (signal?: AbortSignal) => Promise<ServerInfo>;
+  /** `GET /api/v1/status`: queue, converter processes, rate, today's totals, cache. */
+  getStatus: (signal?: AbortSignal) => Promise<ServerStatus>;
+  /** `GET /api/v1/jobs`: jobs, newest first. */
+  getJobs: (query?: JobsQuery, signal?: AbortSignal) => Promise<JobList>;
 }
 
 /**
@@ -89,7 +104,22 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
 
   return {
     getInfo: (signal) => getJson(API_PATHS.info, parseServerInfo, signal),
+    getStatus: (signal) => getJson(API_PATHS.status, parseServerStatus, signal),
+    getJobs: (query = {}, signal) => {
+      const path = withQuery(API_PATHS.jobs, { limit: query.limit, state: query.state });
+      return getJson(path, parseJobList, signal);
+    },
   };
+}
+
+/** Appends the parameters that are set; keeps the path relative. */
+function withQuery(path: string, params: Record<string, string | number | undefined>): string {
+  const search = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined) search.set(key, String(value));
+  }
+  const query = search.toString();
+  return query ? `${path}?${query}` : path;
 }
 
 /** Reads `{"detail": "..."}` from an error response; null when the body has no such text. */

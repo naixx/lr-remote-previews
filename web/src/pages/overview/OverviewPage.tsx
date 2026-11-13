@@ -7,12 +7,33 @@ import { StatePanel } from '../../components/StatePanel';
 import { StatusBadge } from '../../components/StatusBadge';
 import { TokenForm } from '../../components/TokenForm';
 import { useApiResource } from '../../hooks/useApiResource';
+import { usePolling, type Polled } from '../../hooks/usePolling';
+import { formatCount, formatTimeOfDay } from '../../lib/format';
+import { JobsCard } from './JobsCard';
+import { loadLiveOverview, refreshInterval, type LiveOverview } from './live';
+import { QueueCard } from './QueueCard';
 import './overview.css';
 
 export function OverviewPage() {
   const { client } = useApi();
-  const load = useCallback((signal: AbortSignal) => client.getInfo(signal), [client]);
-  const info = useApiResource(load);
+  const loadInfo = useCallback((signal: AbortSignal) => client.getInfo(signal), [client]);
+  const info = useApiResource(loadInfo);
+
+  // Queue and jobs are polled once the info has arrived: until then the page has nothing to put
+  // them next to, and an info error (or a token prompt) already says what is wrong.
+  const loadLive = useCallback((signal: AbortSignal) => loadLiveOverview(client, signal), [client]);
+  const live = usePolling(loadLive, {
+    enabled: info.status === 'ready',
+    interval: refreshInterval,
+  });
+
+  // A token rejected while polling (revoked on the server) asks for the token, as at start.
+  const tokenError =
+    info.status === 'error' && info.error.kind === 'unauthorized'
+      ? info.error
+      : live.error?.kind === 'unauthorized'
+        ? live.error
+        : null;
 
   return (
     <div className="page">
@@ -21,12 +42,54 @@ export function OverviewPage() {
         <p className="page-lead">The preview server this dashboard is connected to.</p>
       </header>
 
-      {info.status === 'loading' && (
+      {tokenError ? (
+        <TokenForm detail={tokenError.detail} />
+      ) : info.status === 'loading' ? (
         <StatePanel tone="neutral" busy title="Connecting to the server…" />
+      ) : info.status === 'error' ? (
+        <InfoError error={info.error} onRetry={info.reload} />
+      ) : (
+        <OverviewGrid info={info.data} live={live} />
       )}
-      {info.status === 'error' && <InfoError error={info.error} onRetry={info.reload} />}
-      {info.status === 'ready' && <InfoDetails info={info.data} />}
     </div>
+  );
+}
+
+function OverviewGrid({ info, live }: { info: ServerInfo; live: Polled<LiveOverview> }) {
+  const { data, error } = live;
+  return (
+    <div className="overview-grid">
+      {data && error && <ConnectionNote error={error} updatedAt={live.updatedAt} />}
+      <QueueCard
+        status={data?.status ?? null}
+        error={error}
+        converterInstalled={info.converter.installed}
+        onRetry={live.refresh}
+      />
+      {/* Without any data, the Queue card alone reports the error. */}
+      {(data || !error) && <JobsCard jobs={data?.jobs ?? null} now={live.checkedAt ?? 0} />}
+      <InfoDetails info={info} />
+    </div>
+  );
+}
+
+/** Shown over data that is still on screen while refreshing it fails. */
+function ConnectionNote({ error, updatedAt }: { error: ApiError; updatedAt: number | null }) {
+  return (
+    <p className="connection-note" role="status">
+      <span className="connection-note__dot" aria-hidden="true" />
+      <span>
+        {error.kind === 'network'
+          ? 'Connection lost, retrying…'
+          : `Could not refresh: ${error.message} Retrying…`}
+        {updatedAt !== null && (
+          <span className="connection-note__since">
+            {' '}
+            Showing data from {formatTimeOfDay(updatedAt)}.
+          </span>
+        )}
+      </span>
+    </p>
   );
 }
 
@@ -64,12 +127,12 @@ function InfoError({ error, onRetry }: { error: ApiError; onRetry: () => void })
 
 function InfoDetails({ info }: { info: ServerInfo }) {
   return (
-    <div className="overview-grid">
+    <>
       <ServerCard info={info} />
       <ConverterCard converter={info.converter} />
       <RootsCard roots={info.roots} />
       <FormatsCard capabilities={info.capabilities} />
-    </div>
+    </>
   );
 }
 
@@ -193,6 +256,8 @@ function FormatsCard({ capabilities }: { capabilities: ServerInfo['capabilities'
       )}
       <p className="hint">
         Smart previews are built at {capabilities.previewLongEdge} px on the long edge.
+        {capabilities.maxItemsPerJob !== null &&
+          ` One job can hold up to ${formatCount(capabilities.maxItemsPerJob)} photos.`}
       </p>
     </Card>
   );

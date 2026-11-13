@@ -65,6 +65,50 @@ export function asInteger(value: unknown, path: string): number {
   return value;
 }
 
+/** A whole number that is zero or more: counts, sizes. */
+export function asCount(value: unknown, path: string): number {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+    throw new ShapeError(path, 'a whole number of zero or more', value);
+  }
+  return value;
+}
+
+/** Any finite number, fractions included. */
+export function asNumber(value: unknown, path: string): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new ShapeError(path, 'a number', value);
+  }
+  return value;
+}
+
+// Date and time with an explicit zone. The protocol sends UTC with a `Z`; an offset and a
+// fraction of a second are accepted as well, since they are unambiguous.
+const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/i;
+
+/** An ISO 8601 date and time with a zone; returned unchanged as a string. */
+export function asTimestamp(value: unknown, path: string): string {
+  if (typeof value !== 'string' || !TIMESTAMP.test(value) || Number.isNaN(Date.parse(value))) {
+    throw new ShapeError(path, 'an ISO 8601 time such as "2026-11-14T09:30:00Z"', value);
+  }
+  return value;
+}
+
+export function asNullableTimestamp(value: unknown, path: string): string | null {
+  return value === null ? null : asTimestamp(value, path);
+}
+
+/**
+ * A field an older server may not send at all: null when it is absent, otherwise checked with
+ * `parse`. Use only where the dashboard has a sensible fallback.
+ */
+export function optional<T>(
+  value: unknown,
+  path: string,
+  parse: (value: unknown, path: string) => T,
+): T | null {
+  return value === undefined ? null : parse(value, path);
+}
+
 export function asOneOf<const T extends readonly string[]>(
   value: unknown,
   path: string,

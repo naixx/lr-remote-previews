@@ -18,7 +18,8 @@ LrTasks.startAsyncTask(function()
     end
     local info, problem = ServerClient.fetchInfo(settings)
     if info then
-        LrDialogs.message(TITLE, ServerInfo.formatReport(info, settings), 'info')
+        LrDialogs.message(TITLE, ServerInfo.formatReport(info, { serverUrl = settings.serverUrl,
+            mappings = Settings.mappings(settings) }), 'info')
     else
         LrDialogs.message(TITLE, problem.message, 'critical')
     end

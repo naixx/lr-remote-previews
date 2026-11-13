@@ -20,6 +20,7 @@
   --color-text-muted: #5b6471;
   --color-accent: #2563c9;
   --color-accent-hover: #1d4fa3;
+  --color-accent-soft: #e3ebf9;
   --color-on-accent: #ffffff;
   --color-focus: #2563c9;
 
@@ -57,6 +58,7 @@
     --color-text-muted: #9ba4b0;
     --color-accent: #6b9cff;
     --color-accent-hover: #8fb4ff;
+    --color-accent-soft: rgb(107 156 255 / 0.14);
     --color-on-accent: #0b1220;
     --color-focus: #8fb4ff;
 
@@ -213,6 +215,12 @@ input {
   gap: var(--space-4);
 }
 
+@media (max-width: 560px) {
+  .card {
+    padding: var(--space-4);
+  }
+}
+
 /* Badges */
 
 .badge {
@@ -246,6 +254,11 @@ input {
 .badge--bad {
   background: var(--color-bad-soft);
   color: var(--color-bad);
+}
+
+.badge--info {
+  background: var(--color-accent-soft);
+  color: var(--color-accent);
 }
 
 .badge--neutral {

@@ -29,12 +29,16 @@ def test_info_without_a_token_configured(make_client: MakeClient) -> None:
     assert response.status_code == 200
     assert response.json() == {
         "name": "LR Remote Previews",
-        "version": "0.1.0",
+        "version": "0.2.0",
         "api": 1,
         "auth": "none",
         "converter": {"installed": False, "path": DEFAULT_CONVERTER_EXE, "version": None},
         "roots": [],
-        "capabilities": {"extensions": list(RAW_EXTENSIONS), "previewLongEdge": 2560},
+        "capabilities": {
+            "extensions": list(RAW_EXTENSIONS),
+            "previewLongEdge": 2560,
+            "maxItemsPerJob": 5000,
+        },
     }
 
 
@@ -83,8 +87,8 @@ def test_unknown_api_path_still_needs_the_token(
     make_client: MakeClient, token: str, auth: dict[str, str]
 ) -> None:
     client = make_client(LRRP_TOKEN=token)
-    assert client.post("/api/v1/jobs").status_code == 401
-    assert client.post("/api/v1/jobs", headers=auth).status_code == 404
+    assert client.post("/api/v1/nothing").status_code == 401
+    assert client.post("/api/v1/nothing", headers=auth).status_code == 404
 
 
 def test_root_availability(make_client: MakeClient, tmp_path: Path) -> None:
@@ -147,10 +151,19 @@ def test_converter_missing_from_the_prefix(make_client: MakeClient, tmp_path: Pa
     assert make_client().get("/api/v1/info").json()["converter"]["installed"] is False
 
 
-def test_openapi_describes_info(make_client: MakeClient) -> None:
+def test_openapi_describes_the_api(make_client: MakeClient) -> None:
     response = make_client().get("/openapi.json")
     assert response.status_code == 200
-    assert "/api/v1/info" in response.json()["paths"]
+    paths = response.json()["paths"]
+    for path in [
+        "/api/v1/info",
+        "/api/v1/jobs",
+        "/api/v1/jobs/{job_id}",
+        "/api/v1/jobs/{job_id}/items",
+        "/api/v1/items/{item_id}/file",
+        "/api/v1/status",
+    ]:
+        assert path in paths
 
 
 def test_version_matches_pyproject() -> None:

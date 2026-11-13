@@ -56,6 +56,14 @@ describe('ServerInfo.normalize', function()
         assert.is_nil(info.future)
     end)
 
+    it('reads the most items per job', function()
+        local info = ServerInfo.normalize(decoded(
+            '{"name": "x", "version": "0.2.0", "api": 1, "capabilities": {"maxItemsPerJob": 5000}}'))
+        assert.are.equal(5000, info.capabilities.maxItemsPerJob)
+        assert.is_nil(ServerInfo.normalize(decoded(
+            '{"name": "x", "version": "1", "api": 1, "capabilities": {"maxItemsPerJob": "many"}}')))
+    end)
+
     it('flags an API version it does not speak', function()
         local info = ServerInfo.normalize({ name = 'x', version = '9', api = 2 })
         assert.is_false(info.apiSupported)
@@ -217,6 +225,20 @@ describe('ServerInfo text', function()
         assert.matches('Path mapping: Z:\\ -> archive (available)', found, 1, true)
         local missing = ServerInfo.formatReport(info, { localPrefix = 'Z:\\', rootId = 'other' })
         assert.matches('(not on this server)', missing, 1, true)
+    end)
+
+    it('lists every path mapping with the state of its root', function()
+        local offline = ServerInfo.normalize({ name = 'x', version = '1', api = 1,
+            roots = { { id = 'archive', available = true }, { id = 'offline', available = false } } })
+        local text = ServerInfo.formatReport(offline, { mappings = {
+            { localPrefix = 'Z:\\', rootId = 'archive' },
+            { localPrefix = 'Y:\\', rootId = 'offline' },
+            { localPrefix = '/Volumes/P', rootId = 'gone' },
+        } })
+        assert.matches('Path mapping: Z:\\ -> archive (available)\n'
+            .. 'Path mapping: Y:\\ -> offline (on this server but not available)\n'
+            .. 'Path mapping: /Volumes/P -> gone (not on this server)', text, 1, true)
+        assert.is_nil(ServerInfo.formatReport(offline, { mappings = {} }):find('Path mapping', 1, true))
     end)
 
     it('warns about an API version it does not speak', function()

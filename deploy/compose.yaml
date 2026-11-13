@@ -25,6 +25,10 @@ services:
     env_file: .env
     # environment:
     #   LRRP_CONFIG: /config/roots.yaml
+    #   # Converter processes side by side: auto (6, 4, 3 or 1 by CPU threads) or a number;
+    #   # 2 is refused. Fewer processes: less heat and noise, slower builds.
+    #   LRRP_WORKERS: auto
+    #   LRRP_BATCH_SIZE: "8"
     ports:
       - "8787:8787"
     volumes:

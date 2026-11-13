@@ -12,9 +12,10 @@ return {
     LrPluginName = 'LR Remote Previews',
     LrPluginInfoProvider = 'PluginInfoProvider.lua',
     LrLibraryMenuItems = {
+        { title = 'Build smart previews on the server', file = 'BuildSmartPreviews.lua' },
         { title = 'Server status...', file = 'ServerStatus.lua' },
         { title = 'Diagnostics: smart preview report (all photos)', file = 'DiagnosticsReport.lua' },
         { title = 'Diagnostics: try buildSmartPreview on selected photos', file = 'DiagnosticsTryBuild.lua' },
     },
-    VERSION = { major = 0, minor = 1, revision = 0, build = 0 },
+    VERSION = { major = 0, minor = 2, revision = 0, build = 0 },
 }
