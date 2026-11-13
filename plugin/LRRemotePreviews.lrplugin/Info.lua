@@ -3,7 +3,8 @@
 --
 -- Every module sits at the top level of this folder on purpose: Lightroom's require() takes a script name, not
 -- a path. The plug-in sandbox of Lightroom Classic 15.6 has the error "require: invalid characters in script
--- name" for names containing '/', '\' or ':' (seen in its code, not tried). Top-level modules do load by bare name there (tried).
+-- name" for names containing '/', '\' or ':' (seen in its code, not tried). Top-level modules do load by bare
+-- name there (tried).
 return {
     LrSdkVersion = 10.0,
     LrSdkMinimumVersion = 6.0,
