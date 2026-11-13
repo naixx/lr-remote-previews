@@ -1,0 +1,152 @@
+.page-header {
+  margin-bottom: var(--space-5);
+}
+
+.page-title {
+  font-size: 26px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+}
+
+.page-lead {
+  margin-top: var(--space-1);
+  color: var(--color-text-muted);
+}
+
+.overview-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
+  gap: var(--space-4);
+  align-items: start;
+}
+
+.overview-grid > .card--wide {
+  grid-column: 1 / -1;
+}
+
+/* Server facts: label above value, laid out in columns that wrap. */
+
+.facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: var(--space-4) var(--space-5);
+}
+
+.facts__item dt {
+  font-size: 13px;
+  color: var(--color-text-muted);
+}
+
+.facts__item dd {
+  margin-top: 2px;
+  font-size: 17px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.facts__note {
+  display: block;
+  margin-top: 2px;
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--color-warn);
+}
+
+/* Label-over-value pairs inside a card. */
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.stack__label {
+  margin-bottom: var(--space-1);
+  font-size: 13px;
+  color: var(--color-text-muted);
+}
+
+.path {
+  display: block;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-muted);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+/* Roots list */
+
+.roots {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.roots__item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3) 0;
+  border-top: 1px solid var(--color-border);
+}
+
+.roots__item:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.roots__item:last-child {
+  padding-bottom: 0;
+}
+
+.roots__name {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.roots__label {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.roots__id {
+  font-size: 12px;
+  color: var(--color-text-muted);
+  overflow-wrap: anywhere;
+}
+
+/* Extension chips */
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.chip {
+  padding: 2px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-surface-muted);
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+
+/* Error detail inside a state panel */
+
+.error-detail {
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-muted);
+  font-size: 13px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

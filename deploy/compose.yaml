@@ -1,0 +1,53 @@
+# Example deployment of LR Remote Previews. Paths starting with /path/to are placeholders.
+#
+#   1. Copy .env.example to .env next to this file and set LRRP_TOKEN to a long random string.
+#   2. Replace /path/to/originals with the folder that holds your originals on the host.
+#   3. From this folder: docker compose up -d --build
+#
+# Adobe DNG Converter is not included. docs/converter.md describes how to install it into the
+# app's Wine prefix, which lives in the data volume.
+
+name: lr-remote-previews
+
+services:
+  lrrp:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      # args:
+      #   LRRP_UID: "1000"
+      #   LRRP_GID: "1000"
+    image: lr-remote-previews:local
+    restart: unless-stopped
+    # Run as another uid:gid than the image's 1000:1000. /data and /cache must be writable by
+    # it, and it must stay the same once the Wine prefix has been created.
+    # user: "1000:1000"
+    env_file: .env
+    # environment:
+    #   LRRP_CONFIG: /config/roots.yaml
+    ports:
+      - "8787:8787"
+    volumes:
+      # The server's state, including the Wine prefix with the converter. Named volumes here;
+      # on a NAS, bind mounts such as /path/to/app/data:/data work the same way.
+      - data:/data
+      - cache:/cache
+      # The originals, always read-only. One mount per root, under /sources.
+      - /path/to/originals:/sources/archive:ro
+      # The list of roots (example below); also uncomment LRRP_CONFIG above.
+      # - ./roots.yaml:/config/roots.yaml:ro
+
+volumes:
+  data:
+  cache:
+
+# Example roots.yaml. Each root is a folder with originals as the container sees it; clients
+# name it by its id (1 to 32 lower-case letters, digits, '-' or '_'):
+#
+#   roots:
+#     - id: archive
+#       path: /sources/archive
+#       label: Archive
+#     - id: scans
+#       path: /sources/scans
+#       label: Film scans

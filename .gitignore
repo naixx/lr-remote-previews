@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.venv-*/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+build/
+
+# Node
+node_modules/
+web/dist/
+web/coverage/
+*.tsbuildinfo
+
+# Packages and local output
+/dist/
+*.log
+
+# Never commit: Adobe software, camera raw files, Lightroom catalogs, secrets
+*.lrcat
+*.lrcat-*
+*.lrdata/
+*.dng
+*.arw
+*.cr2
+*.cr3
+*.nef
+*.raf
+*.rw2
+*.orf
+.env
+.env.*
+!.env.example
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Translations are kept outside the repository
+*.ru.md

@@ -1,0 +1,17 @@
+# The build context of deploy/Dockerfile is the repository root. Keeps local build output and
+# platform-specific dependencies out of the image.
+.git
+**/node_modules
+**/.venv
+**/.venv-*
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.ruff_cache
+**/*.egg-info
+server/build
+server/dist
+web/dist
+web/coverage
+**/.env
+**/.env.*
