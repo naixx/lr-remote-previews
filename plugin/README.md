@@ -232,15 +232,20 @@ Lightroom Classic 15.6 on Windows, 2026-11-14, version 0.1.0 of the plug-in:
 | A wrong token, an unreachable server, a server without a token | not tried |
 | macOS, other Lightroom versions | not tried |
 
-Version 0.2.0:
+Version 0.2.0, same Lightroom, 2026-11-14, a test catalog with 157 raw photos whose DNGs were already in the server's
+cache:
 
 | What | Result |
 |---|---|
-| The settings section with three mappings, the sqlite3 path and «Check sqlite3»; 0.1.0 settings appearing as mapping 1 | not tried |
-| «Build smart previews on the server»: reading the selection's metadata, the progress bar and its cancel button | not tried |
-| Finding and running sqlite3 with `LrTasks.execute` (the command line was run through `cmd.exe` outside Lightroom) | not tried |
-| `photo.localIdentifier` equal to `Adobe_images.id_local` | not tried |
-| Lightroom's `dimensions` equal to the DNG's `OriginalDefaultFinalSize` | not tried |
-| `LrHttp.post` for creating the job and, with method `DELETE`, for cancelling it; downloading a DNG with `LrHttp.get` | not tried |
-| Writing, renaming and registering a delivered DNG (`io.open`, `LrFileUtils.move`, `buildSmartPreview()`) | not tried |
+| The settings section with three mappings and «Check sqlite3» (a `sqlite3` 3.50.6 found on the PATH); 0.1.0 settings appearing as mapping 1 | works |
+| «Build smart previews on the server» on 157 selected photos: the confirmation, the progress, the summary | works: 157 sent, 157 placed and registered |
+| Finding and running `sqlite3` with `LrTasks.execute`; reading the answer back | works: 157 of 157 catalog ids found |
+| `photo.localIdentifier` equal to `Adobe_images.id_local` | holds (every looked-up file name matched its photo) |
+| Lightroom's `dimensions` usable for the check against the DNG's `OriginalDefaultFinalSize` | works (no photo was reported as «original size not checked») |
+| `LrHttp.post` for creating the job; downloading a DNG with `LrHttp.get` | works: 157 files in 30 s, about 0.19 s per photo including the checks and the registration |
+| Writing, renaming and registering a delivered DNG (`io.open`, `LrFileUtils.move`, `buildSmartPreview()`) | works: afterwards the catalog had 157 smart previews, each file checked independently against the catalog (name and original size), no temporary files left |
+| Cancelling a run (`LrHttp.post` with method `DELETE`) | not tried |
+| A run in which the server has to build (not only serve from its cache); failed and rejected items | not tried |
+| Videos, virtual copies, non-raw files and photos that already have a smart preview in the selection | not tried |
+| The path setting for `sqlite3`, and a `sqlite3` next to the plug-in | not tried |
 | A catalog or temporary folder whose path has non-ASCII characters | not tried |
