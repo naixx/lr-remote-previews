@@ -70,6 +70,13 @@ see "Running as another user" in [deploy/README.md](../deploy/README.md)).
 user (`lrrp`) and for any other user profile already in the prefix. You only need to create it yourself if you run the
 converter outside the provided container.
 
+*Verified (converter 17.2, Wine 8.0):* **the first run of the converter in a prefix where it has never run fails
+anyway.** It aborts with exit code 3 and the same `vkd3d` assertion although the marker is there, whatever the input
+is, and during that run it writes `Camera Raw GPU Config.txt` next to the marker. Every later run, with that file
+present, honours the marker and works. So after placing the converter, expect one failed run. The server does this
+warm-up run itself before it builds anything; if you run the converter by hand, run it twice. Do not copy
+`Camera Raw GPU Config.txt` from another machine: it contains a digest of the machine it was written on.
+
 Adobe documents these marker files for Camera Raw: if GPU initialisation fails fatally, Camera Raw or Lightroom
 leaves a `TempDisableGPU3` file (or `TempDisableGPU2` in some cases), and while such a file exists Camera Raw disables
 GPU acceleration. Adobe's page says this applies to Camera Raw 17.4 and earlier and that Camera Raw 17.5 and later has

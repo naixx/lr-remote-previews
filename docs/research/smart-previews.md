@@ -79,6 +79,9 @@ Reading the catalog with SQLite in read-only mode while Lightroom had it open wo
 - Without a Vulkan device Wine aborts when the converter asks for Direct3D 12 (assertion in `vkd3d/device.c`). The
   converter's own switch fixes it: an empty file `TempDisableGPU2` in
   `C:\users\<user>\AppData\Roaming\Adobe\CameraRaw\GPU\Adobe DNG Converter\`.
+- In a prefix where the converter has never run, its first run aborts with exit code 3 (the same assertion) in
+  spite of the marker and whatever the input is, and writes `Camera Raw GPU Config.txt` next to the marker. From
+  the second run on it works. Seen twice more after deleting that file.
 - One missing input file makes the converter exit with code 1 and write nothing for the whole batch.
 - The output is named after the input's base name.
 
