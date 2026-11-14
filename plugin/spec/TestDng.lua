@@ -73,4 +73,134 @@ function TestDng.make(options)
     return TestDng.tiff(order, entries, options.tail)
 end
 
+-- An entry of a full DNG: TestDng.entry(order, tag, type, values) with values a list of numbers (types 1, 3, 4, 5
+-- and 10, rationals as pairs) or a string (types 1, 2 and 7, used as is).
+function TestDng.entry(order, tag, fieldType, values)
+    if type(values) == 'string' then
+        return { tag = tag, type = fieldType, count = #values, data = values }
+    end
+    local encode = ({ [1] = string.char, [3] = TestDng.u16 })[fieldType]
+    local chunks = {}
+    for i, value in ipairs(values) do
+        if fieldType == 1 then
+            chunks[i] = string.char(value)
+        elseif encode then
+            chunks[i] = encode(order, value)
+        else
+            chunks[i] = TestDng.u32(order, value % 4294967296)
+        end
+    end
+    local count = #values
+    if fieldType == 5 or fieldType == 10 then
+        count = count / 2
+    end
+    return { tag = tag, type = fieldType, count = count, data = table.concat(chunks) }
+end
+
+local function fullFile(order, options, tileBase)
+    local u16, u32, entry = TestDng.u16, TestDng.u32, TestDng.entry
+    local parts, size = {}, 8
+    local function put(blob)
+        if size % 2 == 1 then
+            parts[#parts + 1] = '\0'
+            size = size + 1
+        end
+        local at = size
+        parts[#parts + 1] = blob
+        size = size + #blob
+        return at
+    end
+    local function directory(entries)
+        table.sort(entries, function(a, b)
+            return a.tag < b.tag
+        end)
+        local fields = {}
+        for i, e in ipairs(entries) do
+            local value = e.data
+            if #value > 4 then
+                value = u32(order, put(e.data))
+            else
+                value = value .. string.rep('\0', 4 - #value)
+            end
+            fields[i] = u16(order, e.tag) .. u16(order, e.type) .. u32(order, e.count) .. value
+        end
+        return put(u16(order, #entries) .. table.concat(fields) .. u32(order, 0))
+    end
+
+    local tiles = options.tiles
+    local offsets, counts, at = {}, {}, tileBase
+    for i, tile in ipairs(tiles) do
+        offsets[i], counts[i] = at, #tile
+        at = at + #tile
+    end
+    local thumbnail = options.thumbnail or string.rep('T', 64)
+    local thumbnailAt = put(thumbnail)
+
+    local raw = {
+        entry(order, 0x00FE, 4, { 0 }),
+        entry(order, 0x0100, 4, { options.imageWidth or 2560 }),
+        entry(order, 0x0101, 4, { options.imageLength or 1707 }),
+        entry(order, 0x0102, 3, options.bits or { 16, 16, 16 }),
+        entry(order, 0x0103, 3, { options.compression or 52546 }),
+        entry(order, 0x0106, 3, { 34892 }),
+        entry(order, 0x0115, 3, { options.samples or 3 }),
+        entry(order, 0x011C, 3, { 1 }),
+    }
+    if options.layout == 'strips' then
+        raw[#raw + 1] = entry(order, 0x0111, 4, offsets)
+        raw[#raw + 1] = entry(order, 0x0117, 4, counts)
+    else
+        raw[#raw + 1] = entry(order, 0x0142, 3, { options.tileWidth or 368 })
+        raw[#raw + 1] = entry(order, 0x0143, 3, { options.tileLength or 432 })
+        raw[#raw + 1] = entry(order, 0x0144, 4, offsets)
+        raw[#raw + 1] = entry(order, 0x0145, 4, counts)
+    end
+    for _, extra in ipairs(options.extraRaw or {}) do
+        raw[#raw + 1] = extra
+    end
+    local rawAt = directory(raw)
+
+    local v = options.version or { 1, 7, 0, 0 }
+    local ifd0 = {
+        entry(order, 0x00FE, 4, { 1 }),
+        entry(order, 0x0100, 4, { 256 }),
+        entry(order, 0x0101, 4, { 171 }),
+        entry(order, 0x0103, 3, { 7 }),
+        entry(order, 0x0111, 4, { thumbnailAt }),
+        entry(order, 0x0117, 4, { #thumbnail }),
+        entry(order, 0x0131, 2, (options.software or 'Adobe Photoshop Lightroom Classic 15.6 (Windows)') .. '\0'),
+        entry(order, 0x0132, 2, (options.dateTime or '2026:11:14 09:30:00') .. '\0'),
+        entry(order, 0x02BC, 1, options.xmp or '<x:xmpmeta><rdf:Description xmp:CreatorTool="Lightroom" '
+            .. 'xmpMM:DocumentID="xmp.did:1111" crs:HasSettings="False"/></x:xmpmeta>'),
+        entry(order, 0xC612, 1, v),
+        entry(order, 0xC65D, 1, options.uniqueId or string.rep('\1', 16)),
+        entry(order, 0xC68B, 2, (options.name or 'IMG_0001.ARW') .. '\0'),
+        entry(order, 0xC791, 4, { options.width or 6000, options.height or 4000 }),
+        entry(order, 0xC7A7, 1, options.digest or string.rep('\2', 16)),
+    }
+    if not options.noRaw then
+        ifd0[#ifd0 + 1] = entry(order, 0x014A, 4, { rawAt })
+    end
+    for _, extra in ipairs(options.extraIfd0 or {}) do
+        ifd0[#ifd0 + 1] = extra
+    end
+    local ifd0At = directory(ifd0)
+    local tilesStart = size
+    local header = order .. u16(order, 42) .. u32(order, ifd0At)
+    return header .. table.concat(parts) .. table.concat(tiles), tilesStart
+end
+
+-- A smart-preview-like DNG: IFD0 (a thumbnail in one strip, Software, DateTime, XMP, DNGVersion, RawDataUniqueID,
+-- OriginalRawFileName, OriginalDefaultFinalSize, NewRawImageDigest, SubIFDs) and the raw image directory (the first
+-- SubIFD) with its tiles, laid out as header | thumbnail | raw directory | IFD0 | tiles, so that cutting the end of
+-- the file cuts the tiles. options: order ('II'), tiles (list of strings, required), layout ('tiles' | 'strips'),
+-- tileWidth, tileLength, imageWidth, imageLength, compression, bits (list), samples, name, width, height, version,
+-- software, dateTime, xmp, thumbnail, uniqueId, digest, noRaw, extraIfd0 / extraRaw (lists of TestDng.entry
+-- results, which must use the same order).
+function TestDng.full(options)
+    local order = options.order or 'II'
+    local _, tilesStart = fullFile(order, options, 0)
+    return (fullFile(order, options, tilesStart))
+end
+
 return TestDng
