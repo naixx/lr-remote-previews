@@ -112,29 +112,25 @@ describe('Settings', function()
         assert.are.same({}, Settings.mappings(EMPTY))
     end)
 
-    it('remembers the choices of «Add a folder without previews...» apart from the settings', function()
-        assert.are.same({ addFolderSubfolders = true, addFolderOtherFormats = false, addFolderSend = true,
-            addFolderLast = '' }, Settings.readAddFolder(nil))
-        assert.are.same({ addFolderSubfolders = true, addFolderOtherFormats = false, addFolderSend = true,
-            addFolderLast = '' }, Settings.readAddFolder({ addFolderSubfolders = 'no', addFolderSend = 1 }))
+    it('remembers the choices of «Import a folder without the dialog...» apart from the settings', function()
+        assert.are.same({ importFolderSend = true, importFolderLast = '' }, Settings.readImportFolder(nil))
+        assert.are.same({ importFolderSend = true, importFolderLast = '' },
+            Settings.readImportFolder({ importFolderSend = 1, addFolderSend = false }))
         local store = { serverUrl = 'http://nas:8787' }
-        Settings.writeAddFolder(store, { addFolderSubfolders = false, addFolderOtherFormats = true,
-            addFolderSend = false, addFolderLast = ' Z:\\2026\\shoot ' })
-        assert.are.same({ addFolderSubfolders = false, addFolderOtherFormats = true, addFolderSend = false,
-            addFolderLast = 'Z:\\2026\\shoot' }, Settings.readAddFolder(store))
+        Settings.writeImportFolder(store, { importFolderSend = false, importFolderLast = ' Z:\\2026\\shoot ' })
+        assert.are.same({ importFolderSend = false, importFolderLast = 'Z:\\2026\\shoot' },
+            Settings.readImportFolder(store))
         -- a choice the dialog did not offer keeps its remembered value
-        Settings.writeAddFolder(store, { addFolderSubfolders = true, addFolderLast = 'Z:\\2027' })
-        assert.is_false(store.addFolderSend)
-        assert.is_true(store.addFolderSubfolders)
-        assert.are.equal('Z:\\2027', store.addFolderLast)
+        Settings.writeImportFolder(store, { importFolderLast = 'Z:\\2027' })
+        assert.is_false(store.importFolderSend)
+        assert.are.equal('Z:\\2027', store.importFolderLast)
         -- the Plug-in Manager's section neither shows nor writes them
         for _, key in ipairs(Settings.KEYS) do
-            assert.is_nil(Settings.ADD_FOLDER_OPTIONS[key])
-            assert.are_not.equal('addFolderLast', key)
+            assert.is_nil(Settings.IMPORT_FOLDER_OPTIONS[key])
+            assert.are_not.equal('importFolderLast', key)
         end
         Settings.write(store, Settings.read(store))
-        assert.are.same({ addFolderSubfolders = true, addFolderOtherFormats = true, addFolderSend = false,
-            addFolderLast = 'Z:\\2027' }, Settings.readAddFolder(store))
+        assert.are.same({ importFolderSend = false, importFolderLast = 'Z:\\2027' }, Settings.readImportFolder(store))
     end)
 
     it('names the rows that are half filled in or invalid', function()

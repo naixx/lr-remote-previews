@@ -52,7 +52,7 @@ describe('AutoSendPlan state', function()
     end)
 end)
 
-describe('AutoSendPlan photos sent by «Add a folder without previews...»', function()
+describe('AutoSendPlan photos sent by «Import a folder without the dialog...»', function()
     local function idList(set)
         local list = {}
         for id in pairs(set) do
@@ -105,7 +105,7 @@ describe('AutoSendPlan photos sent by «Add a folder without previews...»', fun
     end)
 
     it('names them in the round\'s log line', function()
-        assert.are.equal('sent nothing; 2 left out (added and sent by «Add a folder without previews»: 2)',
+        assert.are.equal('sent nothing; 2 left out (imported and sent by «Import a folder without the dialog»: 2)',
             AutoSendPlan.roundText({ leftOut = { sentByCommand = 2 } }))
     end)
 end)

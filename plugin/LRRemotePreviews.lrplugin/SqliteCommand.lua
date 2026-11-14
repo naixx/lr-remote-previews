@@ -2,7 +2,7 @@
 -- Pure Lua 5.1: no Lightroom imports, so it runs in unit tests. Running the command is SqliteRunner's job.
 --
 -- The catalog is opened read-only (.open --readonly), and the only SQL ever passed is the SELECT built by
--- lookupSql. Nothing here writes to the catalog (decision record 0002).
+-- lookupSql or one of ImportQuery's SELECTs. Nothing here writes to the catalog (decision record 0002).
 --
 -- The catalog path is not put on the command line: it goes into a small script (lookupScript) that sqlite3
 -- reads from standard input. Some Windows builds of sqlite3 (seen: 3.50.6 from Android's platform-tools) read
@@ -108,12 +108,9 @@ local function commandLine(parts, windows)
     return line
 end
 
--- The script sqlite3 reads on standard input for one lookup: open the catalog read-only, wait up to
--- BUSY_TIMEOUT_MS for a lock, plain "a|b|c" lines without a header, then the SELECT. Returns the text, or nil
--- plus a message. The catalog path is written as a double-quoted dot-command argument, in which sqlite3
--- resolves backslash escapes, so \ is written as \\ and " as \".
-function SqliteCommand.lookupScript(database, sql)
-    if type(sql) ~= 'string' or not sql:match('^SELECT [%w%s_.,=()]+;$') then
+-- The script for one SELECT whose characters all match allowed (a character class).
+local function script(database, sql, allowed)
+    if type(sql) ~= 'string' or not sql:match('^SELECT ' .. allowed .. '+;$') then
         return nil, 'refusing to pass anything but a plain SELECT to sqlite3'
     end
     if type(database) ~= 'string' or database == '' then
@@ -131,6 +128,20 @@ function SqliteCommand.lookupScript(database, sql)
         sql,
         '',
     }, '\n')
+end
+
+-- The script sqlite3 reads on standard input for one lookup: open the catalog read-only, wait up to
+-- BUSY_TIMEOUT_MS for a lock, plain "a|b|c" lines without a header, then the SELECT. Returns the text, or nil
+-- plus a message. The catalog path is written as a double-quoted dot-command argument, in which sqlite3
+-- resolves backslash escapes, so \ is written as \\ and " as \".
+function SqliteCommand.lookupScript(database, sql)
+    return script(database, sql, '[%w%s_.,=()]')
+end
+
+-- The same for the SELECTs of «Import a folder without the dialog...» (ImportQuery): one statement on one line,
+-- which may also hold quoted names and '>' (no ';' inside, no line break, so no dot-command can follow).
+function SqliteCommand.readScript(database, sql)
+    return script(database, sql, "[%w _.,=()'>]")
 end
 
 -- The command line that runs a lookup script. spec: { tool, script, output, errors, windows }.

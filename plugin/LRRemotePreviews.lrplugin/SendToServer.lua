@@ -2,7 +2,7 @@
 --
 -- For the selected photos: the same checks as «Build smart previews on the server» (the server, the selection, the
 -- file UUIDs read with sqlite3, read-only), then one job per maxItemsPerJob photos, tagged with this catalog's
--- clientId (Pipeline.sendJobs, which «Add a folder without previews...» uses too), and back at once. Nothing is
+-- clientId (Pipeline.sendJobs, which «Import a folder without the dialog...» uses too), and back at once. Nothing is
 -- downloaded or placed; Lightroom may be closed afterwards. The smart previews are brought in later by «Fetch ready
 -- smart previews» (or the automatic fetch).
 local LrApplication = import 'LrApplication'

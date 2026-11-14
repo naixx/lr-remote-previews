@@ -403,26 +403,34 @@ After you change `LRRP_WORKERS` or `LRRP_BATCH_SIZE` in `compose.yaml`, run `doc
   the queue runs. Until then the dashboard's Queue card says «Working» or «Idle», and `GET /api/v1/status` (with the
   token) has the counts `queue.queued` and `queue.building`; keep the NAS awake by its own means while they are not 0.
 
-## Add a folder without previews
+## Import a folder without the dialog
 
-The command is new in plug-in 0.5.0 and has not been run in Lightroom yet. Its log lines start with `add folder:`.
+The command is new in plug-in 0.6.0 and has not been run in Lightroom yet. Its log lines start with `import folder:`;
+they record when the import was started and when the call returned, every read of the catalog with its count, every
+photo as it appeared, and when the import was taken as finished.
 
-- **«Stopped: Lightroom did not give the plug-in write access to the catalog»**: something else held Lightroom's
-  catalog write access (another plug-in, an import running at the same time) through three tries of up to 30 seconds.
-  Run the command again on the same folder when Lightroom is idle; the files added so far are left alone.
-- **«Not added: Lightroom does not support the file»** or **«Not added: Lightroom reported an error»**: the summary
-  names the first five files with Lightroom's own text, the log all of them. The plug-in tells the two apart only by
-  that text, which Lightroom does not document. A raw format newer than your Lightroom, or a file that cannot be read
-  over the network, are likely causes.
-- **The same photo twice in the catalog**: expected when the folder was chosen by a path the catalog does not use for
-  those files, for example `\\nas.local\photos\` while the catalog knows them as `Z:\`. The plug-in looks files up by
-  path and cannot tell that the two are the same (not tried). Take the second set out with Photo > Remove Photos,
-  «Remove from Lightroom», and choose the folder the way the catalog spells it.
-- **Added, but not sent to the server**: the summary says why (no server set up, the folder under no path mapping,
-  the run cancelled or stopped, a file type the server does not take, a file record not found in the catalog database
-  yet). Select the photos and use **Send to the server**. The automatic send leaves alone the photos the command was
-  going to send itself (chosen «Send the added photos to the server afterwards», and the server could build when the
-  command started); the summary says so when that applies.
+- **It refuses to start: «The previous import in this catalog was not «Add»»** (or «… made a second copy», «… no
+  record of a previous import», «… incomplete»). The command starts Lightroom's import with the settings of the
+  previous one and refuses anything that could copy or move files. Import one folder through Lightroom's own dialog
+  with **Add** (and without «Make a Second Copy To»), then use the command again. The log line `import folder: …;
+  previous import: …` lists every setting it read.
+- **It refuses: «cannot read how the previous import … was set up»**: sqlite3 was not found or the catalog could not
+  be read; see «sqlite3 is not found or fails» above. Without that check the plug-in starts no import.
+- **«The settings of the previous import changed since the dialog»**: an import ran between the dialog and the start.
+  Run the command again.
+- **«No photo of this folder appeared in the catalog within 5 minutes»**: Lightroom found nothing to import (for
+  example when every file is in the catalog already), the import has not started, or Lightroom writes the photos to
+  the catalog only at the end of a long import (not known yet; the log's reads show what the catalog held). Look at
+  Lightroom's own progress at the top left; send the photos later with **Send to the server** if they arrive.
+- **Fewer photos than expected were sent**: the plug-in takes the import as finished when no new photo came for 20
+  seconds. Photos imported after that were not sent by the command; select them and use **Send to the server** (with
+  the automatic send on, it sends them, since the command did not record them).
+- **«Smart previews are already being fetched by «Import a folder without the dialog»»** in another command: the
+  command holds the fetch lock while it waits for the import and sends, so that the automatic send cannot send the
+  same photos. Wait until it has finished, or cancel its waiting.
+- **Imported, but not sent to the server**: the summary says why (no server set up, the folder under no path mapping,
+  the server could not build, the waiting cancelled or stopped, a file type the server does not take). Select the
+  photos and use **Send to the server**.
 
 ## After an update of Lightroom
 

@@ -162,7 +162,7 @@ function Pipeline.prepareSend(settings, catalog, photos, summary, ui)
     return { info = info, entries = entries }
 end
 
--- The last step of sending (shared by «Send to the server» and «Add a folder without previews...»): one job per
+-- The last step of sending (shared by «Send to the server» and «Import a folder without the dialog...»): one job per
 -- maxItemsPerJob photos of prepared (Pipeline.prepareSend's result), each with this catalog's clientId. Records every
 -- photo in summary and the log, and stops at the first job the server does not create. label: the jobs' label (nil:
 -- Jobs.LABEL); a run of several jobs adds '(part i of n)'.

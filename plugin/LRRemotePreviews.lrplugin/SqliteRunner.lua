@@ -1,8 +1,10 @@
 -- Runs the sqlite3 command-line tool with LrTasks.execute. The SDK cannot capture a command's output, so the
 -- command line (built by SqliteCommand, pure and unit tested) reads a script file and redirects stdout and
 -- stderr to two files, all in the temporary folder; they are deleted afterwards. The catalog is opened
--- read-only and only the SELECT from SqliteCommand.lookupSql is passed (decision record 0002). Must run inside
--- an LrTasks task.
+-- read-only and only the SELECT from SqliteCommand.lookupSql or ImportQuery's SELECTs are passed (decision record
+-- 0002). Must run inside an LrTasks task. That LrTasks.execute lets Lightroom's window go on while the process runs
+-- is assumed, not measured; it is why «Import a folder without the dialog...» reads the catalog this way while
+-- Lightroom imports.
 local LrFileUtils = import 'LrFileUtils'
 local LrPathUtils = import 'LrPathUtils'
 local LrTasks = import 'LrTasks'
@@ -154,6 +156,26 @@ function SqliteRunner.locate(configured, pluginPath)
             .. 'path in File > Plug-in Manager > LR Remote Previews.'
         or 'macOS ships /usr/bin/sqlite3; otherwise set the path in File > Plug-in Manager > LR Remote Previews.'
     return nil, 'No working sqlite3 tool was found. Tried:\n' .. table.concat(tried, '\n') .. '\n\n' .. hint
+end
+
+-- Runs one SELECT that SqliteCommand.readScript accepts (ImportQuery's) against the catalog, read-only. Returns the
+-- output text, or nil plus a message.
+function SqliteRunner.query(tool, catalogPath, sql)
+    local script, scriptError = SqliteCommand.readScript(catalogPath, sql)
+    if not script then
+        return nil, scriptError
+    end
+    local result, err = run(function(scriptFile, output, errors)
+        return SqliteCommand.queryCommand({ tool = tool, script = scriptFile, output = output, errors = errors,
+            windows = isWindows() })
+    end, script)
+    if not result then
+        return nil, err
+    end
+    if result.status ~= 0 then
+        return nil, 'sqlite3 failed with exit code ' .. tostring(result.status) .. ': ' .. firstLine(result.stderr)
+    end
+    return result.stdout
 end
 
 -- Reads the file UUIDs of the photos with these catalog ids (photo.localIdentifier), in chunks.

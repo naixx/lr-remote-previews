@@ -2,8 +2,8 @@
 
 Status: accepted (2026-11-13). Amended by [0007](0007-photos-added-through-lightroom-on-the-users-command.md)
 (2026-11-14): «never written» means never by the project itself; Lightroom changes its catalog through its own plug-in
-interface when it registers a placed smart preview and when the user adds a folder with «Add a folder without
-previews...».
+interface when it registers a placed smart preview and when it imports a folder with «Import a folder without the
+dialog...» (plug-in 0.6.0; 0.5.0's «Add a folder without previews...» used `catalog:addPhoto`).
 
 ## Context
 

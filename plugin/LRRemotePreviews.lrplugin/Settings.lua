@@ -35,19 +35,16 @@ Settings.OPTIONS = {
 }
 Settings.OPTION_KEYS = { 'downloadConcurrency', 'autoFetch', 'autoFetchInterval', 'autoSend' }
 
--- The choices of «Add a folder without previews...» (version 0.5.0), remembered from one run to the next. They are not
--- part of the Plug-in Manager's section (Settings.KEYS), so that closing the Plug-in Manager never overwrites them.
--- addFolderSubfolders:   include sub-folders
--- addFolderOtherFormats: add other photo formats too (JPEG, TIFF, PNG, HEIC, PSD), not only camera raw files
--- addFolderSend:         send the added photos to the server afterwards (offered when a server and a path mapping
---                        are set up)
--- addFolderLast:         (text) the folder chosen last; the folder dialog opens in the folder that holds it
-Settings.ADD_FOLDER_OPTIONS = {
-    addFolderSubfolders = { kind = 'boolean', default = true },
-    addFolderOtherFormats = { kind = 'boolean', default = false },
-    addFolderSend = { kind = 'boolean', default = true },
+-- The choices of «Import a folder without the dialog...» (version 0.6.0), remembered from one run to the next. They
+-- are not part of the Plug-in Manager's section (Settings.KEYS), so that closing the Plug-in Manager never overwrites
+-- them. (Version 0.5.0's «Add a folder without previews...» kept addFolder* keys; they are no longer read.)
+-- importFolderSend: send the imported photos to the server afterwards (offered when a server and a path mapping are
+--                   set up)
+-- importFolderLast: (text) the folder chosen last; the folder dialog opens in the folder that holds it
+Settings.IMPORT_FOLDER_OPTIONS = {
+    importFolderSend = { kind = 'boolean', default = true },
 }
-Settings.ADD_FOLDER_KEYS = { 'addFolderSubfolders', 'addFolderOtherFormats', 'addFolderSend' }
+Settings.IMPORT_FOLDER_KEYS = { 'importFolderSend' }
 
 -- The choices the Plug-in Manager offers.
 Settings.CONCURRENCY_CHOICES = { 1, 2, 3, 4, 5, 6, 7, 8 }
@@ -69,8 +66,8 @@ local function trim(value)
     return (value:gsub('^%s+', ''):gsub('%s+$', ''))
 end
 
--- A stored value of an option (an entry of Settings.OPTIONS or Settings.ADD_FOLDER_OPTIONS) in its kind, within its
--- bounds; the default when missing or unusable.
+-- A stored value of an option (an entry of Settings.OPTIONS or Settings.IMPORT_FOLDER_OPTIONS) in its kind, within
+-- its bounds; the default when missing or unusable.
 local function optionValue(option, value)
     if option.kind == 'boolean' then
         if type(value) == 'boolean' then
@@ -91,27 +88,27 @@ function Settings.option(key, value)
     return optionValue(Settings.OPTIONS[key], value)
 end
 
--- The remembered choices of «Add a folder without previews...»: the Settings.ADD_FOLDER_KEYS in their kind (the
--- default when missing) and addFolderLast as text ('' when missing).
-function Settings.readAddFolder(store)
+-- The remembered choices of «Import a folder without the dialog...»: the Settings.IMPORT_FOLDER_KEYS in their kind
+-- (the default when missing) and importFolderLast as text ('' when missing).
+function Settings.readImportFolder(store)
     local choices = {}
-    for _, key in ipairs(Settings.ADD_FOLDER_KEYS) do
-        choices[key] = optionValue(Settings.ADD_FOLDER_OPTIONS[key], store and store[key])
+    for _, key in ipairs(Settings.IMPORT_FOLDER_KEYS) do
+        choices[key] = optionValue(Settings.IMPORT_FOLDER_OPTIONS[key], store and store[key])
     end
-    choices.addFolderLast = trim(store and store.addFolderLast)
+    choices.importFolderLast = trim(store and store.importFolderLast)
     return choices
 end
 
--- Remembers the choices of «Add a folder without previews...». Only the keys present in values are written, so a
--- choice the dialog did not offer (sending, when no server is set up) keeps its remembered value.
-function Settings.writeAddFolder(store, values)
-    for _, key in ipairs(Settings.ADD_FOLDER_KEYS) do
+-- Remembers the choices of «Import a folder without the dialog...». Only the keys present in values are written, so
+-- a choice the dialog did not offer (sending, when no server is set up) keeps its remembered value.
+function Settings.writeImportFolder(store, values)
+    for _, key in ipairs(Settings.IMPORT_FOLDER_KEYS) do
         if values[key] ~= nil then
-            store[key] = optionValue(Settings.ADD_FOLDER_OPTIONS[key], values[key])
+            store[key] = optionValue(Settings.IMPORT_FOLDER_OPTIONS[key], values[key])
         end
     end
-    if values.addFolderLast ~= nil then
-        store.addFolderLast = trim(values.addFolderLast)
+    if values.importFolderLast ~= nil then
+        store.importFolderLast = trim(values.importFolderLast)
     end
 end
 

@@ -123,8 +123,8 @@ local function sendPicked(settings, catalogPath, state, picked, isCanceled)
     local maxItems = info.capabilities.maxItemsPerJob
     picked = AutoSendPlan.limit(picked, maxItems)
 
-    -- The photos, in ascending id order; virtual copies are not new files. Photos that «Add a folder without
-    -- previews...» added and sends itself are left out (AutoSendPlan.recordSent) and not read further.
+    -- The photos, in ascending id order; virtual copies are not new files. Photos that «Import a folder without the
+    -- dialog...» sent itself are left out (AutoSendPlan.recordSent) and not read further.
     local sentByCommand = AutoSendPlan.sentByCommand(prefs, catalogPath)
     local leftOut, photos, photoIds, ids = {}, {}, {}, {}
     for i, entry in ipairs(picked.photos) do

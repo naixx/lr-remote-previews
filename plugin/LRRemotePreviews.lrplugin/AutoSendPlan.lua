@@ -18,13 +18,13 @@
 -- never sent. Switching the option off forgets everything (AutoSendPlan.forget), so switching it on again starts
 -- afresh.
 --
--- Photos that «Add a folder without previews...» adds and sends itself (version 0.5.0) are left out by the automatic
--- send, so that no photo is sent twice when both are on. The command records their catalog ids under
--- AutoSendPlan.SENT_KEY right after each batch it added (AutoSendPlan.recordSent), before the automatic send can take
--- them: a photo is taken only in the round after the one that first saw it, at least 30 seconds later. That record
--- has one writer, the command; it drops the ids the automatic send can no longer take (at or below its mark), and,
--- when the catalog has no state (the automatic send is off or has not had its first round, whose mark will cover
--- every photo there is), the ids of earlier runs.
+-- Photos that «Import a folder without the dialog...» (version 0.6.0; 0.5.0's «Add a folder without previews...»
+-- before it) sends itself are left out by the automatic send, so that no photo is sent twice when both are on. While
+-- that command waits for Lightroom's import and sends, it holds the fetch lock, so no round of the automatic send can
+-- send anything; right before it sends, it records the photos' catalog ids under AutoSendPlan.SENT_KEY
+-- (AutoSendPlan.recordSent), and the rounds after it skip them. That record has one writer, the command; it drops the
+-- ids the automatic send can no longer take (at or below its mark), and, when the catalog has no state (the automatic
+-- send is off or has not had its first round, whose mark will cover every photo there is), the ids of earlier runs.
 local Json = require 'Json'
 local PathMap = require 'PathMap'
 
@@ -53,7 +53,7 @@ AutoSendPlan.LEFT_OUT = {
     { 'sameFile', 'same file as another photo' },
     { 'fileIdMismatch', 'the catalog database names another file' },
     { 'gaveUp', 'no file record in the catalog database after ' .. AutoSendPlan.MAX_TRIES .. ' rounds' },
-    { 'sentByCommand', 'added and sent by «Add a folder without previews»' },
+    { 'sentByCommand', 'imported and sent by «Import a folder without the dialog»' },
 }
 
 local function isId(value)
@@ -101,8 +101,8 @@ function AutoSendPlan.save(store, catalogPath, state)
     return true
 end
 
--- Forgets the states of all catalogs (the option was switched off), and the photos «Add a folder without previews...»
--- sent: when the option is switched on again, its first round's mark covers all of them.
+-- Forgets the states of all catalogs (the option was switched off), and the photos «Import a folder without the
+-- dialog...» sent: when the option is switched on again, its first round's mark covers all of them.
 function AutoSendPlan.forget(store)
     store[AutoSendPlan.KEY] = nil
     store[AutoSendPlan.SENT_KEY] = nil
@@ -120,7 +120,7 @@ local function loadSent(store)
     return decoded
 end
 
--- Records the catalog ids of photos that «Add a folder without previews...» added and is going to send, so that the
+-- Records the catalog ids of photos that «Import a folder without the dialog...» is going to send, so that the
 -- automatic send leaves them out. run: a text naming the command's run. Ids the automatic send can no longer take are
 -- dropped (see the header). Must be called with no wait between reading and writing (Lightroom switches tasks only
 -- where one waits). Returns the number of ids kept for the catalog, or false for a missing catalog path.
@@ -160,7 +160,7 @@ function AutoSendPlan.recordSent(store, catalogPath, ids, run)
     return #keep
 end
 
--- The catalog ids «Add a folder without previews...» recorded for this catalog: { [id] = true }.
+-- The catalog ids «Import a folder without the dialog...» recorded for this catalog: { [id] = true }.
 function AutoSendPlan.sentByCommand(store, catalogPath)
     local key = PathMap.fileKey(catalogPath)
     local entry = key and loadSent(store)[key]

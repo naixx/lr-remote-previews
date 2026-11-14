@@ -1,8 +1,9 @@
 # 0005. Nothing of the user's is put at risk: read-only originals, checked deliveries, no overwrites
 
 Status: accepted (2026-11-13). Amended by [0007](0007-photos-added-through-lightroom-on-the-users-command.md)
-(2026-11-14): item 2 means the project never writes the catalog itself; photos are added only by Lightroom's own
-`catalog:addPhoto`, on the user's command, which also never touches a file on disk.
+(2026-11-14): item 2 means the project never writes the catalog itself; photos enter the catalog only through
+Lightroom's own import, started on the user's command and only after the plug-in checked that the previous import was
+«Add» (references only, no copy or move); the plug-in itself never touches a file on disk.
 
 ## Context
 
