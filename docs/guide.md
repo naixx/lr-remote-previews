@@ -4,12 +4,13 @@ This guide takes you from nothing to a first smart preview that was built on you
 Lightroom Classic catalog. It assumes that you are comfortable with a NAS, Docker and a command line, and that you
 have never seen this project. When something does not work, see [troubleshooting.md](troubleshooting.md).
 
-> **State of the project: server 0.3.0, plug-in 0.3.0.** Verified with Lightroom Classic 15.6 on Windows and Adobe
+> **State of the project: server 0.3.0, plug-in 0.5.0.** Verified with Lightroom Classic 15.6 on Windows and Adobe
 > DNG Converter 17.2 under Wine 8.0 on a TrueNAS SCALE machine: the server builds smart previews (0.26–0.35 s per
 > 24 MP photo on a 14-core desktop CPU), it survives a restart in the middle of a job, and the plug-in's command
 > «Build smart previews on the server» (in version 0.2.0) placed and registered 157 smart previews. The commands that
 > are new in 0.3.0 (send, fetch, status, automatic fetch) have passed tests outside Lightroom **but have not been run
-> in Lightroom yet**. macOS and other Lightroom versions are untested. Try everything on a test catalog first.
+> in Lightroom yet**, and neither have those of 0.4.0 and 0.5.0 (among them «Add a folder without previews...»).
+> macOS and other Lightroom versions are untested. Try everything on a test catalog first.
 
 ## 1. What it does and what you need
 
@@ -41,8 +42,10 @@ for a test job without Lightroom.
 
 ### What it never does
 
-- **It never writes to your catalog.** The plug-in reads the catalog with `sqlite3` in read-only mode, puts files into
-  the smart preview folder next to the catalog, and Lightroom registers them itself.
+- **It never writes to your catalog itself.** The plug-in reads the catalog with `sqlite3` in read-only mode and puts
+  files into the smart preview folder next to the catalog. Lightroom changes its catalog itself, through its own
+  plug-in interface: it registers those files, and, when you run **Add a folder without previews...**, it adds the
+  photos of the folders you chose, as its import would ([decision record 0007](adr/0007-photos-added-through-lightroom-on-the-users-command.md)).
 - **It never changes your originals.** The container mounts them read-only, and no part of the server writes under a
   root.
 - **It never uploads anything from your computer.** The server reads originals it already has. All that travels from
@@ -324,7 +327,7 @@ On the Lightroom computer:
 
 A smart preview's file is named after the file's id in the catalog, and Lightroom's plug-in interface does not give
 that id. The plug-in reads it from the catalog with the `sqlite3` command-line tool, in read-only mode, while
-Lightroom has the catalog open. Nothing writes to the catalog.
+Lightroom has the catalog open. The plug-in never writes to the catalog itself.
 
 Download the "sqlite-tools" archive for Windows from [sqlite.org](https://sqlite.org/download.html) and take
 `sqlite3.exe` out of it. The plug-in looks for the tool in this order:
@@ -391,6 +394,12 @@ Measured on Lightroom Classic 15.6 with 24-megapixel Sony raw files on a NAS rea
 of 25 MB. The size of these previews is the camera's choice: 3008 px from the paired JPEGs of that camera, 1616 px
 from the JPEG inside its raw files.
 
+**An alternative to step 1, not yet run in Lightroom:** **Add a folder without previews...** (plug-in 0.5.0) adds the
+files of a folder to the catalog without the import dialog and asks Lightroom for no preview at all; with «Send the
+added photos to the server afterwards» it also does step 3 in the same go. Whether this is faster than the import
+above, and what Lightroom reads from the NAS and renders by itself when it shows these photos, has not been measured
+yet. See the command's description below.
+
 Two settings matter:
 
 - Leave **Preferences > General > «Replace embedded previews with standard previews during idle time»** off, or
@@ -408,10 +417,12 @@ keep the Develop module on the smart previews. Its effect in this workflow has n
 | **Send to the server** | You want smart previews for many photos and do not want to wait: send, close Lightroom, fetch later | No |
 | **Fetch ready smart previews** | The server has finished all or part of what was sent, from this catalog or from anywhere else | Only while it fetches |
 | **Build smart previews on the server** | A smaller selection that you want now: it sends, waits and fetches in one go | Yes, until it is done |
+| **Add a folder without previews...** | Photos on the NAS are not in the catalog yet, and you want them there without the import dialog and without Lightroom building previews, then (optionally) sent to the server. Not yet run in Lightroom | Yes, while it adds and sends |
 
-All three leave out photos that already have a smart preview and never replace a file, so running one of them again,
-or another one after it, is harmless. The first time, try **Build smart previews on the server** on a few raw photos
-of a test catalog.
+The first three leave out photos that already have a smart preview and never replace a file, so running one of them
+again, or another one after it, is harmless. **Add a folder without previews...** leaves files that are in the catalog
+already alone, so running it again on the same folder adds only what is new. The first time, try **Build smart
+previews on the server** on a few raw photos of a test catalog.
 
 **Send to the server** and **Build smart previews on the server** work on Lightroom's target photos: the selected
 photos, or, when nothing is selected, every photo in the filmstrip. The confirmation dialog shows how many will be
@@ -445,6 +456,34 @@ shows the progress (`12 of 40 finished on the server, 9 placed`) and places each
 ready. **Cancel** cancels the job on the server; smart previews already placed stay. If the server becomes
 unreachable, the command stops after ten failed attempts in a row and leaves the job on the server: **Fetch ready
 smart previews** brings the rest later.
+
+**Add a folder without previews...** (new in 0.5.0, **not yet run in Lightroom**). It works on folders, not on
+selected photos:
+
+1. Choose one or more folders, then the options: **Include sub-folders** (on), **Also add JPEG, TIFF, PNG, HEIC and
+   PSD files** (off: camera raw files only, the types the server takes, or a built-in list of the same types when no
+   server answers), and **Send the added photos to the server afterwards** (on; offered only when the server is set up
+   and the folder lies under one of your path mappings). The plug-in remembers your choices.
+2. The plug-in lists the folders without opening any file. It leaves out hidden files, files of other types, and a
+   JPEG next to a raw file of the same name, because Lightroom's own import treats such a JPEG as part of the raw
+   photo. It does not look into hidden folders, Lightroom's `.lrdata` folders, or NAS system folders such as
+   `@eaDir` and `#recycle`.
+3. It leaves out the files that are in the catalog already and asks for confirmation:
+   `120 files will be added to the catalog from Z:\2026\2026.06.20 - shoot (with sub-folders).`
+4. Lightroom adds the files, 50 at a time, through its plug-in interface (`catalog:addPhoto`). The plug-in asks for no
+   preview of any kind, and it never changes, moves or deletes a file on disk. **Cancel** stops after the current 50;
+   the photos added until then stay.
+5. With «send afterwards», the added photos go to the server as with **Send to the server** (a job labelled «Lightroom
+   folder (added without previews)»), and **Fetch ready smart previews** or the automatic fetch brings their smart
+   previews in later. If the automatic send is on as well, it leaves these photos alone, so nothing is sent twice.
+
+The summary says how many were added, how many were in the catalog already, how many JPEGs were left out next to
+their raw files, which files Lightroom refused or could not add (the first five with Lightroom's reason), what was
+sent (with the job number) or why nothing was, and how long listing, looking up, adding and sending took. Lightroom
+lists the photos in the Library's **Folders** panel. To take them out again, select them, choose **Photo > Remove
+Photos** and then «Remove from Lightroom» (never «Delete from Disk»); the files on disk are not touched. Choose the
+folder by the same path the catalog uses for your photos (the same drive letter or network path): a file reached by
+another spelling is not recognised as one that is in the catalog already.
 
 ### What is left out, and why
 
@@ -541,8 +580,10 @@ without a restart, and at the latest when the catalog is opened again.
 
 **To undo it**, use Lightroom's own command: select the photos and choose **Library > Previews > Discard Smart
 Previews**. The project never deletes smart previews itself. Discarding smart previews that this project placed has
-not been tested; Lightroom treats them as its own in every test so far. Apart from those files the plug-in changes
-nothing in the catalog, so there is nothing else to undo. To remove the plug-in, select it in the Plug-in Manager and
+not been tested; Lightroom treats them as its own in every test so far. Apart from those files, the catalog changes
+only when you run **Add a folder without previews...**: take its photos out with Lightroom's own command, as after an
+import (select them, **Photo > Remove Photos**, then «Remove from Lightroom»; nothing on disk is touched). There is
+nothing else to undo. To remove the plug-in, select it in the Plug-in Manager and
 press **Remove**. To remove the server, run `docker compose down` in `deploy/`; `docker compose down -v` also deletes
 the named volumes with the database, the cache and the converter.
 
@@ -583,8 +624,8 @@ a catalog you care about:
 2. Run the diagnostics report and check that those photos now have a smart preview path.
 3. Optionally, compare one server-built DNG with a smart preview Lightroom built itself ([tools/README.md](../tools/README.md)).
 
-If any step fails, stop using the plug-in on that Lightroom version and report it. Because nothing writes to the
-catalog, the expected worst case is that smart previews are not picked up, not a damaged catalog.
+If any step fails, stop using the plug-in on that Lightroom version and report it. Because the plug-in never writes to
+the catalog itself, the expected worst case is that smart previews are not picked up, not a damaged catalog.
 
 ## 9. Limits and what is not verified
 
@@ -612,6 +653,9 @@ Not verified:
 
 - The 0.3.0 commands **Send to the server**, **Fetch ready smart previews**, **Server status...** and the automatic
   fetch in Lightroom. They passed tests outside Lightroom only.
+- **Add a folder without previews...** (0.5.0) in Lightroom: how Lightroom's `catalog:addPhoto` behaves (its errors,
+  its speed over the network), what Lightroom then reads and renders by itself when it shows such photos, and whether
+  it records a JPEG next to a raw file with the raw photo as its import does. It passed tests outside Lightroom only.
 - Lightroom Classic versions other than 15.6, and the plug-in on macOS.
 - Adobe DNG Converter versions other than 17.2, Adobe's installer under Wine, and Wine versions other than 8.0.
 - Raw formats other than Sony ARW.

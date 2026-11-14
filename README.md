@@ -25,7 +25,9 @@ between the two): 0.26–0.35 s per photo on the server against 0.9–1.2 s thro
 
 ## What it does not do
 
-- It never writes to your catalog. It reads it (read-only) to learn where each smart preview belongs.
+- It never writes to your catalog itself. It reads it (read-only) to learn where each smart preview belongs. Lightroom
+  changes the catalog through its own plug-in interface: it registers the smart previews, and adds photos when you run
+  the plug-in's «Add a folder without previews...» ([decision record 0007](docs/adr/0007-photos-added-through-lightroom-on-the-users-command.md)).
 - It never changes your originals; the server mounts them read-only.
 - It does not contain Adobe software. The server needs **Adobe DNG Converter**, which you obtain from Adobe and install
   into the app yourself: [docs/converter.md](docs/converter.md).

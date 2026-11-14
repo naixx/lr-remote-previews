@@ -52,6 +52,64 @@ describe('AutoSendPlan state', function()
     end)
 end)
 
+describe('AutoSendPlan photos sent by «Add a folder without previews...»', function()
+    local function idList(set)
+        local list = {}
+        for id in pairs(set) do
+            list[#list + 1] = id
+        end
+        table.sort(list)
+        return list
+    end
+
+    it('keeps them per catalog until the automatic send can no longer take them', function()
+        local store = {}
+        assert.are.same({}, idList(AutoSendPlan.sentByCommand(store, CATALOG)))
+        AutoSendPlan.save(store, CATALOG, { mark = 100, seen = 100 })
+        assert.are.equal(3, AutoSendPlan.recordSent(store, CATALOG, { 105, 101, 'x', 0, 101, 103 }, 'run-1'))
+        assert.are.same({ 101, 103, 105 }, idList(AutoSendPlan.sentByCommand(store, 'c:/photos/main/MAIN.LRCAT')))
+        assert.are.same({}, idList(AutoSendPlan.sentByCommand(store, 'C:\\Photos\\Other\\Other.lrcat')))
+        -- the automatic send passed 103: what is at or below its mark is dropped at the next record, of any run
+        AutoSendPlan.save(store, CATALOG, { mark = 103, seen = 110 })
+        assert.are.equal(2, AutoSendPlan.recordSent(store, CATALOG, { 110, 99 }, 'run-2'))
+        assert.are.same({ 105, 110 }, idList(AutoSendPlan.sentByCommand(store, CATALOG)))
+        assert.is_false(AutoSendPlan.recordSent(store, nil, { 1 }, 'run-3'))
+    end)
+
+    it('without a state of the automatic send, keeps only the ids of the current run', function()
+        local store = {}
+        AutoSendPlan.recordSent(store, CATALOG, { 5, 6 }, 'run-1')
+        AutoSendPlan.recordSent(store, CATALOG, { 7 }, 'run-1')
+        assert.are.same({ 5, 6, 7 }, idList(AutoSendPlan.sentByCommand(store, CATALOG)))
+        AutoSendPlan.recordSent(store, CATALOG, { 9 }, 'run-2')
+        assert.are.same({ 9 }, idList(AutoSendPlan.sentByCommand(store, CATALOG)))
+        assert.are.equal(0, AutoSendPlan.recordSent(store, CATALOG, {}, 'run-3'))
+        assert.are.same({}, idList(AutoSendPlan.sentByCommand(store, CATALOG)))
+    end)
+
+    it('keeps at most MAX_SENT ids, the largest, and is forgotten with the state', function()
+        local store = {}
+        local many = {}
+        for i = 1, AutoSendPlan.MAX_SENT + 3 do
+            many[i] = i
+        end
+        assert.are.equal(AutoSendPlan.MAX_SENT, AutoSendPlan.recordSent(store, CATALOG, many, 'run-1'))
+        local kept = AutoSendPlan.sentByCommand(store, CATALOG)
+        assert.is_nil(kept[3])
+        assert.is_true(kept[4])
+        assert.is_true(kept[AutoSendPlan.MAX_SENT + 3])
+        AutoSendPlan.forget(store)
+        assert.is_nil(store[AutoSendPlan.SENT_KEY])
+        assert.are.same({}, idList(AutoSendPlan.sentByCommand(store, CATALOG)))
+        assert.are.same({}, idList(AutoSendPlan.sentByCommand({ [AutoSendPlan.SENT_KEY] = '{oops' }, CATALOG)))
+    end)
+
+    it('names them in the round\'s log line', function()
+        assert.are.equal('sent nothing; 2 left out (added and sent by «Add a folder without previews»: 2)',
+            AutoSendPlan.roundText({ leftOut = { sentByCommand = 2 } }))
+    end)
+end)
+
 describe('AutoSendPlan.scan', function()
     it('keeps the photos above the mark in id order, with the largest id and the count', function()
         local found, maxId, count = AutoSendPlan.scan(photos({ 5, 210, 3, 205, 'x', 0, 208 }), idOf, 200)

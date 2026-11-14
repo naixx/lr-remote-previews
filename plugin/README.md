@@ -6,10 +6,12 @@ build smart previews, and brings them into the catalog. It covers **stage 2** of
 Three commands send and fetch (**Send to the server**, **Fetch ready smart previews**, **Build smart previews on the
 server**), an optional automatic fetch runs while Lightroom is open, **Server status...** shows this catalog's jobs and
 can retry failed ones, **Check the server against Lightroom** compares the server's DNG with a smart preview Lightroom
-built itself (stage 5), and an optional automatic send sends photos added to the catalog (stage 4).
+built itself (stage 5), and an optional automatic send sends photos added to the catalog (stage 4). Since version
+0.5.0, **Add a folder without previews...** adds the photos of a folder to the catalog without Lightroom's import
+dialog and without asking Lightroom for any preview, and can send them to the server in the same go.
 
-Status: **versions 0.3.0 and 0.4.0 have not been run in Lightroom.** Version 0.2.0 (the build command) was run in
-Lightroom Classic 15.6 on Windows on 157 photos (see the table at the end). Everything new in 0.3.0 and 0.4.0 is
+Status: **versions 0.3.0, 0.4.0 and 0.5.0 have not been run in Lightroom.** Version 0.2.0 (the build command) was
+run in Lightroom Classic 15.6 on Windows on 157 photos (see the table at the end). Everything new in 0.3.0 to 0.5.0 is
 checked only by the unit tests and by runs with stand-in Lightroom functions (cooperative tasks, a virtual clock)
 against a fake server that follows the protocol, and the plug-in's server calls also against the real server without
 a converter (no Lightroom involved in either).
@@ -88,9 +90,11 @@ slashes, never a local path ([protocol](../docs/protocol.md#paths)). Fetching «
 server's root id and relative path back with the same mappings (`PathMap.localPaths`): one candidate per mapping with
 that root id, in the order of the mappings.
 
-Besides the settings, the plug-in keeps three things per catalog in its preferences, keyed by the catalog's path: the
-catalog's `clientId`, how far fetching got for each of the catalog's jobs, and how far the automatic send got (all as
-JSON text). None is shown in the Plug-in Manager.
+Besides the settings, the plug-in keeps four things per catalog in its preferences, keyed by the catalog's path: the
+catalog's `clientId`, how far fetching got for each of the catalog's jobs, how far the automatic send got, and the
+catalog ids of the photos **Add a folder without previews...** added and sent itself, which the automatic send leaves
+out (all as JSON text). It also remembers the choices of **Add a folder without previews...** and the folder chosen
+last. None of this is shown in the Plug-in Manager.
 
 ## Commands
 
@@ -104,9 +108,11 @@ All under **Library > Plug-in Extras**.
 | **Fetch ready smart previews** | The server has finished (or partly finished) what was sent, from this catalog or from anywhere else | Only while it fetches |
 | **Build smart previews on the server** | A smaller selection that you want right away: it sends, waits and fetches in one go, as version 0.2.0 did | Yes, until it is done |
 | **Check the server against Lightroom** | After an update of Lightroom or of the server's Adobe DNG Converter: is the server's DNG still the file Lightroom builds? | Yes, until it is done |
+| **Add a folder without previews...** | Photos on the NAS are not in the catalog yet: add them without the import dialog and without asking Lightroom for previews, and optionally send them to the server. Not yet run in Lightroom | Yes, while it adds and sends |
 
 The first three leave out photos that already have a smart preview and never replace a file, so running one of them
-again, or another one after it, is harmless. The check writes nothing at all.
+again, or another one after it, is harmless. The check writes nothing at all. **Add a folder without previews...**
+leaves files that are in the catalog already alone, so running it again on the same folder adds only what is new.
 
 ### The clientId
 
@@ -257,6 +263,85 @@ after an update of Lightroom or of the converter on the server.
 The plan's «refuse to deliver when the check fails» is not part of this version: the check is a command to run by
 hand.
 
+### Add a folder without previews...
+
+New in 0.5.0, **not yet run in Lightroom.** It adds the photo files of one or more folders to the catalog without
+Lightroom's import dialog and without asking Lightroom for any preview, so that the smart previews can be built on the
+server instead. What Lightroom then does by itself when it shows such photos (thumbnails, previews, what it reads from
+the NAS for them) has not been measured. It is Lightroom that changes its catalog here, through its own plug-in
+interface and on the user's command, as its import does
+([decision record 0007](../docs/adr/0007-photos-added-through-lightroom-on-the-users-command.md)); the command never
+opens, changes, moves or deletes a file and writes nothing next to the originals.
+
+1. A folder dialog (`LrDialogs.runOpenPanel`, folders only, several allowed) that opens in the folder holding the one
+   chosen last. Then the options (`LrDialogs.presentModalDialog`): **Include sub-folders** (on by default); **Also add
+   JPEG, TIFF, PNG, HEIC and PSD files** (off: camera raw files only); **Send the added photos to the server
+   afterwards** (on by default, offered only when a server URL is set and a chosen folder lies under a path mapping;
+   otherwise it is off and the dialog says why). The choices and the folder are remembered in the plug-in's
+   preferences, apart from the Plug-in Manager's settings (`Settings.readAddFolder`).
+2. When a server URL is set, `GET /api/v1/info`: the camera raw types are the extensions the server accepts. Without
+   a server, or when it does not answer, a built-in list of the same 22 types (`FolderListing.RAW_EXTENSIONS`; a spec
+   keeps it equal to `server/src/lrrp/converter.py`).
+3. The listing (`FolderListing.lua`), with `LrFileUtils.files` and `LrFileUtils.directoryEntries`, which read folder
+   listings only; no file is opened. Left out and counted: files whose name starts with a dot; files of other types;
+   a JPEG (`.jpg`, `.jpeg`) next to a raw file of the same name in the same folder (the base name compared without
+   regard to case), counted as paired with that raw file. That is because Lightroom's own import, with its default
+   setting, treats such a JPEG as part of the raw photo and not as a photo of its own. Whether Lightroom records the
+   JPEG with the raw photo when the raw file is added this way is not known. Folders not looked into (the chosen
+   folders always are): names starting with a dot, Lightroom's data folders (`*.lrdata`: the previews and smart
+   previews of a catalog, whose DNGs must never become photos), the NAS system folders `@eaDir`, `#recycle`,
+   `#snapshot`, `@Recycle` and `@Recently-Snapshot`, and anything more than 32 levels deep. Overlapping folders are
+   listed once; the files are sorted by folder, then by name.
+4. Every file is looked up with `catalog:findPhotoByPath` (Windows paths also without regard to case,
+   `PhotoAccess.findByPath`); files in the catalog already are left alone. A confirmation shows the counts.
+5. The rest are added with `catalog:addPhoto(path)` (the path only: no stacking, no presets), 50 files per
+   `catalog:withWriteAccessDo` with a timeout of 30 seconds (`PhotoAdder.lua`, decisions in `AddPlan.lua`). Cancel
+   is honoured between writes. Each `addPhoto` runs through `LrTasks.pcall` inside the write, so a file Lightroom
+   refuses (the SDK: it throws when the path does not exist or the format is not supported) is counted and logged with
+   Lightroom's text, and the rest of the batch stays; whether a refusal counts as «not supported» or as another
+   failure is told only by that text. A write that an error leaves anyway is rolled back by Lightroom (as the SDK
+   says), and its files are tried again one write each, each looked up first. A write that does not run (`'aborted'`
+   after its timeout, or refused before it starts) is tried again after 2 seconds, looking its files up first; after
+   3 such tries in a row the run stops and says so. `'queued'` is not expected, because the writes are not
+   asynchronous.
+6. With «send afterwards», when the server said at the start that it can build (otherwise the confirmation and the
+   summary say why not) and only when the adding finished: the added photos go through the same steps as **Send to
+   the server** (`Pipeline.prepareSend`, `Pipeline.sendJobs`: the checks, the file UUIDs with sqlite3, one job per
+   `maxItemsPerJob`), without its confirmation, labelled «Lightroom folder (added without previews)» with the
+   catalog's `clientId`, so that **Fetch ready smart previews** or the automatic fetch brings their smart previews in.
+   Photos that were in the catalog already are not sent. That sqlite3 sees the file records of photos added a moment
+   before is assumed; a photo it does not find is left out as «not found in the catalog database» and can be sent
+   later with **Send to the server**.
+7. The summary: added; already in the catalog; not supported; failed (the first 5 with Lightroom's reason); not added
+   because the run stopped; what the listing left out (paired JPEGs, other files, hidden files, folders not looked
+   into); the times; what was sent (job numbers) or why nothing was; where the photos are (the Library's Folders panel)
+   and how to take them out (select them, Photo > Remove Photos, «Remove from Lightroom»; nothing on disk is touched).
+
+**Its log.** One line per file, for example `add folder: Z:\2026\IMG_0001.ARW: added (0.19 s)`,
+`… IMG_0001.JPG: pairedJpeg (next to IMG_0001.ARW)`, `… notes.txt: notPhoto (.txt)`, `… alreadyInCatalog (…)`,
+`… notSupported (<Lightroom's text>, 0.05 s)`, `… notAdded (…)`; one per folder not looked into; and the timings:
+`add folder: listing: 3 folder(s) looked into, 812 file(s) found, 600 to look up in the catalog, 2.31 s`,
+`add folder: catalog lookup: …`, one line per write
+(`add folder: batch 3 of 12: 50 files: 50 added; 9.81 s in all, 9.50 s inside the write (0.190 s per file), 0.31 s
+waiting for and finishing it`), the total (`add folder: adding: 500 files in 10 writes: …; 98.2 s, 0.196 s per file,
+0.205 s per added photo`) and `add folder: sending: …`. The times come from `LrDate.currentTime()`; that it has
+fractions of a second is assumed.
+
+**With the automatic send on.** Photos added with «send afterwards» are sent by this command, and the automatic send
+leaves them out, so none is sent twice. Right after each write the command records the new photos' catalog ids in the
+plug-in's preferences (`AutoSendPlan.recordSent`); the automatic send takes a photo only in the round after the one
+that first saw it (at least 30 seconds later) and skips recorded ids, which its log line counts as «added and sent by
+«Add a folder without previews»». The ids are recorded only when the server answered at the start and can build
+(`Selection.serverProblem`); otherwise the confirmation already says that nothing will be sent, and the automatic send
+treats the photos like any other. A run that was cancelled or stopped, or a send that failed later, leaves recorded
+photos unsent: send them with **Send to the server**. Photos added without «send afterwards» are new photos like any
+other for the automatic send, which sends the raw ones when it is on. The record keeps only ids the automatic send
+could still take (above its mark; without its state, those of the latest run).
+
+**Paths.** Choose the folder by the same path the catalog uses for those photos (the same drive letter or network
+path). A file reached by another spelling is not found by `findPhotoByPath`, and Lightroom would get a second photo
+for the same file (not tried).
+
 ### Automatic fetch
 
 Off by default. When it is switched on in the Plug-in Manager, a background task fetches everything this catalog sent
@@ -310,7 +395,7 @@ The rules (`AutoSendPlan.lua`):
 - A photo is taken in the round **after** the one that first saw it, so that an import in progress has settled.
 - Left out for good: virtual copies, videos, photos that already have a smart preview, file types the server does not
   take, photos under no path mapping or whose server root is not available, photos whose catalog record names another
-  file.
+  file, and photos that **Add a folder without previews...** added and sends itself (see there).
 - A photo whose file record cannot be read from the catalog database yet (sqlite3) waits, together with the photos
   after it, for the next round; after 3 rounds it is left out and the others go ahead.
 - At most 500 photos per round (and at most the server's `maxItemsPerJob`); the rest follow in the next rounds.
@@ -344,11 +429,16 @@ folder. The access token is never logged.
 ## Safety rules
 
 From [decision record 0005](../docs/adr/0005-nothing-of-the-users-is-put-at-risk.md) and the last section of the
-[protocol](../docs/protocol.md), unchanged in 0.4.0 and the same for every command, the automatic fetch and the
-automatic send (which places nothing itself; its photos are placed by a fetch):
+[protocol](../docs/protocol.md), with [decision record 0007](../docs/adr/0007-photos-added-through-lightroom-on-the-users-command.md)
+since 0.5.0, the same for every command, the automatic fetch and the automatic send (which places nothing itself; its
+photos are placed by a fetch):
 
-- The catalog is only read, with sqlite3 in read-only mode; nothing writes to it. Lightroom registers a placed file
-  itself when `buildSmartPreview()` is called ([decision record 0001](../docs/adr/0001-register-by-placing-the-file.md)).
+- The plug-in only reads the catalog, with sqlite3 in read-only mode, and never writes to it itself. Lightroom changes
+  its catalog through its own plug-in interface: it registers a placed file when `buildSmartPreview()` is called
+  ([decision record 0001](../docs/adr/0001-register-by-placing-the-file.md)), and it adds photos when **Add a folder
+  without previews...** calls `catalog:addPhoto` on the user's command (decision record 0007).
+- **Add a folder without previews...** reads folder listings only. It never opens, changes, moves or deletes a file
+  and writes nothing next to the originals, and it asks Lightroom for no preview of any kind.
 - A DNG is placed only after its length, its original file name and (when known) its original pixel size match the
   photo. A file that fails is discarded and reported; it is never written into the store.
 - Files are written under a temporary name in the destination folder and renamed. An existing smart preview is never
@@ -393,17 +483,20 @@ Lua 5.1:
 | `CompatCheck.lua` | yes | «Check the server against Lightroom»: which photo can be checked, what to do with the server's answers, the result text |
 | `Delivery.lua` | yes | Checking a downloaded DNG, placing it (temporary name, rename, no overwrite), `buildSmartPreview()` |
 | `RunSummary.lua` | yes | Counts per outcome and reason, the dialog texts, the per-photo log lines |
+| `FolderListing.lua` | yes | «Add a folder without previews...»: walking the folders (file system passed in), the folders not looked into, which files are added, RAW+JPEG pairs, the order |
+| `AddPlan.lua` | yes | «Add a folder without previews...»: whether it can send, the batches, what a write's answer means, the counts, the confirmation and summary, the log lines and timings |
 | `Json.lua` | yes | JSON, [rxi/json.lua](https://github.com/rxi/json.lua) unmodified (see [THIRD-PARTY.md](THIRD-PARTY.md)) |
 | `Log.lua` | no | `LrLogger` wrapper |
 | `ServerClient.lua` | no | `LrHttp` calls to the server |
 | `SqliteRunner.lua` | no | Finding and running sqlite3 with `LrTasks.execute` |
 | `PhotoAccess.lua` | no | Reading photos, finding them by path, the selection, the file operations for `Delivery` |
-| `Pipeline.lua` | no | The steps the commands share: preparing a send, lookups, the download queue, the fetch lock, the `clientId` |
+| `Pipeline.lua` | no | The steps the commands share: preparing a send and creating its jobs, lookups, the download queue, the fetch lock, the `clientId` |
+| `PhotoAdder.lua` | no | `catalog:addPhoto` in batches inside `catalog:withWriteAccessDo`: retries, rollbacks, the timings |
 | `Fetcher.lua` | no | Fetching for a selection or for everything this catalog sent |
 | `AutoFetch.lua` | no | Starting and stopping the automatic loop (fetch and send) |
 | `AutoSend.lua` | no | One round of the automatic send: finding new photos (scan, fallback), sending them |
 | `PluginInfoProvider.lua` | no | The Plug-in Manager section |
-| `SendToServer.lua`, `FetchSmartPreviews.lua`, `BuildSmartPreviews.lua`, `ServerStatus.lua`, `CheckServer.lua`, `Diagnostics*.lua` | no | The menu commands |
+| `AddFolderWithoutPreviews.lua`, `SendToServer.lua`, `FetchSmartPreviews.lua`, `BuildSmartPreviews.lua`, `ServerStatus.lua`, `CheckServer.lua`, `Diagnostics*.lua` | no | The menu commands |
 | `InitPlugin.lua`, `EnablePlugin.lua`, `DisablePlugin.lua`, `ShutdownPlugin.lua` | no | Start and stop the automatic loop |
 
 A smart preview lives at `<catalog folder>\<catalog name> Smart Previews.lrdata\<U[0]>\<U[0..3]>\<U>.dng`, where `U`
@@ -507,3 +600,18 @@ Version 0.4.0: nothing has been tried in Lightroom yet.
 | New photos of an import getting larger `localIdentifier` values than every photo before them | not checked (undocumented) |
 | The fallback `catalog:findPhotos` with `touchTime` «inLast» N hours; whether an import sets the Edit Date | not tried (undocumented) |
 | The automatic send and fetch in one loop; switching the send off and on; a restart of Lightroom in between | not tried |
+
+Version 0.5.0: nothing has been tried in Lightroom yet. What to look at when it is:
+
+| What | Result |
+|---|---|
+| The menu item «Add a folder without previews...»; `LrDialogs.runOpenPanel` with folders only and several folders; the options dialog (`presentModalDialog`, `checkbox` with `enabled`) | not tried |
+| `LrFileUtils.files` and `LrFileUtils.directoryEntries` on a NAS folder: full paths, hidden files, the time a large folder takes | not tried |
+| `catalog:findPhotoByPath` for every file of a folder before adding: the time it takes | not tried |
+| `catalog:addPhoto` inside `catalog:withWriteAccessDo` with `{ timeout = 30 }`: the answer `'executed'`, the photo it returns, the time per photo over the network | not tried |
+| `addPhoto` on a file of an unsupported type, an unreadable file, a file that is in the catalog already: whether it raises and with which text | not tried (the SDK documents an error for a missing path and an unsupported format only) |
+| `LrTasks.pcall` around each `addPhoto` inside the write, and `LrTasks.yield` there: the rest of the batch kept | not tried |
+| What Lightroom does by itself with photos added this way: thumbnails or previews when they are shown, what it reads from the NAS for them, the «Previous Import» collection, a JPEG next to a raw file recorded with the raw photo or not | not measured |
+| Sending right afterwards: sqlite3 finding the file records of the photos just added | not tried |
+| The automatic send leaving the command's photos out | not tried |
+| `LrDate.currentTime()` having fractions of a second (the log's timings) | not checked |

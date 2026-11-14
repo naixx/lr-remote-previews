@@ -1,6 +1,9 @@
 # 0001. A smart preview is registered by placing the file; the catalog is never written
 
-Status: accepted (2026-11-13)
+Status: accepted (2026-11-13). Amended by [0007](0007-photos-added-through-lightroom-on-the-users-command.md)
+(2026-11-14): «never written» means never by the project itself; Lightroom changes its catalog through its own plug-in
+interface when it registers a placed smart preview and when the user adds a folder with «Add a folder without
+previews...».
 
 ## Context
 

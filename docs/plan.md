@@ -29,7 +29,7 @@ finished files. The catalog stays on the user's computer and is never written by
 | Parts | A Lightroom Classic plug-in, a server packaged for TrueNAS, a dashboard |
 | Server stack | Python (FastAPI), dashboard in React + TypeScript + Vite |
 | Adobe DNG Converter | Not stored, not downloaded, not distributed by the project. Users install it into the app themselves; we describe what the app expects and what we verified |
-| Catalog | The plug-in reads the catalog in place, read-only. Nothing ever writes it |
+| Catalog | The plug-in reads the catalog in place, read-only, and never writes it itself. Lightroom changes it through its own plug-in interface on the user's command: registering a placed smart preview, adding photos with «Add a folder without previews...» ([adr/0007](adr/0007-photos-added-through-lightroom-on-the-users-command.md)) |
 | How a build starts | Selection in Lightroom; a folder picked on the dashboard; after an import in Lightroom; by itself for new files, only when a setting turns that on |
 | Standard previews | Not built by the project. Measured (stage 6): an import with «Embedded & Sidecar» previews removes the wait for them, and nothing the server could render would look like Lightroom's own |
 
@@ -49,7 +49,8 @@ finished files. The catalog stays on the user's computer and is never written by
 
 Rules the design keeps everywhere (see the decision records):
 
-1. **The catalog is never written by us.** Registration is: file into the store, then `buildSmartPreview()`.
+1. **The catalog is never written by us.** Registration is: file into the store, then `buildSmartPreview()`. Photos
+   are added only by Lightroom's own `catalog:addPhoto`, on the user's command (0007).
 2. **The originals are mounted read-only** in the container.
 3. **The server knows nothing about catalogs.** It turns «file at this path» into a DNG and caches it under a key made
    of the source's identity (root, path, size, modification time). The same cache serves any catalog, any client, and
@@ -158,6 +159,9 @@ The thinnest path through every part, usable for real work.
     original is read only at a 1:1 zoom. The guide describes this as the workflow to use (section 6).
   - Still open: whether Lightroom's «Use Smart Previews instead of Originals for image editing» keeps the Develop
     module off the originals in this workflow (one run without a restart of Lightroom still read them).
+  - Still open: the plug-in's «Add a folder without previews...» (plug-in 0.5.0) adds photos with `catalog:addPhoto`
+    instead of the import dialog and asks for no preview. How fast that is, and what Lightroom then reads and renders
+    by itself when it shows such photos, has not been measured.
 - GPU for the converter in the container. The two CPU-wasting modes (`-mp`, exactly two processes). A newer Wine.
 - Adobe's installer under Wine. Converters newer than 17.4, whose GPU switch changed. Passing `-dng1.7` explicitly,
   as Adobe's command-line examples for lossy JPEG XL do (we rely on the default).
@@ -177,7 +181,7 @@ docs/                               plan, decision records (adr/), research, gui
 
 | Risk | What we do about it |
 |---|---|
-| Everything rests on undocumented Lightroom behaviour (taking a file that appears in the store) | The stage 5 self-test; a list of Lightroom versions it was verified on; no catalog writes, so the worst case is «does not work», not a damaged catalog |
+| Everything rests on undocumented Lightroom behaviour (taking a file that appears in the store) | The stage 5 self-test; a list of Lightroom versions it was verified on; no catalog writes of our own, so the worst case is «does not work», not a damaged catalog |
 | Adobe's terms for the converter: no licence text naming it was found; Adobe's general software terms restrict hosting and remote access by third parties | The converter is never shipped; [converter.md](converter.md) reports what Adobe publishes without interpreting it; each user is responsible for complying |
 | The converter's GPU switch (`TempDisableGPU2`) is documented by Adobe for Camera Raw 17.4 and earlier only; a newer converter may ignore it and abort under Wine | Verified converter versions are listed (17.2 so far); a newer one is tested before it is recommended; other ways to keep it off the GPU are a research track |
 | Lightroom does not check the content of a smart preview | Checks in the plug-in before placing; identity-based cache key; tests for mix-ups |

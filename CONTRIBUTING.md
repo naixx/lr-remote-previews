@@ -8,7 +8,9 @@ The project is in early development. The [plan](docs/plan.md) says what is being
 - **Never commit Adobe software**, camera raw files, Lightroom catalogs, smart previews or anything from a real photo
   library. The `.gitignore` blocks the common extensions; do not work around it. Test data: see
   [docs/test-data.md](docs/test-data.md).
-- **No code path may write to a Lightroom catalog or to the originals.** See decision records 0001 and 0005.
+- **No code path may write to a Lightroom catalog or to the originals.** See decision records 0001 and 0005. The
+  catalog changes only through Lightroom's own plug-in interface, on the user's command: registering a placed smart
+  preview, and adding photos with «Add a folder without previews...» (decision record 0007).
 - Everything in the repository is in English: code, comments, commit messages, documentation.
 - No personal data in code, tests, fixtures or documentation: no real names, user names, host names, network
   addresses or local paths. Use neutral examples (`C:\Photos\Main\Main.lrcat`, `nas.local`, `archive`).

@@ -22,6 +22,7 @@ return {
     LrDisablePlugin = 'DisablePlugin.lua',
     LrShutdownPlugin = 'ShutdownPlugin.lua',
     LrLibraryMenuItems = {
+        { title = 'Add a folder without previews...', file = 'AddFolderWithoutPreviews.lua' },
         { title = 'Send to the server', file = 'SendToServer.lua' },
         { title = 'Fetch ready smart previews', file = 'FetchSmartPreviews.lua' },
         { title = 'Build smart previews on the server', file = 'BuildSmartPreviews.lua' },
@@ -31,5 +32,5 @@ return {
         { title = 'Check the server against Lightroom', file = 'CheckServer.lua' },
         { title = 'Diagnostics: new photos for the automatic send', file = 'DiagnosticsNewPhotos.lua' },
     },
-    VERSION = { major = 0, minor = 4, revision = 0, build = 0 },
+    VERSION = { major = 0, minor = 5, revision = 0, build = 0 },
 }

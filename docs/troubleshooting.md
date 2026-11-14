@@ -403,6 +403,27 @@ After you change `LRRP_WORKERS` or `LRRP_BATCH_SIZE` in `compose.yaml`, run `doc
   the queue runs. Until then the dashboard's Queue card says «Working» or «Idle», and `GET /api/v1/status` (with the
   token) has the counts `queue.queued` and `queue.building`; keep the NAS awake by its own means while they are not 0.
 
+## Add a folder without previews
+
+The command is new in plug-in 0.5.0 and has not been run in Lightroom yet. Its log lines start with `add folder:`.
+
+- **«Stopped: Lightroom did not give the plug-in write access to the catalog»**: something else held Lightroom's
+  catalog write access (another plug-in, an import running at the same time) through three tries of up to 30 seconds.
+  Run the command again on the same folder when Lightroom is idle; the files added so far are left alone.
+- **«Not added: Lightroom does not support the file»** or **«Not added: Lightroom reported an error»**: the summary
+  names the first five files with Lightroom's own text, the log all of them. The plug-in tells the two apart only by
+  that text, which Lightroom does not document. A raw format newer than your Lightroom, or a file that cannot be read
+  over the network, are likely causes.
+- **The same photo twice in the catalog**: expected when the folder was chosen by a path the catalog does not use for
+  those files, for example `\\nas.local\photos\` while the catalog knows them as `Z:\`. The plug-in looks files up by
+  path and cannot tell that the two are the same (not tried). Take the second set out with Photo > Remove Photos,
+  «Remove from Lightroom», and choose the folder the way the catalog spells it.
+- **Added, but not sent to the server**: the summary says why (no server set up, the folder under no path mapping,
+  the run cancelled or stopped, a file type the server does not take, a file record not found in the catalog database
+  yet). Select the photos and use **Send to the server**. The automatic send leaves alone the photos the command was
+  going to send itself (chosen «Send the added photos to the server afterwards», and the server could build when the
+  command started); the summary says so when that applies.
+
 ## After an update of Lightroom
 
 The project depends on behaviour Adobe does not document: where Lightroom keeps smart previews and how it names them,
@@ -415,9 +436,9 @@ only. Signs that an update changed something:
 - `Reading the file ids from the catalog failed: sqlite3 failed with exit code …` where it worked before.
 
 Stop fetching into catalogs you care about, run the checks of «After an update of Lightroom» in the
-[guide](guide.md#8-updating) on a test catalog, and report the result with the Lightroom version. Nothing writes to
-the catalog, so the expected worst case is smart previews that are not picked up; the files the plug-in placed are
-named in its log.
+[guide](guide.md#8-updating) on a test catalog, and report the result with the Lightroom version. The plug-in never
+writes to the catalog itself, so the expected worst case is smart previews that are not picked up; the files the
+plug-in placed are named in its log.
 
 ## After an update of the converter
 

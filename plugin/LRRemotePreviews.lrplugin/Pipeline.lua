@@ -1,7 +1,8 @@
--- The steps the commands share, connected to the SDK: file UUIDs from the catalog (sqlite3, read-only), looking files
--- up on the server, downloading several smart previews at once and placing them one at a time, and the lock that
--- keeps two fetches from running together. The decisions live in pure modules (FileIds, DownloadQueue, Delivery,
--- Lease, RunSummary); this file wires them to Lightroom. Must run inside an LrTasks task.
+-- The steps the commands share, connected to the SDK: file UUIDs from the catalog (sqlite3, read-only), creating the
+-- jobs of a send, looking files up on the server, downloading several smart previews at once and placing them one at
+-- a time, and the lock that keeps two fetches from running together. The decisions live in pure modules (FileIds,
+-- Jobs, DownloadQueue, Delivery, Lease, RunSummary); this file wires them to Lightroom. Must run inside an LrTasks
+-- task.
 --
 -- A ui table is passed to the long steps: { caption(text), portion(done, total), isCanceled() }; the automatic
 -- fetch passes one that shows nothing.
@@ -13,6 +14,7 @@ local ClientId = require 'ClientId'
 local Delivery = require 'Delivery'
 local DownloadQueue = require 'DownloadQueue'
 local FileIds = require 'FileIds'
+local Jobs = require 'Jobs'
 local Lease = require 'Lease'
 local Log = require 'Log'
 local PhotoAccess = require 'PhotoAccess'
@@ -20,6 +22,7 @@ local RunSummary = require 'RunSummary'
 local Selection = require 'Selection'
 local ServerClient = require 'ServerClient'
 local Settings = require 'Settings'
+local SqliteCommand = require 'SqliteCommand'
 local SqliteRunner = require 'SqliteRunner'
 
 local Pipeline = {}
@@ -157,6 +160,71 @@ function Pipeline.prepareSend(settings, catalog, photos, summary, ui)
         return nil, nothing
     end
     return { info = info, entries = entries }
+end
+
+-- The last step of sending (shared by «Send to the server» and «Add a folder without previews...»): one job per
+-- maxItemsPerJob photos of prepared (Pipeline.prepareSend's result), each with this catalog's clientId. Records every
+-- photo in summary and the log, and stops at the first job the server does not create. label: the jobs' label (nil:
+-- Jobs.LABEL); a run of several jobs adds '(part i of n)'.
+-- Returns { jobIds = { id, ... }, ready = n (built already), rejected = n, failedParts = message | nil }.
+function Pipeline.sendJobs(settings, catalogPath, prepared, summary, ui, label)
+    local entries = prepared.entries
+    local clientId = Pipeline.clientId(catalogPath)
+    local maxItems = prepared.info.capabilities.maxItemsPerJob
+    local parts = SqliteCommand.chunks(entries, maxItems or #entries)
+    local result = { jobIds = {}, ready = 0, rejected = 0, failedParts = nil }
+    for i, part in ipairs(parts) do
+        ui.caption(#parts == 1 and 'Sending the job' or string.format('Sending job %d of %d', i, #parts))
+        local partLabel = label
+        if #parts > 1 then
+            partLabel = string.format('%s (part %d of %d)', label or Jobs.LABEL, i, #parts)
+        end
+        local body, bodyError = Jobs.createBody(part, { clientId = clientId, label = partLabel })
+        local created, createProblem
+        if body then
+            created, createProblem = ServerClient.createJob(settings, body)
+        else
+            createProblem = { message = 'Cannot build the job request: ' .. bodyError }
+        end
+        local refsOk, refsProblem = true, nil
+        if created then
+            refsOk, refsProblem = Jobs.checkRefs(created.items, part)
+            if not refsOk then
+                ServerClient.cancelJob(settings, created.job.id)
+            end
+        end
+        if not created or not refsOk then
+            local why = created and ('the server\'s answer does not match the request (' .. refsProblem
+                .. '); that job was cancelled') or Jobs.createProblemText(createProblem, maxItems)
+            Log.warn('send: part %d of %d failed: %s', i, #parts, why)
+            result.failedParts = string.format('Part %d of %d (%d photos) and the parts after it were not sent: %s',
+                i, #parts, #part, why)
+            break
+        end
+        local jobId = created.job.id
+        result.jobIds[#result.jobIds + 1] = jobId
+        summary.sent = summary.sent + #part
+        local byRef = {}
+        for _, entry in ipairs(part) do
+            byRef[entry.ref] = entry
+        end
+        for _, item in ipairs(created.items) do
+            local entry = byRef[item.ref]
+            if item.state == 'rejected' then
+                local code = (item.error and item.error.code) or 'unknown'
+                result.rejected = result.rejected + 1
+                summary:outcome('rejected', code)
+                Log.info('%s', RunSummary.photoLine(entry.fileName, 'rejected', 'job ' .. jobId .. ', ' .. code))
+            else
+                if item.state == 'ready' then
+                    result.ready = result.ready + 1
+                end
+                Log.info('%s', RunSummary.photoLine(entry.fileName, 'sent', 'job ' .. jobId .. ', ' .. item.state))
+            end
+        end
+        Log.info('send: job %d created with %d item(s)', jobId, #part)
+    end
+    return result
 end
 
 -- A ui for a progress scope (LrProgressScope). isCanceled (optional) replaces the scope's own check.

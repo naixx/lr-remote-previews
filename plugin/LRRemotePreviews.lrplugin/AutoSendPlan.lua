@@ -17,12 +17,22 @@
 -- The first round for a catalog only records the mark: what is in the catalog when the option is switched on is
 -- never sent. Switching the option off forgets everything (AutoSendPlan.forget), so switching it on again starts
 -- afresh.
+--
+-- Photos that «Add a folder without previews...» adds and sends itself (version 0.5.0) are left out by the automatic
+-- send, so that no photo is sent twice when both are on. The command records their catalog ids under
+-- AutoSendPlan.SENT_KEY right after each batch it added (AutoSendPlan.recordSent), before the automatic send can take
+-- them: a photo is taken only in the round after the one that first saw it, at least 30 seconds later. That record
+-- has one writer, the command; it drops the ids the automatic send can no longer take (at or below its mark), and,
+-- when the catalog has no state (the automatic send is off or has not had its first round, whose mark will cover
+-- every photo there is), the ids of earlier runs.
 local Json = require 'Json'
 local PathMap = require 'PathMap'
 
 local AutoSendPlan = {}
 
 AutoSendPlan.KEY = 'autoSendState'
+AutoSendPlan.SENT_KEY = 'addedAndSent'
+AutoSendPlan.MAX_SENT = 50000 -- catalog ids kept per catalog in that record, at most (the largest are kept)
 AutoSendPlan.LIMIT = 500 -- photos looked at per round, at most (and at most the server's maxItemsPerJob)
 AutoSendPlan.MAX_TRIES = 3 -- rounds a photo may wait for its file record before it is left out for good
 AutoSendPlan.YIELD_EVERY = 500 -- photos between two yields while scanning the catalog
@@ -43,6 +53,7 @@ AutoSendPlan.LEFT_OUT = {
     { 'sameFile', 'same file as another photo' },
     { 'fileIdMismatch', 'the catalog database names another file' },
     { 'gaveUp', 'no file record in the catalog database after ' .. AutoSendPlan.MAX_TRIES .. ' rounds' },
+    { 'sentByCommand', 'added and sent by «Add a folder without previews»' },
 }
 
 local function isId(value)
@@ -90,9 +101,78 @@ function AutoSendPlan.save(store, catalogPath, state)
     return true
 end
 
--- Forgets the states of all catalogs (the option was switched off).
+-- Forgets the states of all catalogs (the option was switched off), and the photos «Add a folder without previews...»
+-- sent: when the option is switched on again, its first round's mark covers all of them.
 function AutoSendPlan.forget(store)
     store[AutoSendPlan.KEY] = nil
+    store[AutoSendPlan.SENT_KEY] = nil
+end
+
+local function loadSent(store)
+    local text = store[AutoSendPlan.SENT_KEY]
+    if type(text) ~= 'string' or text == '' then
+        return {}
+    end
+    local ok, decoded = pcall(Json.decode, text)
+    if not ok or type(decoded) ~= 'table' then
+        return {}
+    end
+    return decoded
+end
+
+-- Records the catalog ids of photos that «Add a folder without previews...» added and is going to send, so that the
+-- automatic send leaves them out. run: a text naming the command's run. Ids the automatic send can no longer take are
+-- dropped (see the header). Must be called with no wait between reading and writing (Lightroom switches tasks only
+-- where one waits). Returns the number of ids kept for the catalog, or false for a missing catalog path.
+function AutoSendPlan.recordSent(store, catalogPath, ids, run)
+    local key = PathMap.fileKey(catalogPath)
+    if not key then
+        return false
+    end
+    local all = loadSent(store)
+    local entry = type(all[key]) == 'table' and all[key] or {}
+    local state = AutoSendPlan.load(store, catalogPath)
+    local keep, kept = {}, {}
+    local function add(id)
+        if isId(id) and id > 0 and not kept[id] and (not state or id > state.mark) then
+            kept[id] = true
+            keep[#keep + 1] = id
+        end
+    end
+    if state or entry.run == run then
+        for _, id in ipairs(type(entry.ids) == 'table' and entry.ids or {}) do
+            add(id)
+        end
+    end
+    for _, id in ipairs(ids) do
+        add(id)
+    end
+    table.sort(keep)
+    if #keep > AutoSendPlan.MAX_SENT then
+        local largest = {}
+        for i = #keep - AutoSendPlan.MAX_SENT + 1, #keep do
+            largest[#largest + 1] = keep[i]
+        end
+        keep = largest
+    end
+    all[key] = #keep > 0 and { run = run, ids = keep } or nil
+    store[AutoSendPlan.SENT_KEY] = Json.encode(all)
+    return #keep
+end
+
+-- The catalog ids «Add a folder without previews...» recorded for this catalog: { [id] = true }.
+function AutoSendPlan.sentByCommand(store, catalogPath)
+    local key = PathMap.fileKey(catalogPath)
+    local entry = key and loadSent(store)[key]
+    local ids = {}
+    if type(entry) == 'table' and type(entry.ids) == 'table' then
+        for _, id in ipairs(entry.ids) do
+            if isId(id) then
+                ids[id] = true
+            end
+        end
+    end
+    return ids
 end
 
 -- The state of the first round: everything up to maxId is left alone.
