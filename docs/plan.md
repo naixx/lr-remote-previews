@@ -31,7 +31,7 @@ finished files. The catalog stays on the user's computer and is never written by
 | Adobe DNG Converter | Not stored, not downloaded, not distributed by the project. Users install it into the app themselves; we describe what the app expects and what we verified |
 | Catalog | The plug-in reads the catalog in place, read-only. Nothing ever writes it |
 | How a build starts | Selection in Lightroom; a folder picked on the dashboard; after an import in Lightroom; by itself for new files, only when a setting turns that on |
-| Standard previews | Decided after a measurement (a research track, no commitment) |
+| Standard previews | Not built by the project. Measured (stage 6): an import with «Embedded & Sidecar» previews removes the wait for them, and nothing the server could render would look like Lightroom's own |
 
 ## Architecture
 
@@ -146,10 +146,18 @@ The thinnest path through every part, usable for real work.
 
 ### Stage 6. Research tracks, no commitment
 
-- **Standard previews:** measure «Build Standard-Sized Previews» from local smart previews with the originals
-  unreachable (speed, quality at the 2560 px ceiling, what Lightroom does when the originals are back). If that is
-  not enough, the heavy route is Lightroom itself in a Windows VM next to the originals and injection of its
-  previews.
+- **Standard previews: answered, nothing to build.** Measured with Lightroom Classic 15.6 and originals on a NAS:
+  - «Build Standard-Sized Previews» reads the original whenever it is reachable, smart preview or not. With the
+    originals unreachable Lightroom renders from the smart preview, but making them unreachable on purpose is not a
+    workflow worth building.
+  - The converter can embed a rendered preview of its own (`-p2`), but its rendering differs visibly from
+    Lightroom's (darker, no lens corrections), and delivering it would mean writing Lightroom's preview database.
+  - **An import with Build Previews: «Embedded & Sidecar» removes the need.** Lightroom shows the camera's own
+    JPEG (a paired JPEG next to the raw file, else the one inside it) without rendering: 0.17 s per photo to add,
+    0.34 s per photo for the previews, about 4 MB read per photo, and it keeps these previews while browsing; an
+    original is read only at a 1:1 zoom. The guide describes this as the workflow to use (section 6).
+  - Still open: whether Lightroom's «Use Smart Previews instead of Originals for image editing» keeps the Develop
+    module off the originals in this workflow (one run without a restart of Lightroom still read them).
 - GPU for the converter in the container. The two CPU-wasting modes (`-mp`, exactly two processes). A newer Wine.
 - Adobe's installer under Wine. Converters newer than 17.4, whose GPU switch changed. Passing `-dng1.7` explicitly,
   as Adobe's command-line examples for lossy JPEG XL do (we rely on the default).
