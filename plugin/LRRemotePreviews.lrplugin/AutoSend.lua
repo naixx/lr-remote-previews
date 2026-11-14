@@ -62,10 +62,10 @@ function AutoSend.tool(settings)
     if cache.tool and cache.toolPath == settings.sqlitePath and now - cache.toolAt < AutoSend.TOOL_SECONDS then
         return cache.tool
     end
-    local tool, problem = SqliteRunner.locate(settings.sqlitePath, _PLUGIN and _PLUGIN.path)
+    local tool, _, problem = SqliteRunner.locate(settings.sqlitePath, _PLUGIN and _PLUGIN.path)
     if not tool then
         cache.tool = nil
-        return nil, problem
+        return nil, problem -- the full form: it goes to the log
     end
     cache.tool, cache.toolPath, cache.toolAt = tool, settings.sqlitePath, now
     return tool

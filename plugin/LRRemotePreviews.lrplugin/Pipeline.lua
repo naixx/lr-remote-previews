@@ -6,6 +6,7 @@
 --
 -- A ui table is passed to the long steps: { caption(text), portion(done, total), isCanceled() }; the automatic
 -- fetch passes one that shows nothing.
+local LrFileUtils = import 'LrFileUtils'
 local LrPrefs = import 'LrPrefs'
 local LrTasks = import 'LrTasks'
 
@@ -88,9 +89,9 @@ end
 -- Returns the entries, or nil plus a message ('cancelled' when ui said so).
 function Pipeline.resolveFileIds(settings, catalogPath, photos, summary, ui)
     ui.caption('Looking for sqlite3')
-    local tool, toolProblem = SqliteRunner.locate(settings.sqlitePath, _PLUGIN and _PLUGIN.path)
+    local tool, toolProblem, toolProblemInFull = SqliteRunner.locate(settings.sqlitePath, _PLUGIN and _PLUGIN.path)
     if not tool then
-        Log.warn('%s', toolProblem)
+        Log.warn('%s', toolProblemInFull)
         return nil, toolProblem
     end
     Log.info('sqlite3 %s, %s', tool.version, SqliteRunner.describe(tool))
@@ -305,6 +306,74 @@ function Pipeline.queueEnv(download, deliver)
     }
 end
 
+-- Temporary files. Delivery.place writes <dest>.<tag>.tmp (tag 'lrrp-...') and renames it; a placing that the end of
+-- Lightroom interrupts can leave that file behind. Its path is recorded in the preferences while it is written
+-- (Pipeline.TEMP_KEY) and the automatic fetch deletes it at the next start; and before a file is placed, any temporary
+-- file of the plug-in next to its destination is deleted (one whose record did not survive, a crash). Such a file is
+-- never taken for a finished one: its name does not end in .dng (Lightroom looks for <file UUID>.dng), and the plug-in
+-- counts only the exact destination name as placed.
+Pipeline.TEMP_KEY = 'placingTemp'
+
+local function deleteTemp(path, why)
+    local ok, err = LrTasks.pcall(LrFileUtils.delete, path)
+    if ok and not LrFileUtils.exists(path) then
+        Log.info('deleted the temporary file %s (%s)', path, why)
+        return 1
+    end
+    Log.warn('cannot delete the temporary file %s: %s', path, tostring(err))
+    return 0
+end
+
+-- Deletes the temporary file recorded by a placing that did not end (call it holding the fetch lock). Returns how
+-- many files were deleted (0 or 1).
+function Pipeline.cleanRecordedTemp()
+    local store = LrPrefs.prefsForPlugin()
+    local recorded = store[Pipeline.TEMP_KEY]
+    local deleted = 0
+    if type(recorded) == 'string' and recorded ~= '' and LrFileUtils.exists(recorded) then
+        deleted = deleteTemp(recorded, 'left by a placing that was interrupted')
+    end
+    store[Pipeline.TEMP_KEY] = nil
+    return deleted
+end
+
+-- Deletes the plug-in's temporary files next to dest (<dest name>.lrrp-*.tmp). Returns how many.
+function Pipeline.cleanTempsNear(dest)
+    local folder, name = Delivery.splitPath(tostring(dest or ''))
+    if not folder or not LrFileUtils.exists(folder) then
+        return 0
+    end
+    local prefix, found = (name .. '.lrrp-'):lower(), {}
+    local ok, err = LrTasks.pcall(function()
+        for path in LrFileUtils.files(folder) do
+            local file = (select(2, Delivery.splitPath(path)) or ''):lower()
+            if file:sub(1, #prefix) == prefix and file:sub(-4) == '.tmp' then
+                found[#found + 1] = path
+            end
+        end
+    end)
+    if not ok then
+        Log.warn('cannot look for temporary files in %s: %s', folder, tostring(err))
+    end
+    local deleted = 0
+    for _, path in ipairs(found) do
+        deleted = deleted + deleteTemp(path, 'left by an interrupted placing')
+    end
+    return deleted
+end
+
+-- Places a checked file the way Delivery.deliver does, with the temporary file recorded while it is written.
+function Pipeline.deliver(entry, body, fs, tempTag)
+    local store = LrPrefs.prefsForPlugin()
+    if type(entry.dest) == 'string' then
+        Pipeline.cleanTempsNear(entry.dest)
+        store[Pipeline.TEMP_KEY] = entry.dest .. '.' .. tempTag .. '.tmp'
+    end
+    local outcome, detail = Delivery.deliver(entry, entry.result, body, fs, tempTag)
+    store[Pipeline.TEMP_KEY] = nil
+    return outcome, detail
+end
+
 -- Checks and places one downloaded file and records the outcome. entry: { fileName, width, height, dest, photo,
 -- ref, result }.
 function Pipeline.place(summary, entry, data, problem, runTag)
@@ -314,8 +383,8 @@ function Pipeline.place(summary, entry, data, problem, runTag)
         end
         return Pipeline.record(summary, entry, 'downloadFailed', problem and problem.message)
     end
-    local outcome, detail = Delivery.deliver(entry, entry.result, data, PhotoAccess.fileSystem(entry.photo),
-        runTag .. '-' .. entry.ref)
+    local outcome, detail = Pipeline.deliver(entry, data, PhotoAccess.fileSystem(entry.photo), runTag .. '-'
+        .. entry.ref)
     if outcome == 'delivered' or outcome == 'deliveredOther' or outcome == 'destinationExists' then
         detail = (detail and detail ~= entry.dest) and (detail .. ', ' .. entry.dest) or entry.dest
     end

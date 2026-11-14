@@ -10,25 +10,32 @@
 -- error answer) backs off for the whole catalog (PendingJobs.contacted: 1, 2, 5, 10, 30, then 60 minutes); an answer
 -- with no items after the wait is the normal case and is followed by the next request at once.
 --
--- The loop's task then downloads the ready files (several at once, DownloadQueue), checks each DNG and places it
--- (Delivery: temporary name, rename, never over an existing file), holding the fetch lock while it places, and without
--- any call into the catalog: what it needs (the file UUID that names the smart preview, the file name and pixel size
--- for the check) was read from the catalog by the send (FastState) or is read again with sqlite3 by catalog id
--- (CatalogRead.byIdSql). Registering a placed file with Lightroom (photo:buildSmartPreview(), which needs the photo
--- object) waits while an import is in progress (RegisterQueue) and is done in batches afterwards. A file that is placed
--- but not registered is harmless: Lightroom takes such files by itself. The log tells the two apart («placed»,
--- «registered»).
+-- While an import is in progress nothing is downloaded (FetchGo): the ready items wait here, and when the import is
+-- over they are fetched in one go. Otherwise the loop's task downloads the ready files as they come (several at once,
+-- DownloadQueue), checks each DNG and places it (Delivery through Pipeline.deliver: temporary name, rename, never over
+-- an existing file), holding the fetch lock while it places, and without any call into the catalog: what it needs (the
+-- file UUID that names the smart preview, the file name and pixel size for the check) was read from the catalog by the
+-- send (FastState) or is read again with sqlite3 by catalog id (CatalogRead.byIdSql). Lightroom does not take a placed
+-- file by itself; the placed photos are registered afterwards with one catalog:buildSmartPreviews(photos) call
+-- (RegisterQueue), never while an import is in progress. The log tells the two steps apart («placed», «registered»).
+--
+-- An interrupted fetch finishes by itself: what is placed but not registered is kept in the preferences
+-- (RegisterQueue); a job stays pending until every ready item is dealt with, so after a restart its task reads the
+-- ready items again and a file already placed is not downloaded again; a download the server could not serve (NAS
+-- asleep, network gone) waits for the back-off without counting a try; a failed download or a file that fails the
+-- check is tried again MAX_TRIES times; a temporary file left by an interrupted placing is deleted (Pipeline).
 local LrApplication = import 'LrApplication'
 local LrDialogs = import 'LrDialogs'
+local LrFileUtils = import 'LrFileUtils'
 local LrPrefs = import 'LrPrefs'
 local LrTasks = import 'LrTasks'
 
 local AutoSend = require 'AutoSend'
 local CatalogRead = require 'CatalogRead'
 local CatalogState = require 'CatalogState'
-local Delivery = require 'Delivery'
 local DownloadQueue = require 'DownloadQueue'
 local FastState = require 'FastState'
+local FetchGo = require 'FetchGo'
 local JobStats = require 'JobStats'
 local Log = require 'Log'
 local PendingJobs = require 'PendingJobs'
@@ -45,8 +52,8 @@ local WaitPlan = require 'WaitPlan'
 local FastFetch = {}
 
 FastFetch.LABEL = 'the automatic fetch'
-FastFetch.MAX_BACKLOG = 500 -- items of one job received and not yet placed before its task stops asking for more
-FastFetch.RETRY_SECONDS = 30 -- a failed download or write is tried again after this
+FastFetch.MAX_BACKLOG = 5000 -- items of one job received and not yet placed before its task stops asking for more
+FastFetch.RETRY_SECONDS = 30 -- a failed download, check or write is tried again after this
 FastFetch.MAX_TRIES = 3
 FastFetch.CAPABILITIES_SECONDS = 3600 -- what the server can do is asked again after this, while something is pending
 FastFetch.BUSY_STEP = 0.2 -- seconds between two steps of the loop while files are on their way
@@ -56,13 +63,18 @@ local watchers = {} -- [job id text] = { id, key, since, sent, shortened, answer
 --                                       lowestFailed }
 local inbox = {} -- { { job = id, item = item, readyAt = clock } }
 local open = {} -- [job id text] = items received from the job and not yet dealt with
-local retries = {} -- { entry, ... } waiting for entry.due
+local retries = {} -- { entry, ... } waiting for entry.due (entry.afterBackoff: or for the server to answer again)
 local finished = {} -- [job id text] = label: done jobs whose totals are logged once their registrations are done
 local queue -- the DownloadQueue, owned by the loop's task
 local registerList -- RegisterQueue of the catalog
 local registerCatalog
 local registerDirty = false
 local runTag
+local goState = FetchGo.new()
+local forceRegister = false -- a fetch in one go has ended: register what it placed with the next step
+local backoffHit = false -- a download found the server away: take the queued downloads back
+local batchUsable -- false once catalog:buildSmartPreviews is missing or raised an error (this session)
+local tempsChecked = false -- the temporary file of an interrupted placing has been looked for
 
 local function idText(id)
     return string.format('%d', id)
@@ -180,7 +192,7 @@ end
 
 -- Outcomes that a later fetch may still fix (FetchPlan does not count them as final): the record of the job is kept
 -- below such an item, so «Fetch ready smart previews» tries it again.
-local RETRYABLE = { downloadFailed = true, writeFailed = true, notInCache = true }
+local RETRYABLE = { downloadFailed = true, writeFailed = true, notInCache = true, checkFailed = true }
 
 -- Records an item that was not placed: one log line; outcome and detail as RunSummary names them. failed: it counts
 -- as failed in the job's totals.
@@ -204,46 +216,89 @@ local function loadRegister(catalogPath)
     end
 end
 
+local function saveRegister(store, catalogPath)
+    if registerDirty then
+        RegisterQueue.save(store, catalogPath, registerList)
+        registerDirty = false
+    end
+end
+
+local function queueRegistration(entry, placedAt)
+    if RegisterQueue.add(registerList, { id = entry.localId, job = entry.job, ready = entry.readyAt, placed = placedAt,
+        at = os.time() }) then
+        registerDirty = true
+    end
+end
+
 -- Checks and places one downloaded file (in the loop's task, inside DownloadQueue:pump, holding the fetch lock).
+-- A download the server could not serve (unreachable, not there behind its proxy) is fetched again after the back-off,
+-- without a try counted; a download that failed otherwise, a DNG that failed the check and a file that could not be
+-- written are tried again RETRY_SECONDS later, MAX_TRIES times in all, then logged and left.
 local function deliver(entry, data, problem)
-    local function again(why)
+    local function again(why, bytes)
         entry.tries = (entry.tries or 0) + 1
         if entry.tries < FastFetch.MAX_TRIES then
             entry.due = os.time() + FastFetch.RETRY_SECONDS
             retries[#retries + 1] = entry
-            Log.info('%s', RunSummary.photoLine(entry.fileName, 'notDelivered', why .. '; tried again in '
-                .. FastFetch.RETRY_SECONDS .. ' s'))
+            FetchGo.count(goState, 'again', bytes)
+            Log.info('%s', RunSummary.photoLine(entry.fileName, 'notDelivered', string.format('%s; tried again in %d s '
+                .. '(try %d of %d)', why, FastFetch.RETRY_SECONDS, entry.tries, FastFetch.MAX_TRIES)))
             return true
         end
+        FetchGo.count(goState, 'left', bytes)
         return false
     end
+    local givenUp = '; given up after ' .. FastFetch.MAX_TRIES .. ' tries'
     if not data then
         local message = problem and problem.message or 'no file'
-        if problem and problem.code == 'not_in_cache' then
+        local kind = WaitPlan.downloadFailure(problem)
+        if kind == 'final' then
+            FetchGo.count(goState, 'left', 0)
             return leaveOut(entry.job, entry.seq, entry.fileName, 'notInCache', message, true)
+        elseif kind == 'backoff' then
+            local store = prefs()
+            local decision, retryAt = PendingJobs.decide(store, registerCatalog, os.time())
+            if decision ~= 'wait' then
+                retryAt = PendingJobs.contacted(store, registerCatalog, false, os.time())
+                Log.warn('automatic fetch: downloading failed: %s; the downloads wait until %s', message,
+                    os.date('%H:%M', retryAt))
+            end
+            entry.due, entry.afterBackoff = retryAt or (os.time() + FastFetch.RETRY_SECONDS), true
+            retries[#retries + 1] = entry
+            backoffHit = true
+            FetchGo.count(goState, 'again', 0)
+            return
         end
-        if not again('download failed: ' .. message) then
-            leaveOut(entry.job, entry.seq, entry.fileName, 'downloadFailed', message, true)
+        if not again('download failed: ' .. message, 0) then
+            leaveOut(entry.job, entry.seq, entry.fileName, 'downloadFailed', message .. givenUp, true)
         end
         return
     end
-    local outcome, detail = Delivery.deliver(entry, entry.result, data, PhotoAccess.fileSystem(nil),
+    local outcome, detail = Pipeline.deliver(entry, data, PhotoAccess.fileSystem(nil),
         runTag .. '-' .. entry.job .. '-' .. entry.ref)
     if outcome == 'placed' then
         local placedAt = AutoSend.clock()
-        RegisterQueue.add(registerList, { id = entry.localId, job = entry.job, ready = entry.readyAt,
-            placed = placedAt })
-        registerDirty = true
+        queueRegistration(entry, placedAt)
+        FetchGo.count(goState, 'placed', #data)
         local took = math.max(0, placedAt - entry.readyAt)
         JobStats.add(FastState.stats, entry.job, 'placed', took)
         Log.info('%s', RunSummary.photoLine(entry.fileName, 'placed', string.format('%s, %s; ready -> placed %s; '
             .. 'not registered yet', detail, entry.dest, JobStats.seconds(took))))
         settleItem(entry.job)
-    elseif outcome == 'writeFailed' and again('write failed: ' .. tostring(detail)) then
-        return
+    elseif outcome == 'checkFailed' or outcome == 'writeFailed' then
+        local why = (outcome == 'checkFailed' and 'the file did not pass the check: ' or 'write failed: ')
+            .. tostring(detail)
+        if not again(why, #data) then
+            leaveOut(entry.job, entry.seq, entry.fileName, outcome, tostring(detail) .. givenUp, true)
+        end
+    elseif outcome == 'destinationExists' then
+        -- Placed meanwhile by another fetch: Lightroom does not take it by itself, so it is registered too.
+        queueRegistration(entry, AutoSend.clock())
+        FetchGo.count(goState, 'left', #data)
+        leaveOut(entry.job, entry.seq, entry.fileName, outcome, tostring(detail) .. '; registered later', false)
     else
-        local failed = outcome == 'checkFailed' or outcome == 'writeFailed'
-        leaveOut(entry.job, entry.seq, entry.fileName, outcome, detail, failed)
+        FetchGo.count(goState, 'left', #data)
+        leaveOut(entry.job, entry.seq, entry.fileName, outcome, detail, false)
     end
 end
 
@@ -258,6 +313,20 @@ local function ensureQueue(settings)
         end, deliver), { concurrency = settings.downloadConcurrency })
     end
     return queue
+end
+
+-- Takes back every download not yet placed (they wait in retries): when an import begins, and when the server is away.
+local function takeBackQueue(afterBackoff, due)
+    if queue == nil or queue:isIdle() then
+        return 0
+    end
+    local left = queue:stop()
+    queue = nil
+    for _, entry in ipairs(left) do
+        entry.due, entry.afterBackoff = due, afterBackoff or nil
+        retries[#retries + 1] = entry
+    end
+    return #left
 end
 
 -- Reads the photos of these catalog ids from the catalog (sqlite3). Returns { [id] = photo }, or nil plus a message.
@@ -290,7 +359,9 @@ local function catalogId(ref)
     return nil
 end
 
--- Turns the received ready items into download entries (or settles them when they need nothing).
+-- Turns the received ready items into download entries (or settles them when they need nothing). A photo whose smart
+-- preview file is already in place (placed before Lightroom quit, not registered yet) is not downloaded again; it is
+-- queued for registration.
 local function resolveInbox(settings, catalogPath)
     if #inbox == 0 then
         return
@@ -340,6 +411,13 @@ local function resolveInbox(settings, catalogPath)
             local dest, destError = SmartPreviewPath.dngPath(catalogPath, data.fileUuid)
             if not dest then
                 leaveOut(received.job, item.seq, data.fileName, 'writeFailed', destError, true)
+            elseif LrFileUtils.exists(dest) then
+                queueRegistration({ localId = data.id, job = received.job, readyAt = received.readyAt },
+                    AutoSend.clock())
+                JobStats.add(FastState.stats, received.job, 'placed', 0)
+                Log.info('%s', RunSummary.photoLine(data.fileName, 'placed', dest .. ' is there already (placed '
+                    .. 'before); not downloaded again; not registered yet'))
+                settleItem(received.job)
             else
                 q:add({ job = received.job, seq = item.seq, ref = item.ref, itemId = item.id, result = item.result,
                     key = item.result.key, fileName = data.fileName, width = data.width, height = data.height,
@@ -349,6 +427,8 @@ local function resolveInbox(settings, catalogPath)
     end
 end
 
+-- Adds the downloads to try again that are due: by time, or (after the server was away) at once: it is called only
+-- while the catalog's back-off does not hold requests back.
 local function retryDue(settings)
     if #retries == 0 then
         return
@@ -356,7 +436,8 @@ local function retryDue(settings)
     local now, left = os.time(), {}
     local q = ensureQueue(settings)
     for _, entry in ipairs(retries) do
-        if now >= entry.due then
+        if now >= entry.due or entry.afterBackoff then
+            entry.afterBackoff = nil
             q:add(entry)
         else
             left[#left + 1] = entry
@@ -374,79 +455,200 @@ local function logTotals(jobId)
     end
 end
 
--- Registers a batch of placed files with Lightroom (holding the fetch lock). Before calling into the catalog, the
--- photos are read again with sqlite3: one that Lightroom already counts as having a smart preview needs no call.
-local function registerSome(settings, catalog, catalogPath, lease)
-    local batch = RegisterQueue.take(registerList, false, RegisterQueue.BATCH)
-    if #batch == 0 then
-        return 0
+local function localIdOf(photo)
+    return tonumber(PhotoAccess.try('photo.localIdentifier', function()
+        return photo.localIdentifier
+    end))
+end
+
+-- created: Lightroom answered 'created', so it built the smart preview itself (from the original, over the network)
+-- although the placed file was checked to be there: a warning.
+local CREATED = "Lightroom answered 'created': it built the smart preview itself"
+
+local function registeredLine(entry, fileName, how)
+    local took = entry.ready and math.max(0, AutoSend.clock() - entry.ready) or nil
+    if entry.job then
+        JobStats.add(FastState.stats, entry.job, 'registered', took)
+    end
+    local log = how == CREATED and Log.warn or Log.info
+    log('%s', RunSummary.photoLine(fileName, 'registered', how .. '; ready -> registered ' .. JobStats.seconds(took)))
+end
+
+-- Puts back the entries a call did not register (sorted as RegisterQueue.outcome gives it); logs the failed ones.
+-- why: what Lightroom did. Returns RegisterQueue.putBack's word.
+local function putBack(sorted, names, why)
+    local word, givenUp = RegisterQueue.putBack(registerList, sorted, os.time())
+    local dropped = {}
+    for _, entry in ipairs(givenUp) do
+        dropped[entry.id] = true
+        if entry.job then
+            JobStats.fail(FastState.stats, entry.job)
+        end
+    end
+    for _, entry in ipairs(sorted.failed) do
+        local after = dropped[entry.id] and ('given up after ' .. entry.tries .. ' tries; the file stays where it was '
+            .. 'placed') or (entry.single and 'tried again with a call of its own')
+            or ('tried again in ' .. RegisterQueue.RETRY .. ' s')
+        Log.info('%s', RunSummary.photoLine(names[entry.id], 'notRegistered', (why[entry.id] or 'Lightroom did not '
+            .. 'register it') .. '; ' .. after))
+    end
+    return word
+end
+
+-- Registers photos one call each (photo:buildSmartPreview()), the way 0.8.1 did; for photos that calls for many did
+-- not register, and when catalog:buildSmartPreviews is not available.
+local function registerEach(items, names, lease)
+    local failed, why = {}, {}
+    for i, it in ipairs(items) do
+        if lease and not lease.refresh() then
+            for j = i, #items do
+                RegisterQueue.add(registerList, items[j].entry)
+            end
+            break
+        end
+        local ok, answer = LrTasks.pcall(function()
+            return it.photo:buildSmartPreview()
+        end)
+        if ok and (answer == 'existed' or answer == 'created') then
+            registeredLine(it.entry, names[it.entry.id], answer == 'existed' and 'Lightroom answered existed'
+                or CREATED)
+        else
+            why[it.entry.id] = ok and ("Lightroom answered '" .. tostring(answer) .. "'")
+                or ('buildSmartPreview raised an error: ' .. tostring(answer))
+            failed[#failed + 1] = it.entry
+        end
+    end
+    if #failed > 0 then
+        putBack({ failed = failed, untried = {}, existed = {}, created = {} }, names, why)
+    end
+end
+
+-- One catalog:buildSmartPreviews call for these photos ({ { entry, photo } }). Returns false when the function is not
+-- there or raised an error (the photos then get calls of their own).
+local function registerTogether(catalog, items, names)
+    local okGet, fn = pcall(function()
+        return catalog.buildSmartPreviews
+    end)
+    if not okGet or type(fn) ~= 'function' then
+        Log.info('automatic fetch: catalog:buildSmartPreviews is not available in this Lightroom; the photos are '
+            .. 'registered one call each')
+        return false
+    end
+    local photos, entries = {}, {}
+    for i, it in ipairs(items) do
+        photos[i], entries[i] = it.photo, it.entry
+    end
+    local started = AutoSend.clock()
+    local ok, result = LrTasks.pcall(function()
+        return catalog:buildSmartPreviews(photos)
+    end)
+    local seconds = AutoSend.clock() - started
+    if not ok then
+        Log.warn('automatic fetch: catalog:buildSmartPreviews for %d photo(s) raised an error after %.1f s: %s; the '
+            .. 'photos are registered one call each from now on', #photos, seconds, tostring(result))
+        return false
+    end
+    local sorted = RegisterQueue.outcome(entries, result, localIdOf)
+    Log.info('automatic fetch: one registration call (catalog:buildSmartPreviews) for %d photo(s) took %.1f s: '
+        .. '%d existed, %d created, %d failed, %d not reached', #photos, seconds, #sorted.existed, #sorted.created,
+        #sorted.failed, #sorted.untried)
+    for _, entry in ipairs(sorted.existed) do
+        registeredLine(entry, names[entry.id], 'Lightroom answered existed')
+    end
+    for _, entry in ipairs(sorted.created) do
+        registeredLine(entry, names[entry.id], CREATED)
+    end
+    local word = putBack(sorted, names, {})
+    if word == 'failed' and #sorted.untried > 0 then
+        Log.info('automatic fetch: the call stopped at a failure; the %d photo(s) it did not reach are registered with '
+            .. 'the next call', #sorted.untried)
+    elseif word == 'held' then
+        Log.info('automatic fetch: %d photo(s) were not registered (the call was cancelled or stopped); they are '
+            .. 'registered after the next fetch in one go or at the next start', #sorted.untried)
+    end
+    return true
+end
+
+-- Registers the placed photos that are due (holding the fetch lock). Before calling into the catalog, the photos are
+-- read again with sqlite3: one that Lightroom already counts as having a smart preview needs no call, and a photo is
+-- included only when its smart preview file is in place (without it Lightroom would build one from the original, over
+-- the network). The photo objects come from catalog:findPhotoByPath, one lookup per photo.
+local function registerPlaced(settings, catalog, catalogPath, lease, force)
+    local taken = RegisterQueue.takeDue(registerList, os.time(), force)
+    local all = {}
+    for _, list in ipairs({ taken.batch, taken.singles }) do
+        for _, entry in ipairs(list) do
+            all[#all + 1] = entry
+        end
+    end
+    if #all == 0 then
+        return
     end
     registerDirty = true
     local ids = {}
-    for i, entry in ipairs(batch) do
+    for i, entry in ipairs(all) do
         ids[i] = entry.id
     end
     local rows, problem = readPhotos(settings, catalogPath, ids)
     if not rows then
         Log.warn('automatic fetch: reading the catalog failed: %s; registration tried again later', tostring(problem))
-        for i = #batch, 1, -1 do
-            table.insert(registerList, 1, batch[i])
+        for _, entry in ipairs(all) do
+            entry.notBefore = os.time() + RegisterQueue.RETRY
+            RegisterQueue.add(registerList, entry)
         end
-        return 0
+        return
     end
-    local done = 0
-    for _, entry in ipairs(batch) do
+    local names, together, each, notFound = {}, {}, {}, {}
+    for _, entry in ipairs(all) do
         local row = rows[entry.id]
-        local now = AutoSend.clock()
-        local took = entry.ready and math.max(0, now - entry.ready) or nil
-        if not row or row.incomplete then
+        names[entry.id] = row and row.fileName or ('catalog id ' .. entry.id)
+        local dest = row and row.fileUuid and SmartPreviewPath.dngPath(catalogPath, row.fileUuid)
+        if not row or row.incomplete or not dest then
             Log.info('catalog id %d: no longer in the catalog; its smart preview file stays where it was placed',
                 entry.id)
             if entry.job then
                 JobStats.fail(FastState.stats, entry.job)
             end
         elseif row.hasSmartPreview then
+            registeredLine(entry, row.fileName, 'Lightroom counts it as having a smart preview already')
+        elseif not LrFileUtils.exists(dest) then
+            Log.info('%s', RunSummary.photoLine(row.fileName, 'notRegistered', 'the placed file is no longer there ('
+                .. dest .. '); not registered, so that Lightroom does not build one from the original'))
             if entry.job then
-                JobStats.add(FastState.stats, entry.job, 'registered', took)
+                JobStats.fail(FastState.stats, entry.job)
             end
-            Log.info('%s', RunSummary.photoLine(row.fileName, 'registered', 'Lightroom had taken the file by itself; '
-                .. 'ready -> registered ' .. JobStats.seconds(took)))
         else
             local photo = PhotoAccess.findByPath(catalog, row.path)
-            local localId = photo and PhotoAccess.try('photo.localIdentifier', function()
-                return photo.localIdentifier
-            end)
-            if not photo or tonumber(localId) ~= entry.id then
-                Log.info('%s', RunSummary.photoLine(row.fileName, 'notRegistered', 'Lightroom did not find the photo; '
-                    .. 'the file stays, Lightroom takes it by itself'))
+            if not photo or localIdOf(photo) ~= entry.id then
+                notFound[#notFound + 1] = entry
+            elseif entry.single or batchUsable == false then
+                each[#each + 1] = { entry = entry, photo = photo }
             else
-                local ok, answer = LrTasks.pcall(function()
-                    return photo:buildSmartPreview()
-                end)
-                if ok and answer == 'existed' then
-                    if entry.job then
-                        JobStats.add(FastState.stats, entry.job, 'registered', took)
-                    end
-                    Log.info('%s', RunSummary.photoLine(row.fileName, 'registered', 'Lightroom answered existed; '
-                        .. 'ready -> registered ' .. JobStats.seconds(took)))
-                else
-                    Log.info('%s', RunSummary.photoLine(row.fileName, 'notRegistered', ok
-                        and ("Lightroom answered '" .. tostring(answer) .. "'")
-                        or ('buildSmartPreview raised an error: ' .. tostring(answer))))
-                end
+                together[#together + 1] = { entry = entry, photo = photo }
             end
         end
-        done = done + 1
-        if lease and not lease.refresh() then
-            break
+    end
+    if #notFound > 0 then
+        local why = {}
+        for _, entry in ipairs(notFound) do
+            why[entry.id] = 'Lightroom did not find the photo by its path'
+        end
+        putBack({ failed = notFound, untried = {}, existed = {}, created = {} }, names, why)
+    end
+    if #together > 0 and not registerTogether(catalog, together, names) then
+        batchUsable = false
+        for _, it in ipairs(together) do
+            each[#each + 1] = it
         end
     end
-    for _, entry in ipairs(batch) do
+    if #each > 0 then
+        registerEach(each, names, lease)
+    end
+    for _, entry in ipairs(all) do
         if entry.job then
             logTotals(entry.job)
         end
     end
-    return done
 end
 
 -- The largest seq up to which every ready item of the job needs nothing more: the record kept per job (CatalogState),
@@ -511,10 +713,35 @@ function FastFetch.unregistered(store, catalogPath)
     return #RegisterQueue.load(store, catalogPath)
 end
 
--- One step of the automatic fetch for the byId jobs. importing: an import is in progress (registration waits);
--- shouldStop() -> true when the loop must end. Returns a short text for the log (or nil), and the seconds to the next
--- step when it should come sooner than the loop's step: BUSY_STEP while files are on their way or to be registered,
--- WAIT_STEP while a waiting request is open (so that a ready file is picked up within a moment), else nil.
+-- The fetch in one go around an import (FetchGo): logs its start and end, takes queued downloads back when an import
+-- begins. Returns true while nothing may be downloaded or placed (an import in progress).
+local function followImport(importing, settings)
+    local idle = #inbox == 0 and (queue == nil or queue:isIdle())
+    local event = FetchGo.step(goState, importing, idle, AutoSend.clock(), #inbox + #retries)
+    if event == 'begin' then
+        if goState.go then
+            goState.go.finished = AutoSend.clock()
+            Log.info('automatic fetch: the fetch in one go stops for a new import: %s', FetchGo.totals(goState.go))
+            goState.go = nil
+        end
+        local back = takeBackQueue(false, 0)
+        Log.info('automatic fetch: an import is in progress; nothing is downloaded until it is over (the server '
+            .. 'builds meanwhile)%s', back > 0 and string.format('; %d download(s) taken back', back) or '')
+    elseif event == 'start' then
+        Log.info('automatic fetch: the import is taken as over; fetching the %d smart preview(s) ready so far in one '
+            .. 'go (%d download(s) at once)', goState.go.ready, settings.downloadConcurrency)
+    elseif event == 'finish' then
+        Log.info('automatic fetch: the fetch in one go is done: %s', FetchGo.totals(goState.last))
+        forceRegister = true
+    end
+    return goState.holding
+end
+
+-- One step of the automatic fetch for the byId jobs. importing: an import is in progress (nothing is downloaded, placed
+-- or registered); shouldStop() -> true when the loop must end. Returns a short text for the log (or nil), and the
+-- seconds to the next step when it should come sooner than the loop's step: BUSY_STEP while files are on their way or
+-- to be registered, WAIT_STEP while a waiting request is open (so that a ready file is picked up within a moment),
+-- else nil.
 function FastFetch.step(importing, shouldStop)
     local store = prefs()
     local settings = Settings.read(store)
@@ -538,10 +765,11 @@ function FastFetch.step(importing, shouldStop)
         end
     end
     local text
+    local decision, retryAt = PendingJobs.decide(store, catalogPath, now)
+    local serverWait = decision == 'wait'
     if next(byId) ~= nil and settings.serverUrl ~= '' then
-        local decision, retryAt = PendingJobs.decide(store, catalogPath, now)
         local known = false
-        if decision == 'wait' then
+        if serverWait then
             text = string.format('the server did not answer; next try at %s', os.date('%H:%M', retryAt))
         else
             known, text = knowCapabilities(store, settings, catalogPath)
@@ -569,21 +797,36 @@ function FastFetch.step(importing, shouldStop)
         end
     end
 
-    resolveInbox(settings, catalogPath)
-    retryDue(settings)
+    local holding = followImport(importing, settings)
+    if not holding and not serverWait then
+        resolveInbox(settings, catalogPath)
+        retryDue(settings)
+    end
     local q = queue
-    local registerDue = not importing and #registerList > 0
-    if (q and (q:finishedCount() > 0 or (q.inline and not q:isIdle()))) or registerDue then
+    local idle = #inbox == 0 and (q == nil or q:isIdle())
+    local registerDue = not holding and goState.go == nil
+        and RegisterQueue.due(registerList, os.time(), forceRegister, idle)
+    if forceRegister and not holding and goState.go == nil and not registerDue then
+        forceRegister = false -- nothing to register after that fetch in one go
+    end
+    local placing = not holding and q ~= nil and (q:finishedCount() > 0 or (q.inline and not q:isIdle()))
+    if placing or registerDue or not tempsChecked then
         local lease = Pipeline.acquireLease(FastFetch.LABEL, true)
         if lease then
             local ok, err = LrTasks.pcall(function()
-                if q then
+                if not tempsChecked then
+                    Pipeline.cleanRecordedTemp()
+                    tempsChecked = true
+                end
+                if placing then
                     q:pump(function()
-                        return shouldStop() or not lease.refresh()
+                        return shouldStop() or backoffHit or not lease.refresh()
                     end)
                 end
                 if registerDue then
-                    registerSome(settings, catalog, catalogPath, lease)
+                    local force = forceRegister
+                    forceRegister = false
+                    registerPlaced(settings, catalog, catalogPath, lease, force)
                 end
             end)
             lease.release()
@@ -592,6 +835,12 @@ function FastFetch.step(importing, shouldStop)
             end
         end
     end
+    if backoffHit then
+        backoffHit = false
+        local _, waitUntil = PendingJobs.decide(store, catalogPath, os.time())
+        takeBackQueue(true, waitUntil or (os.time() + FastFetch.RETRY_SECONDS))
+    end
+    saveRegister(store, catalogPath)
 
     for key, w in pairs(watchers) do
         if w.gone and (open[key] or 0) == 0 then
@@ -600,22 +849,25 @@ function FastFetch.step(importing, shouldStop)
             finishJob(w, catalogPath, false)
         end
     end
-    if registerDirty then
-        RegisterQueue.save(store, catalogPath, registerList)
-        registerDirty = false
-    end
+    saveRegister(store, catalogPath)
     if text == nil then
         if next(byId) ~= nil and settings.serverUrl == '' then
             text = 'no server URL is set; nothing done'
         elseif #registerList > 0 then
-            text = importing and 'the placed smart previews are registered when the import has finished'
+            text = holding and 'the placed smart previews are registered when the import has finished'
                 or 'registering the placed smart previews'
         elseif #pending == 0 then
             text = 'nothing pending for this catalog; the server is not asked'
         end
     end
+    if holding and #inbox > 0 then
+        text = string.format('%s; %d smart preview(s) ready, fetched when the import is over', text or 'an import is '
+            .. 'in progress', #inbox)
+    end
     local nextStep
-    if #inbox > 0 or (queue ~= nil and not queue:isIdle()) or (not importing and #registerList > 0) then
+    local busy = (not holding and not serverWait and #inbox > 0) or (queue ~= nil and not queue:isIdle())
+        or (not holding and RegisterQueue.due(registerList, os.time(), forceRegister, false))
+    if busy then
         nextStep = FastFetch.BUSY_STEP
     else
         for _, w in pairs(watchers) do

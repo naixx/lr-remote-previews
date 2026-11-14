@@ -23,7 +23,7 @@ RunSummary.SKIPS = {
 RunSummary.OUTCOMES = {
     { 'delivered', 'Smart previews placed and registered by Lightroom' },
     { 'deliveredOther', 'Placed, but Lightroom did not answer "existed"' },
-    { 'placed', 'Placed, to be registered by Lightroom when no import is running' },
+    { 'placed', 'Placed; registered with Lightroom once no import is running' },
     { 'destinationExists', 'A smart preview file was already there (left alone)' },
     { 'checkFailed', 'Discarded: the file did not pass the check' },
     { 'downloadFailed', 'Download failed' },

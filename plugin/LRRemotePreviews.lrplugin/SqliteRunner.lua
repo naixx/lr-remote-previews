@@ -9,6 +9,7 @@ local LrTasks = import 'LrTasks'
 
 local Log = require 'Log'
 local SqliteCommand = require 'SqliteCommand'
+local TextWrap = require 'TextWrap'
 
 local SqliteRunner = {}
 
@@ -130,39 +131,44 @@ function SqliteRunner.version(tool)
     return nil, 'exit code ' .. tostring(result.status) .. (why ~= '' and (': ' .. why) or '')
 end
 
--- How a found tool is described to the user.
-function SqliteRunner.describe(tool)
+-- How a found tool is described to the user. short: the path shortened for a dialog (TextWrap.shortPath).
+function SqliteRunner.describe(tool, short)
+    local path = short and TextWrap.shortPath(tool.tool) or tool.tool
     if tool.kind == 'configured' then
-        return 'set in the plug-in settings: ' .. tool.tool
+        return 'set in the plug-in settings: ' .. path
     elseif tool.kind == 'plugin' then
-        return 'next to the plug-in: ' .. tool.tool
+        return 'next to the plug-in: ' .. path
     end
     return 'sqlite3 on the PATH'
 end
 
 -- Finds a working sqlite3 tool (see SqliteCommand.candidates for the order). configured: the path from the
--- settings ('' for none); pluginPath: _PLUGIN.path. Returns { tool, kind, version }, or nil plus a message
--- that lists what was tried.
+-- settings ('' for none); pluginPath: _PLUGIN.path. Returns { tool, kind, version }, or nil plus a message for a
+-- dialog that lists what was tried (paths shortened) and the same message with the full paths, for the log.
 function SqliteRunner.locate(configured, pluginPath)
-    local tried = {}
+    local tried, triedInFull = {}, {}
     for _, candidate in ipairs(SqliteCommand.candidates(configured, pluginPath, isWindows())) do
-        local name = SqliteRunner.describe(candidate)
+        local why
         if candidate.kind ~= 'path' and not LrFileUtils.exists(candidate.tool) then
-            tried[#tried + 1] = name .. ': no such file'
+            why = 'no such file'
         else
-            local version, why = SqliteRunner.version(candidate.tool)
+            local version
+            version, why = SqliteRunner.version(candidate.tool)
             if version then
                 candidate.version = version
                 return candidate
             end
-            tried[#tried + 1] = name .. ': ' .. why
         end
+        tried[#tried + 1] = SqliteRunner.describe(candidate, true) .. ': ' .. why
+        triedInFull[#triedInFull + 1] = SqliteRunner.describe(candidate) .. ': ' .. why
     end
     local hint = isWindows()
         and 'Put sqlite3.exe (from sqlite.org, "sqlite-tools" for Windows) next to the plug-in\'s Info.lua, or set its '
             .. 'path in File > Plug-in Manager > LR Remote Previews.'
         or 'macOS ships /usr/bin/sqlite3; otherwise set the path in File > Plug-in Manager > LR Remote Previews.'
-    return nil, 'No working sqlite3 tool was found. Tried:\n' .. table.concat(tried, '\n') .. '\n\n' .. hint
+    local head = 'No working sqlite3 tool was found. Tried:\n'
+    return nil, head .. table.concat(tried, '\n') .. '\n\n' .. hint,
+        head .. table.concat(triedInFull, '\n') .. '\n\n' .. hint
 end
 
 -- Runs one SELECT that SqliteCommand.readScript accepts (ImportQuery's, CatalogRead's) against the catalog, read-only.

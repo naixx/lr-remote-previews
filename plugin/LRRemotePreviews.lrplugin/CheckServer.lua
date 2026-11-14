@@ -26,6 +26,7 @@ local Pipeline = require 'Pipeline'
 local Selection = require 'Selection'
 local ServerClient = require 'ServerClient'
 local Settings = require 'Settings'
+local TextWrap = require 'TextWrap'
 
 local TITLE = 'Check the server against Lightroom'
 
@@ -171,8 +172,9 @@ local function run(context)
     progress:setCaption('Reading Lightroom\'s smart preview')
     local lightroomBytes, readError = readFile(photo.smartPreviewPath)
     if not lightroomBytes then
+        Log.warn('check: cannot read %s: %s', photo.smartPreviewPath, readError)
         return stop('Cannot read the smart preview Lightroom lists for ' .. photo.fileName .. ' ('
-            .. photo.smartPreviewPath .. '): ' .. readError, 'critical')
+            .. TextWrap.shortPath(photo.smartPreviewPath) .. '): ' .. readError, 'critical')
     end
     if progress:isCanceled() then
         return progress:done()

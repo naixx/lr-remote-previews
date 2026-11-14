@@ -22,6 +22,7 @@ local ServerClient = require 'ServerClient'
 local ServerInfo = require 'ServerInfo'
 local Settings = require 'Settings'
 local StatusReport = require 'StatusReport'
+local TextWrap = require 'TextWrap'
 
 local TITLE = 'LR Remote Previews: server status'
 local FETCH_TITLE = 'Fetch ready smart previews'
@@ -94,7 +95,12 @@ local function run(context)
     local props = LrBinding.makePropertyTable(context)
     props.retryJob = choices[1] and choices[1].value or nil
     props.retryResult = ''
-    local rows = { bind_to_object = props, f:static_text { title = text } }
+    -- Lines of TextWrap.WIDTH characters: a static_text without a width grows to its longest line.
+    local keep = { settings.serverUrl, info.converter and info.converter.path }
+    for _, mapping in ipairs(Settings.mappings(settings)) do
+        keep[#keep + 1] = mapping.localPrefix
+    end
+    local rows = { bind_to_object = props, f:static_text { title = TextWrap.wrap(text, TextWrap.WIDTH, keep) } }
     if #choices > 0 then
         rows[#rows + 1] = f:row {
             f:static_text { title = 'Retry the failed items of' },

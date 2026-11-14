@@ -5,7 +5,7 @@ local Json = require 'Json'
 
 local Jobs = {}
 
-Jobs.CLIENT = 'lr-plugin/0.8.1' -- kept equal to VERSION in Info.lua (a spec checks it)
+Jobs.CLIENT = 'lr-plugin/0.8.2' -- kept equal to VERSION in Info.lua (a spec checks it)
 Jobs.LABEL = 'Lightroom selection'
 Jobs.PAGE_LIMIT = 500 -- items per page while polling one job
 Jobs.READ_LIMIT = 1000 -- items per page when reading the ready items of a job (the protocol's maximum)

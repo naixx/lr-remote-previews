@@ -69,7 +69,9 @@ Test catalogs with 157 raw photos; DNGs made by the converter were placed in the
 Nothing we placed was deleted or rewritten by Lightroom.
 
 Not known: whether the row for a file placed during a session is written when Lightroom first notices the file or
-only by the `buildSmartPreview()` call (both happened within the same second in the test).
+only by the `buildSmartPreview()` call (both happened within the same second in the test). Seen later, with plug-in
+0.8.0: files placed while Lightroom ran got no row within 10 minutes; the rows came with the `buildSmartPreview()`
+calls.
 
 Reading the catalog with SQLite in read-only mode while Lightroom had it open worked.
 

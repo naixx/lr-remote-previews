@@ -12,10 +12,11 @@ without the dialog...** starts Lightroom's own import of a folder without its di
 import (only when that was «Add»), and leaves the sending to the automatic send. It replaces 0.5.0's «Add a folder
 without previews...», which ran once and was far too slow (see «What has been tried in Lightroom»).
 
-Status: **version 0.8.1, which has not been run in Lightroom.** Version 0.7.0 ran end to end in Lightroom Classic 15.6
-on Windows: the import of 1384 raw files from a NAS, the automatic send and the automatic fetch placed and registered
-all 1384 smart previews, in 16.5 minutes. 0.8.0 rebuilt that automatic path for speed; in its run the fast path worked
-but sent only 650 of 1384 photos, and 0.8.1 fixes that (see the tables at the end). Before that, 0.2.0's build command ran on 157 photos, 0.3.0's send and «Fetch ready smart previews» for the
+Status: **version 0.8.2, which has not been run in Lightroom** (nor has 0.8.1). Version 0.7.0 ran end to end in
+Lightroom Classic 15.6 on Windows: the import of 1384 raw files from a NAS, the automatic send and the automatic fetch
+placed and registered all 1384 smart previews, in 16.5 minutes. 0.8.0 rebuilt that automatic path for speed; in its run
+the fast path worked but sent only 650 of 1384 photos, and 0.8.1 fixes that; 0.8.2 downloads nothing while an import
+is in progress and registers the placed photos with one call (see the tables at the end). Before that, 0.2.0's build command ran on 157 photos, 0.3.0's send and «Fetch ready smart previews» for the
 selection on 143 photos from a NAS, 0.5.0's «Add a folder without previews...» once and 0.6.0's «Import a folder
 without the dialog...» once. Everything else is checked only by the unit tests and by runs with stand-in Lightroom
 functions (cooperative tasks, a virtual clock) against a fake server that follows the protocol, and the plug-in's
@@ -372,28 +373,73 @@ awake:
   wait is halved for the rest of the session, down to 5 seconds, instead of counting the server as not answering. How
   long LrHttp really lets a request wait has not been measured.
 
+**Nothing downloaded while an import is in progress** (since 0.8.2, `FetchGo.lua`). While Lightroom imports from the
+NAS it reads the originals over the same link, so the plug-in only sends (small requests; the server builds meanwhile)
+and downloads nothing. «In progress» is the fast period of the automatic send (below: new photos still coming, or an
+import seen whose first photos are still to come). The waiting requests go on during it: they cost nothing on the link
+and tell which smart previews are ready. When the import is over (2 minutes without a new photo), everything ready is
+fetched **in one go**, with «Downloads at once» downloads at the same time; what becomes ready later is fetched as it
+comes. A job sent while no import is in progress (**Build smart previews on the server** on a selection) is fetched as
+its files become ready. Downloads already under way when an import begins are taken back until it is over.
+
 **Placing without calling into the catalog.** Plug-in calls into the catalog are very slow while Lightroom imports (in
 the run of 0.7.0, 4.7 minutes passed in one fetch before its lookup; in 0.6.0's, `findPhotoByPath` for 425 photos took
-45.8 s). So the ready files are downloaded (up to «Downloads at once» at the same time), checked and placed (temporary
-name, rename, never over an existing file) with what the send read from the catalog: the file UUID that names the
-smart preview, the file name and the pixel size for the check. After a restart of Lightroom, when that is no longer in
-memory, the same facts are read again with sqlite3 by catalog id (`CatalogRead.byIdSql`). A photo that Lightroom
-meanwhile counts as having a smart preview (`AgDNGProxyInfo`) is left alone.
+45.8 s). So the ready files are downloaded, checked and placed (temporary name, rename, never over an existing file)
+with what the send read from the catalog: the file UUID that names the smart preview, the file name and the pixel size
+for the check. After a restart of Lightroom, when that is no longer in memory, the same facts are read again with
+sqlite3 by catalog id (`CatalogRead.byIdSql`). A photo that Lightroom meanwhile counts as having a smart preview
+(`AgDNGProxyInfo`) is left alone.
 
-**Registration afterwards.** `photo:buildSmartPreview()`, which makes Lightroom register a placed file, needs the photo
-object. While an import is in progress (the automatic send looks fast: below) the placed photos are queued instead
-(`RegisterQueue.lua`, kept in the preferences as `registerQueue`, so it survives a restart); when no import is in
-progress they are registered in batches of 25: read again with sqlite3 (a photo Lightroom has taken by itself needs no
-call), then found with `findPhotoByPath` and registered. A placed file that is not registered yet is harmless:
-Lightroom takes such files by itself. The log tells the two states apart: `IMG_0001.ARW: placed (DNG 1.7.0.0, <path>;
-ready -> placed 0.8 s; not registered yet)`, later `IMG_0001.ARW: registered (Lightroom answered existed; ready ->
-registered 152 s)`; **Server status...** says how many are placed and not registered yet.
+**Registration afterwards, one call** (since 0.8.2). Lightroom does not take a placed file by itself (checked with
+0.8.0: no smart preview row within 10 minutes; the row came when the plug-in asked). So the placed photos are queued
+(`RegisterQueue.lua`, kept in the preferences as `registerQueue`, so it survives a restart) and registered with **one
+`catalog:buildSmartPreviews(photos)` call** (SDK 5.0; one progress bar in Lightroom instead of one operation per photo):
+right after a fetch in one go, all photos placed in it; otherwise once nothing has been placed for 30 seconds (or after
+5 minutes at most). Never while an import is in progress. Before the call the photos are read again with sqlite3 (one
+that already has a smart preview needs no call), a photo is included only when its smart preview file is in place
+(without it Lightroom would build one from the original, over the network), and the photo objects are found with
+`findPhotoByPath` (one lookup per photo; 1384 took 1.9 s with no import running, in 0.5.0's run). What the call returns:
+
+- `existed`: registered. `created` would mean Lightroom built the smart preview itself; logged as a warning.
+- `failed`, and a call that stops at the first failure: the failed photo is tried again a minute later, the photos the
+  call did not reach go into the next, smaller call; a photo that was in 3 calls without being registered gets a call
+  of its own (`photo:buildSmartPreview()`), and after 5 failed tries it is given up (logged; its file stays).
+- Photos the call did not reach although none failed (the user cancelled the progress bar): no dialog, no new call by
+  itself; they are registered after the next fetch in one go or at the next start.
+- A Lightroom without `catalog:buildSmartPreviews`, or a call that raises an error: one call per photo for the rest of
+  the session.
+
+The log tells the two states apart: `IMG_0001.ARW: placed (DNG 1.7.0.0, <path>; ready -> placed 0.8 s; not registered
+yet)`, later `IMG_0001.ARW: registered (Lightroom answered existed; ready -> registered 152 s)`; **Server status...**
+says how many are placed and not registered yet.
+
+**An interrupted fetch finishes by itself**; nothing needs to be done after one:
+
+- **Lightroom quits in the middle.** The placed photos not yet registered are in `registerQueue`; a job stays pending
+  until every ready item is dealt with, so at the next start its task reads the ready items again, finds the files
+  already in place (`is there already (placed before); not downloaded again`), downloads the rest and registers all.
+- **The server cannot be reached** (the NAS asleep, the network gone; no answer, `502`/`503`/`504`, a refused token):
+  the downloads wait for the back-off below, without counting a try, and go on when the server answers again.
+- **Smart previews built after the fetch in one go** are fetched as they become ready (the job's waiting request stays
+  open while the job is active).
+- **A failed download, or a DNG that fails the check** (for example damaged on the way): tried again 30 seconds later,
+  3 times in all, then logged (`given up after 3 tries`) and left; a later **Fetch ready smart previews** tries it again.
+- **Temporary files.** A file is written as `<UUID>.dng.lrrp-<...>.tmp` and renamed. The name of the one being written
+  is kept in the preferences (`placingTemp`) and that file is deleted at the next start; before a file is placed, any
+  such temporary file next to it is deleted (one left by a crash). Lightroom looks only for `<UUID>.dng`, and the
+  plug-in counts only that name as placed, so a temporary file is never taken for a finished one.
 
 **Log lines to measure with.** For each photo sent: `IMG_0001.ARW: sent (job 12, queued; first seen in the catalog ->
-sent 2.1 s)`. For each smart preview: the `placed` and `registered` lines above. For each job, once it is done and
+sent 2.1 s)`. When an import begins: `automatic fetch: an import is in progress; nothing is downloaded until it is
+over`; when it is judged over: `automatic fetch: the import is taken as over; fetching the 1384 smart preview(s) ready so
+far in one go (4 download(s) at once)`; when that is done: `automatic fetch: the fetch in one go is done: 1384 placed, 0
+left out, 0 to be tried again later; 2071.3 MB in 95.2 s (21.76 MB/s)`. For the registration: `automatic fetch: one
+registration call (catalog:buildSmartPreviews) for 1384 photo(s) took 12.3 s: 1384 existed, 0 created, 0 failed, 0 not
+reached`. For each smart preview: the `placed` and `registered` lines above. For each job, once it is done and
 registered: `automatic fetch: job 12 «Lightroom import 2026-11-14 15:15, shoot»: 1384 sent (first seen in the catalog ->
 sent: median 1.6 s, max 3.2 s), 1384 placed (ready -> placed: ...), 1384 registered (ready -> registered: ...), 0
-failed`. «Ready» is when the answer reached the plug-in, which with waiting requests is within a moment of the server.
+failed`. «Ready» is when the answer reached the plug-in, which with waiting requests is within a moment of the server;
+since 0.8.2 «ready -> placed» includes the wait for the import to end.
 
 - It starts when the plug-in loads (`LrInitPlugin`; `Info.lua` sets `LrForceInitPlugin` so that this happens when
   Lightroom starts), when the plug-in is enabled, and when the setting (or the automatic send, below) is switched on in
@@ -438,7 +484,7 @@ from the trigger of **Import a folder without the dialog...** (it stores the tim
 record not seen before, for up to 5 minutes until the first photo comes, and after every look that found new photos
 until none has come for **2 minutes**. (Lightroom prepares an import for 2 to 3 minutes before the first photo, then
 commits photos in bursts of about a hundred every 22 to 26 seconds.) While it looks fast, an import counts as in
-progress, and registration waits. In the run of 0.8.0 the looks came only every 20 to 26 seconds while Lightroom
+progress: nothing is downloaded, placed or registered. In the run of 0.8.0 the looks came only every 20 to 26 seconds while Lightroom
 imported, in step with its bursts: plug-in tasks run between them. So nothing depends on the 3 seconds; every logged
 look line says how long after the previous look it came, and the end of a fast period says how often the looks
 really came (`… (61 looks while photos came in, every 22 s on average, the longest gap 26 s)`).
@@ -556,13 +602,14 @@ Lua 5.1:
 | `WatchMode.lua` | yes | How often the automatic send looks: every 3 s while an import comes in, otherwise the interval |
 | `CatalogRead.lua` | yes | The read-only `SELECT`s of the automatic path (photos above a mark or by id, the largest ids) and their parsing |
 | `JobGroups.lua` | yes | One job per Lightroom import: which photos go into which job, the labels, what to do when a job takes no more |
-| `WaitPlan.lua` | yes | The waiting requests: how long to wait, LrHttp's timeout, what each answer means |
-| `RegisterQueue.lua` | yes | Placed smart previews waiting to be registered while an import is in progress |
+| `WaitPlan.lua` | yes | The waiting requests: how long to wait, LrHttp's timeout, what each answer means; what a failed download means (wait for the back-off, try again, give up) |
+| `RegisterQueue.lua` | yes | Placed smart previews waiting to be registered: when a call is due, one call for many, what its answer means, tries again and giving up |
 | `JobStats.lua` | yes | The times and counts per job for the log |
 | `FastState.lua` | yes | What the send and the fetch share in a session (placing data per job and ref), what the server can do |
 | `AutoSendPlan.lua` | yes | The automatic send: the low-water mark and the photos dealt with per catalog, photos that wait for their rows or import link, the file types the server took, the log line |
 | `PendingJobs.lua` | yes | The jobs each catalog waits for, when the automatic fetch may ask the server, the back-off, the end of a job's life |
 | `StatusReport.lua` | yes | The texts of the status dialog |
+| `TextWrap.lua` | yes | The text of the plug-in's own dialogs in lines of at most 90 characters (an LrView `static_text` without a width grows to its longest line); short paths for messages |
 | `DngReader.lua` | yes | `DNGVersion`, `OriginalRawFileName`, `OriginalDefaultFinalSize` from a DNG's first IFD, both byte orders; the directories, entries and tiles a comparison needs |
 | `DngCompare.lua` | yes | Comparing two DNGs: raw image structure, every tile, identity tags, expected and unexpected differences, the texts |
 | `CompatCheck.lua` | yes | «Check the server against Lightroom»: which photo can be checked, what to do with the server's answers, the result text |
@@ -575,11 +622,12 @@ Lua 5.1:
 | `ServerClient.lua` | no | `LrHttp` calls to the server |
 | `SqliteRunner.lua` | no | Finding and running sqlite3 with `LrTasks.execute` |
 | `PhotoAccess.lua` | no | Reading photos, finding them by path, the selection, the file operations for `Delivery` |
-| `Pipeline.lua` | no | The steps the commands share: preparing a send and creating its jobs, lookups, the download queue, the fetch lock, the `clientId` |
+| `Pipeline.lua` | no | The steps the commands share: preparing a send and creating its jobs, lookups, the download queue, the fetch lock, the `clientId`, the temporary files of interrupted placings |
 | `Fetcher.lua` | no | Fetching for a selection or for everything this catalog sent |
 | `AutoFetch.lua` | no | Starting and stopping the automatic loop (fetch and send); the fetch of jobs sent by older versions |
 | `AutoSend.lua` | no | One look of the automatic send: reading the catalog with sqlite3, sending the new photos into the job of their import |
-| `FastFetch.lua` | no | The automatic fetch of jobs sent since 0.8.0: a waiting request per job, placing without calls into the catalog, registration afterwards |
+| `FastFetch.lua` | no | The automatic fetch of jobs sent since 0.8.0: a waiting request per job, nothing downloaded during an import and a fetch in one go after it, placing without calls into the catalog, registration afterwards with one call |
+| `FetchGo.lua` | yes | When the automatic fetch downloads: nothing during an import, everything ready in one go when it is over; the totals of that go |
 | `PluginInfoProvider.lua` | no | The Plug-in Manager section |
 | `ImportFolder.lua`, `BuildSmartPreviews.lua`, `FetchSmartPreviews.lua`, `ServerStatus.lua`, `CheckServer.lua`, `Diagnostics*.lua` | no | The menu commands |
 | `InitPlugin.lua`, `EnablePlugin.lua`, `DisablePlugin.lua`, `ShutdownPlugin.lua` | no | Start and stop the automatic loop |
@@ -757,6 +805,22 @@ the import. What to look at in Lightroom:
 |---|---|
 | Every photo of an import sent, once, into one job; the log line when the mark moves (5 minutes after the last new photo) | not tried |
 | The time between looks while Lightroom imports (in the look lines and at the end of the fast period) | not tried |
-| Placing during the import, registration after it; the totals per job | not tried |
+| The totals per job | not tried |
 | The watchdog (a loop that took no step for 10 minutes) | not tried |
 | Against a server before 0.6.0: new jobs per look, asking at the interval | not tried |
+
+Version 0.8.2: nothing has been tried in Lightroom yet. While an import is in progress it only sends; when the import
+is judged over it fetches everything ready in one go and registers the placed photos with one
+`catalog:buildSmartPreviews` call, which has never been called in Lightroom. In the stand-in run of an import of 600
+photos: no download and no placing before the import was judged over, all 600 ready by then, fetched in one go and
+registered with one call; an interrupted fetch (Lightroom quitting, the server away for 10 minutes, smart previews
+built late, failed downloads and checks, a temporary file of a crash) finished without any action. What to look at in
+Lightroom:
+
+| What | Result |
+|---|---|
+| No download while Lightroom imports; the log line when the import is judged over; the time and MB/s of the fetch in one go | not tried |
+| `catalog:buildSmartPreviews` exists in Lightroom Classic 15.6, takes 1384 photos in one call, answers `existed` for placed files, shows one progress bar; how long it takes | not tried |
+| Its answer when the user cancels the progress bar (the photos not reached are expected in no list) | not tried |
+| Quitting Lightroom during the fetch in one go: at the next start nothing placed is downloaded again, all registered | not tried |
+| The import confirmation and **Server status...** at a normal width (their text in lines of at most 90 characters) | not tried |

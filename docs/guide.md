@@ -4,7 +4,7 @@ This guide takes you from nothing to a first smart preview that was built on you
 Lightroom Classic catalog. It assumes that you are comfortable with a NAS, Docker and a command line, and that you
 have never seen this project. When something does not work, see [troubleshooting.md](troubleshooting.md).
 
-> **State of the project: server 0.6.0, plug-in 0.8.1.** Verified with Lightroom Classic 15.6 on Windows and Adobe
+> **State of the project: server 0.6.0, plug-in 0.8.2.** Verified with Lightroom Classic 15.6 on Windows and Adobe
 > DNG Converter 17.2 under Wine 8.0 on a TrueNAS SCALE machine: the server builds smart previews (0.26–0.35 s per
 > 24 MP photo on a 14-core desktop CPU) and survives a restart in the middle of a job; its dashboard, the folder
 > queue, the automatic scan and the cache clean-up ran there with the real converter. In Lightroom, «Build smart
@@ -14,8 +14,8 @@ have never seen this project. When something does not work, see [troubleshooting
 > and fetched by the automatic fetch, 1384 smart previews placed and registered in 16.5 minutes. Plug-in 0.8.0
 > rebuilt that automatic path for speed and ran once with server 0.6.0: the photos it sent were placed a median 2.5 s
 > after they were built, but it sent only 650 of the 1384 photos (Lightroom made their rows visible out of order). 0.8.1
-> fixes that and has not been run in Lightroom yet; to repair a catalog 0.8.0 left short, see
-> [troubleshooting.md](troubleshooting.md). The status dialog has passed tests outside Lightroom only.
+> fixes that; 0.8.2 downloads nothing while an import is in progress and registers with one call. Neither has been run
+> in Lightroom yet; to repair a catalog 0.8.0 left short, see [troubleshooting.md](troubleshooting.md). The status dialog has passed tests outside Lightroom only.
 > 0.6.0's «Import a folder without the dialog...» ran once (its trigger and gate worked; its waiting was dropped),
 > 0.5.0's «Add a folder without previews...» ran once and was dropped (far too slow on a NAS). Parts of this guide
 > still describe the dashboard as it was in server 0.3.0. macOS and other Lightroom versions are untested. Try
@@ -592,13 +592,23 @@ no progress bar, lines in the log, and a short notice that fades by itself when 
 checks every DNG as a manual fetch does.
 
 With server 0.6.0 or newer, the plug-in keeps one request per job open that the server answers as soon as a smart
-preview is ready (at most 25 seconds, then the next one); so each smart preview is placed within moments of being
-built. An older server is asked at the chosen interval instead. While an import is in progress, the plug-in places the
-files without asking Lightroom anything (such calls are very slow during an import) and asks Lightroom to register
-them when the import is over; a placed file that is not registered yet is harmless (Lightroom takes it by itself), and
-**Server status...** says how many there are. The log has a line per photo with the times: `sent (... first seen in
-the catalog -> sent 2.1 s)`, `placed (... ready -> placed 0.8 s; not registered yet)`, `registered (... ready ->
-registered 152 s)`, and the totals per job.
+preview is ready (at most 25 seconds, then the next one). An older server is asked at the chosen interval instead.
+**While an import is in progress, nothing is downloaded** (Lightroom reads the originals over the same link): the
+plug-in only sends, and the server builds meanwhile. When the import is over (two minutes without a new photo),
+everything ready is fetched in one go, «Downloads at once» files at a time; what becomes ready later, and the jobs of
+**Build smart previews on the server** while no import runs, are fetched as they become ready. The files are placed
+without asking Lightroom anything; then Lightroom is asked to register them, with one call for all the photos of the
+go (one progress bar in Lightroom). Lightroom does not take a placed file by itself, so until then **Server status...**
+counts it as placed and not registered. The log has a line per photo with the times: `sent (... first seen in the
+catalog -> sent 2.1 s)`, `placed (... ready -> placed 0.8 s; not registered yet)`, `registered (... ready ->
+registered 152 s)`, the totals per job, and lines for the import judged over, the fetch in one go (files, MB, seconds)
+and the registration call (seconds, answer).
+
+An interrupted fetch finishes by itself; **nothing needs to be done** after one. When Lightroom quits in the middle,
+the next start goes on with what is missing, without downloading again what is already placed, and registers what
+was placed. When the NAS sleeps or the network is gone, the downloads wait (as below) and go on when the server
+answers. A failed download, or a file that fails the check, is tried three times in all and then logged; a temporary
+file left by an interrupted download is deleted and never taken for a finished smart preview.
 
 It asks the server only while this catalog waits for something, so that an idle Lightroom never wakes a sleeping NAS
 or keeps it awake:
@@ -618,8 +628,8 @@ or keeps it awake:
 
 The automatic send (off by default) reads the catalog itself, every 3 seconds while an import comes in and at the
 chosen interval otherwise, and asks the server only when it has photos to send; the photos of one Lightroom import go
-into one job, `Lightroom import 2026-11-14 15:15, <folder>`. Plug-in 0.8.1's changes to the automatic send have passed
-tests outside Lightroom only.
+into one job, `Lightroom import 2026-11-14 15:15, <folder>`. Plug-in 0.8.1's changes to the automatic send and 0.8.2's
+to the automatic fetch have passed tests outside Lightroom only.
 
 ## 7. Check the result, and undo it
 
@@ -722,6 +732,9 @@ Not verified:
   selection with 0.3.0.) They passed tests outside Lightroom only.
 - Plug-in 0.8.1 in Lightroom: every photo of an import sent once, into one job, with the rows coming out of order;
   how long LrHttp really lets a waiting request wait.
+- Plug-in 0.8.2 in Lightroom: no download during an import, the fetch in one go after it, the registration with one
+  `catalog:buildSmartPreviews` call (never called in Lightroom yet: its time, its progress bar, its answer when
+  cancelled), and an interrupted fetch finishing at the next start.
 - **Import a folder without the dialog...**: whether Lightroom takes sub-folders has not been seen. (0.5.0's «Add a
   folder without previews...» ran once: about 37 s per photo on a NAS folder, with Lightroom's window frozen; it was
   dropped.)

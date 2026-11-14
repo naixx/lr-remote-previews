@@ -78,6 +78,28 @@ function WaitPlan.failure(problem, waited)
     return 'failed'
 end
 
+-- What a failed download means (problem: { kind, status, code } from HttpJson), so that an interrupted fetch finishes
+-- by itself:
+--   'backoff'  the server cannot be reached, is not there behind its proxy (502, 503, 504), refuses the token, or no
+--              server is set (the NAS asleep, the network gone): no try is counted; the file is fetched again after
+--              the back-off of the whole catalog
+--   'final'    the server no longer has the file (404 not_in_cache): it needs a new job; logged, not tried again
+--   'retry'    anything else (an error answer for this file, a broken answer): tried again later, a limited number of
+--              times
+local SERVER_AWAY = { [502] = true, [503] = true, [504] = true }
+
+function WaitPlan.downloadFailure(problem)
+    problem = problem or {}
+    if problem.code == 'not_in_cache' then
+        return 'final'
+    end
+    if problem.kind == 'unreachable' or problem.kind == 'unauthorized' or problem.kind == 'notConfigured'
+        or SERVER_AWAY[tonumber(problem.status) or 0] then
+        return 'backoff'
+    end
+    return 'retry'
+end
+
 WaitPlan.EARLY = 1 -- an empty answer to a waiting request sooner than this (seconds) came before the wait was over
 WaitPlan.EARLY_PAUSE = 5
 

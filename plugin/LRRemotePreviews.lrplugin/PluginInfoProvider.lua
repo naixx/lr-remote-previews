@@ -57,14 +57,15 @@ local function checkSqlite(propertyTable)
     LrTasks.startAsyncTask(function()
         local settings = Settings.read(propertyTable)
         propertyTable.sqliteResult = 'Checking...'
-        local tool, problem = SqliteRunner.locate(settings.sqlitePath, _PLUGIN and _PLUGIN.path)
+        local tool, problem, problemInFull = SqliteRunner.locate(settings.sqlitePath, _PLUGIN and _PLUGIN.path)
         if tool then
             propertyTable.sqliteResult = 'Found sqlite3 ' .. tool.version
             Log.info('sqlite3 check: %s, %s', tool.version, SqliteRunner.describe(tool))
-            LrDialogs.message(SQLITE_TITLE, 'sqlite3 ' .. tool.version .. '\n' .. SqliteRunner.describe(tool), 'info')
+            LrDialogs.message(SQLITE_TITLE, 'sqlite3 ' .. tool.version .. '\n' .. SqliteRunner.describe(tool, true),
+                'info')
         else
             propertyTable.sqliteResult = 'Not found'
-            Log.warn('sqlite3 check: %s', problem)
+            Log.warn('sqlite3 check: %s', problemInFull)
             LrDialogs.message(SQLITE_TITLE, problem, 'critical')
         end
     end)

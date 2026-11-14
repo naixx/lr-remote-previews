@@ -8,6 +8,7 @@ local LrPathUtils = import 'LrPathUtils'
 local LrTasks = import 'LrTasks'
 
 local Log = require 'Log'
+local TextWrap = require 'TextWrap'
 
 local TITLE = 'Smart preview report'
 
@@ -34,11 +35,12 @@ LrTasks.startAsyncTask(function()
     local f, err = io.open(out, 'w')
     if not f then
         Log.error('report: cannot write %s: %s', out, tostring(err))
-        LrDialogs.message(TITLE, 'Cannot write ' .. out .. ': ' .. tostring(err), 'critical')
+        LrDialogs.message(TITLE, 'Cannot write ' .. TextWrap.shortPath(out) .. ': ' .. tostring(err), 'critical')
         return
     end
     f:write(table.concat(lines, '\n'), '\n')
     f:close()
     Log.info('report: %d photos, %d with a smart preview, written to %s', #photos, with, out)
-    LrDialogs.message(TITLE, string.format('%d photos, %d with a smart preview.\n\n%s', #photos, with, out), 'info')
+    LrDialogs.message(TITLE, string.format('%d photos, %d with a smart preview.\n\n%s', #photos, with,
+        TextWrap.shortPath(out)), 'info')
 end)

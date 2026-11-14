@@ -8,6 +8,7 @@ local LrPathUtils = import 'LrPathUtils'
 local LrTasks = import 'LrTasks'
 
 local Log = require 'Log'
+local TextWrap = require 'TextWrap'
 
 local TITLE = 'Try buildSmartPreview'
 local MAX_PHOTOS = 20
@@ -42,7 +43,7 @@ LrTasks.startAsyncTask(function()
     local f, err = io.open(out, 'w')
     if not f then
         Log.error('try build: cannot write %s: %s', out, tostring(err))
-        LrDialogs.message(TITLE, 'Cannot write ' .. out .. ': ' .. tostring(err), 'critical')
+        LrDialogs.message(TITLE, 'Cannot write ' .. TextWrap.shortPath(out) .. ': ' .. tostring(err), 'critical')
         return
     end
     f:write(table.concat(lines, '\n'), '\n')
@@ -53,5 +54,5 @@ LrTasks.startAsyncTask(function()
     end
     table.sort(summary)
     Log.info('try build: %s, written to %s', table.concat(summary, ', '), out)
-    LrDialogs.message(TITLE, table.concat(summary, ', ') .. '\n\n' .. out, 'info')
+    LrDialogs.message(TITLE, table.concat(summary, ', ') .. '\n\n' .. TextWrap.shortPath(out), 'info')
 end)

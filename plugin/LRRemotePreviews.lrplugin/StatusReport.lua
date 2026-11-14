@@ -114,7 +114,7 @@ function StatusReport.jobsText(context)
     end
     if (context.unregistered or 0) > 0 then
         add(string.format('%d smart preview%s placed in the smart preview folder and not registered by Lightroom yet '
-            .. '(the automatic fetch registers them when no import is running; Lightroom also takes them by itself).',
+            .. '(the automatic fetch registers them with one call when no import is running).',
             context.unregistered, context.unregistered == 1 and ' is' or 's are'))
     end
     return table.concat(lines, '\n')
@@ -139,9 +139,8 @@ end
 -- is now, so its answer may already show items as building, or failed again (a file that is gone).
 function StatusReport.retryText(job)
     local counts = job.counts or {}
-    return string.format('Job %d: the failed items were given another attempt (now queued %d, building %d, '
-        .. 'failed %d). Fetch later to get the results.', job.id, counts.queued or 0, counts.building or 0,
-        counts.failed or 0)
+    return string.format('Job %d tried again: now queued %d, building %d, failed %d. Fetch later.', job.id,
+        counts.queued or 0, counts.building or 0, counts.failed or 0)
 end
 
 return StatusReport

@@ -367,10 +367,17 @@ Also:
 - **The automatic fetch brings nothing**: it asks the server only for jobs it waits for (sent by plug-in 0.7.0 or
   newer from this catalog, at most 7 days ago, not yet done). The log says `automatic fetch: nothing pending for this
   catalog; the server is not asked` when there is none. Older jobs: **Fetch ready smart previews**.
-- **Smart previews are placed but Lightroom does not show them yet** (plug-in 0.8.0): while an import is in progress
-  the automatic fetch only places the files (log: `placed (...; not registered yet)`) and asks Lightroom to register
-  them when no new photo has come for 2 minutes (log: `registered (...)`). **Server status...** says how many wait.
-  Lightroom also takes such files by itself; nothing needs to be done.
+- **Nothing arrives while Lightroom imports** (plug-in 0.8.2): on purpose. While an import is in progress the
+  automatic fetch only sends; when no new photo has come for 2 minutes it fetches everything ready in one go (log:
+  `the import is taken as over`, then `the fetch in one go is done: ...`).
+- **Smart previews are placed but Lightroom does not show them yet**: the automatic fetch places the files first (log:
+  `placed (...; not registered yet)`) and then asks Lightroom to register them, since 0.8.2 with one call for all (log:
+  `one registration call (catalog:buildSmartPreviews) for ... photo(s) took ...`, then `registered (...)` per photo).
+  Lightroom does not take such files by itself; **Server status...** says how many wait. When the progress bar of that
+  call was cancelled, the rest is registered after the next fetch in one go or at the next start of Lightroom.
+- **Lightroom was closed, or the NAS went to sleep, in the middle of a fetch**: nothing needs to be done. At the next
+  start (or when the server answers again) the fetch goes on with what is missing, does not download again what is
+  already placed, and registers what was placed.
 - **The log says `a waiting request for job 12 ran out of time on this side`**: LrHttp gave up before the server
   answered (`timedOut`). The plug-in then asks the server to wait half as long, down to 5 seconds; it is not an error.
 

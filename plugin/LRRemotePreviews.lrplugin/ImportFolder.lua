@@ -29,6 +29,7 @@ local ImportQuery = require 'ImportQuery'
 local Log = require 'Log'
 local Settings = require 'Settings'
 local SqliteRunner = require 'SqliteRunner'
+local TextWrap = require 'TextWrap'
 
 local TITLE = 'Import a folder without the dialog'
 local AUTO_TRIGGER_KEY = 'importTriggered' -- AutoFetch.TRIGGER_KEY (that module is not loaded here)
@@ -86,9 +87,10 @@ local function askToImport(context, folder, verdict, autoSend, sendProblem)
     props.autoSend = autoSend == true
     local contents = f:column {
         bind_to_object = props,
-        f:static_text { title = ImportPlan.dialogText(folder, verdict) },
+        -- Lines of TextWrap.WIDTH characters: a static_text without a width grows to its longest line.
+        f:static_text { title = TextWrap.wrap(ImportPlan.dialogText(folder, verdict), TextWrap.WIDTH, { folder }) },
         f:checkbox { title = 'Send new photos to the server automatically', value = LrView.bind 'autoSend' },
-        f:static_text { title = ImportPlan.autoSendNote(sendProblem) },
+        f:static_text { title = TextWrap.wrap(ImportPlan.autoSendNote(sendProblem)) },
     }
     local answer = LrDialogs.presentModalDialog { title = TITLE, contents = contents, actionVerb = 'Import' }
     if answer ~= 'ok' then
@@ -132,7 +134,10 @@ local function run(context)
         Log.info('%sno folder chosen', P)
         return
     end
-    local tool, toolProblem = SqliteRunner.locate(settings.sqlitePath, _PLUGIN and _PLUGIN.path)
+    local tool, toolProblem, toolProblemInFull = SqliteRunner.locate(settings.sqlitePath, _PLUGIN and _PLUGIN.path)
+    if not tool then
+        Log.warn('%s%s', P, toolProblemInFull)
+    end
     local verdict = readVerdict(tool, toolProblem, catalogPath)
     Log.info('%s%s; previous import: %s', P, folder, verdict.ok and ImportPlan.settingsLogText(verdict)
         or ('refused: ' .. verdict.refusal))

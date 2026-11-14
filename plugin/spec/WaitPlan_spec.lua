@@ -91,4 +91,20 @@ describe('WaitPlan failures', function()
         assert.are.equal('failed', WaitPlan.failure({ kind = 'http', status = 500 }, 25))
         assert.are.equal('failed', WaitPlan.failure(nil, 25))
     end)
+
+    it('a download the server could not serve waits for the back-off; a failure of the file is tried again', function()
+        -- the NAS asleep, the network gone, the server down behind its proxy, a token problem: no try counted
+        assert.are.equal('backoff', WaitPlan.downloadFailure({ kind = 'unreachable', message = 'timed out' }))
+        assert.are.equal('backoff', WaitPlan.downloadFailure({ kind = 'http', status = 503 }))
+        assert.are.equal('backoff', WaitPlan.downloadFailure({ kind = 'http', status = 502 }))
+        assert.are.equal('backoff', WaitPlan.downloadFailure({ kind = 'unauthorized', status = 401 }))
+        assert.are.equal('backoff', WaitPlan.downloadFailure({ kind = 'notConfigured' }))
+        -- gone from the server's cache: needs a new job
+        assert.are.equal('final', WaitPlan.downloadFailure({ kind = 'http', status = 404, code = 'not_in_cache' }))
+        -- a failure of this file: tried again, a limited number of times
+        assert.are.equal('retry', WaitPlan.downloadFailure({ kind = 'http', status = 500 }))
+        assert.are.equal('retry', WaitPlan.downloadFailure({ kind = 'http', status = 409, code = 'not_ready' }))
+        assert.are.equal('retry', WaitPlan.downloadFailure({ kind = 'http', message = 'The server sent no file.' }))
+        assert.are.equal('retry', WaitPlan.downloadFailure(nil))
+    end)
 end)

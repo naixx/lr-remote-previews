@@ -95,9 +95,10 @@ describe('StatusReport texts', function()
     end)
 
     it('words the answer to a retry, whatever state the server already reports', function()
-        assert.are.equal('Job 11: the failed items were given another attempt (now queued 1, building 1, failed 0). '
-            .. 'Fetch later to get the results.',
-            StatusReport.retryText(job(11, 'active', { queued = 1, building = 1 })))
+        -- It fits the 80 characters of the line under the Retry button.
+        local text = StatusReport.retryText(job(11, 'active', { queued = 1, building = 1 }))
+        assert.are.equal('Job 11 tried again: now queued 1, building 1, failed 0. Fetch later.', text)
+        assert.is_true(#StatusReport.retryText(job(123456, 'active', { queued = 4999, building = 16 })) <= 80)
         assert.matches('now queued 0, building 0, failed 1', StatusReport.retryText(job(11, 'done', { failed = 1 })))
     end)
 end)
