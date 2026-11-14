@@ -2,7 +2,7 @@
 
 HTTP and JSON. Everything under `/api/v1`. The server also publishes an OpenAPI description at `/docs` (generated;
 the text here is the contract that the three parts are written against). This file grows with the stages of the
-[plan](plan.md); it now covers stage 2.
+[plan](plan.md); it now covers stage 3.
 
 Conventions: JSON bodies are UTF-8. Times are UTC, written exactly as `YYYY-MM-DDTHH:MM:SSZ`
 (`2026-11-14T09:30:00Z`): a literal `Z`, no numeric offset, no fractions of a second. Identifiers of
@@ -25,14 +25,16 @@ type or value. `detail` is always one string, also for `422`.
 
 ## `GET /healthz`
 
-`200` `{"status": "ok"}`. For container health checks.
+`200` `{"status": "ok", "busy": false}`. For container health checks, and for software that must know whether
+the server is working: `busy` is true while `status.state` (below) is `running`. A NAS that sleeps when idle can
+poll this to stay awake while the queue runs. Never needs a token.
 
 ## `GET /api/v1/info`
 
 ```json
 {
   "name": "LR Remote Previews",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "api": 1,
   "auth": "token",
   "converter": {
@@ -58,7 +60,7 @@ type or value. `detail` is always one string, also for `422`.
 | `api` | Major version of this protocol |
 | `auth` | `"token"` or `"none"` |
 | `converter.installed` | Whether the server finds Adobe DNG Converter at `converter.path` inside its Wine prefix |
-| `converter.version` | Not determined yet (`null`) |
+| `converter.version` | The converter's product version as recorded in its executable (for example `"17.2"`), or `null` when it is not installed or the version cannot be read |
 | `roots[]` | The folders with originals the server can read. `id` is what a client uses to name a root; server-side paths are never exposed. `available` is false when the folder is missing, for example an unmounted volume |
 | `capabilities.extensions` | Lower-case file extensions the server accepts as camera raw files |
 | `capabilities.previewLongEdge` | Long edge of the smart previews it builds, in pixels |
@@ -283,19 +285,145 @@ For the dashboard.
 
 ```json
 {
+  "state": "running",
   "queue": {"queued": 300, "building": 8},
   "workers": {"configured": 4, "busy": 4},
   "rate": {"perMinute": 172.5, "windowSeconds": 60},
+  "etaSeconds": 104,
   "today": {"built": 1234, "failed": 2},
   "cache": {"entries": 5321, "bytes": 2890000000},
-  "jobs": {"active": 1}
+  "jobs": {"active": 1},
+  "cpuTemperature": 67.5
 }
 ```
 
-`queue`: items over all jobs. `workers.configured`: the number of converter processes the server may run side by
-side; `busy`: how many run now. `rate.perMinute`: items built in the last `windowSeconds`, scaled to a minute; 0
-when idle. `today`: since local midnight of the server. `rate` and `today` count conversions, not items: a file two
-jobs asked for counts once, and `rate` counts successful conversions only. `cache`: the DNGs kept.
+`state`: `running` (building, or about to), `idle` (nothing queued), `paused` (the `paused` setting is on),
+`waiting` (work is queued but the working hours have not begun). `queue`: items over all jobs.
+`workers.configured`: the number of converter processes the server may run side by side; `busy`: how many run now.
+`rate.perMinute`: items built in the last `windowSeconds`, scaled to a minute; 0 when idle. `etaSeconds`: an
+estimate of the time until the queue is empty from the current rate, or `null` when there is nothing to estimate
+(idle, paused, waiting, or no rate yet). `today`: since local midnight of the server. `rate` and `today` count
+conversions, not items: a file two jobs asked for counts once, and `rate` counts successful conversions only.
+`cache`: the DNGs kept. `cpuTemperature`: degrees Celsius of the hottest CPU sensor the server can read, or `null`.
+
+## Settings
+
+Settings that can be changed while the server runs. They are kept in the server's database; the environment
+variables only give their first values.
+
+### `GET /api/v1/settings`
+
+```json
+{
+  "workers": "auto",
+  "effectiveWorkers": 4,
+  "batchSize": 8,
+  "paused": false,
+  "workingHours": {"enabled": false, "from": "22:00", "to": "07:00"}
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `workers` | `"auto"` or a whole number from 1 to 32, never 2 (two converter processes side by side waste CPU time) |
+| `effectiveWorkers` | What `workers` comes to on this machine. Read-only |
+| `batchSize` | Files per converter process in one wave, 1 to 64 |
+| `paused` | When true no new wave starts; a wave that is running finishes |
+| `workingHours` | When `enabled`, waves start only between `from` and `to`, local time of the server, `HH:MM` in 24-hour form. `from` later than `to` means a window across midnight. `from` equal to `to` is refused |
+
+### `PATCH /api/v1/settings`
+
+A JSON object with any subset of `workers`, `batchSize`, `paused`, `workingHours` (the whole `workingHours` object
+when it is given). `200` with the settings object after the change. `422` when a value is not acceptable; nothing
+is changed then. A change takes effect with the next wave.
+
+## Browsing the roots and queueing a folder
+
+### `GET /api/v1/browse`
+
+Query: `root` (a root id), `path` (a folder relative to the root; empty or absent for the root itself).
+
+```json
+{
+  "root": "archive",
+  "path": "2026",
+  "parent": "",
+  "dirs": [{"name": "2026.06.20 - shoot", "path": "2026/2026.06.20 - shoot"}],
+  "rawFiles": 0,
+  "builtFiles": 0,
+  "otherFiles": 12,
+  "truncated": false
+}
+```
+
+`parent` is the path of the folder above, `""` for a folder directly under the root, `null` for the root itself.
+`dirs`: the sub-folders, sorted by name without regard to case; names that start with a dot are left out.
+`rawFiles`: the files directly in this folder that the server accepts as camera raw files; `builtFiles`: how many
+of those have their DNG in the cache now; `otherFiles`: the other files directly in this folder. Nothing is counted
+in sub-folders. `truncated` is true when the folder has more than 5000 sub-folders and the list was cut. Errors:
+`404` with `"code"` `unknown_root`, `root_unavailable` or `not_found`; `422` `bad_path`; `422` `not_a_folder`.
+
+### `POST /api/v1/folders`
+
+Queues the raw files of a folder.
+
+```json
+{"root": "archive", "path": "2026/2026.06.20 - shoot", "recursive": false, "label": null}
+```
+
+`recursive` (default false) also takes the files of all sub-folders (not following symbolic links, skipping names
+that start with a dot). `label` is optional; without it the jobs are labelled with the folder's path.
+
+`201`:
+
+```json
+{"files": 1384, "alreadyBuilt": 300, "jobs": [ …job objects… ]}
+```
+
+The files are put into one job, or several when there are more than `capabilities.maxItemsPerJob`; the jobs have
+`client` `"dashboard"` and no `clientId`. `files` is the number of raw files found, `alreadyBuilt` how many of them
+were in the cache already (their items are `ready` at once). A folder without raw files gives `201` with
+`"files": 0` and no jobs. Errors: as for browse; `409` `converter_not_installed`; `422` with
+`"code": "too_many_files"` when more than 50000 raw files are found (queue sub-folders instead).
+
+## The converter
+
+### `POST /api/v1/converter/selftest`
+
+Checks that the converter can run, step by step, and reports each step. The body is optional:
+`{"root": "archive", "path": "2026/2026.06.20 - shoot/IMG_0001.ARW"}` names a raw file to convert as the last step;
+without it only the first steps run. The result of the conversion is not kept.
+
+`200`:
+
+```json
+{
+  "ok": true,
+  "steps": [
+    {"name": "installed", "ok": true, "detail": "C:\\Program Files\\Adobe\\Adobe DNG Converter\\Adobe DNG Converter.exe, version 17.2"},
+    {"name": "display", "ok": true, "detail": "Xvfb on :99"},
+    {"name": "warm-up", "ok": true, "detail": "not needed"},
+    {"name": "conversion", "ok": true, "detail": "IMG_0001.ARW → 359310 bytes in 2.1 s, original name and size recorded"}
+  ]
+}
+```
+
+Step names, in order: `installed`, `display`, `warm-up`, `conversion` (only with a file). A step that fails has
+`"ok": false` and a `detail` that says why, with the last lines of the converter's output where there is any; the
+steps after it are left out and `ok` at the top is false. The self-test waits for a running wave to finish and
+keeps new waves from starting while it runs. `409` with `"code": "busy"` when another self-test is running. The
+request for the file is checked like an item of a job (`422` with the item's rejection code as `code`).
+
+## `GET /api/v1/log`
+
+The server's recent log lines, for the dashboard. Query: `limit` (1–1000, default 200).
+
+```json
+{"lines": [{"time": "2026-11-14T09:30:00Z", "level": "INFO", "logger": "lrrp.scheduler", "message": "wave: 32 file(s) …"}]}
+```
+
+Oldest first, the newest `limit` lines of the last 1000 the server keeps in memory since it started. Request lines
+of the HTTP server are not included. The token never appears in a line.
 
 ## What a client must do with a delivered file
 
