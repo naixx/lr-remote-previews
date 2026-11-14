@@ -1,0 +1,67 @@
+# LR Remote Previews as a TrueNAS SCALE app: Apps > Discover Apps > ⋮ > Install via YAML.
+# Step by step: docs/truenas.md. Everything written in CAPITALS is a placeholder to replace.
+#
+# Adobe DNG Converter is not included; docs/converter.md describes how to place it into the app's
+# data folder after the first start.
+
+services:
+  lrrp:
+    # The image. Until images are published, build it on the NAS from a checkout of the repository:
+    #   sudo docker build -f deploy/Dockerfile -t lr-remote-previews:local .
+    image: lr-remote-previews:local
+    restart: unless-stopped
+
+    # The user the server runs as. It must be able to READ the originals, and it must own the data and
+    # cache folders below. It has to stay the same once the app has started for the first time (the Wine
+    # prefix in the data folder belongs to it).
+    user: "UID:GID"
+    # Extra groups, if the originals are readable through a group:
+    # group_add:
+    #   - "GID"
+
+    environment:
+      # A long random string; the plug-in and the dashboard ask for it.
+      LRRP_TOKEN: "REPLACE-WITH-A-LONG-RANDOM-STRING"
+      LRRP_CONFIG: /config/roots.yaml
+      # Local time for the working hours and the "today" counters, for example Europe/Berlin.
+      TZ: "REGION/CITY"
+      # Converter processes side by side: auto, or a number (never 2). Can also be changed on the dashboard.
+      # LRRP_WORKERS: "auto"
+
+    ports:
+      - "8787:8787"
+
+    volumes:
+      # The server's state: the queue database and the Wine prefix with the converter.
+      - type: bind
+        source: /mnt/POOL/lr-remote-previews/data
+        target: /data
+      # The built DNGs, about 0.5 MB per photo. An SSD pool is a good place.
+      - type: bind
+        source: /mnt/POOL/lr-remote-previews/cache
+        target: /cache
+      # The list of roots (docs/truenas.md has an example).
+      - type: bind
+        source: /mnt/POOL/lr-remote-previews/config
+        target: /config
+        read_only: true
+      # The originals, ALWAYS read-only. One entry per root; the target is the root's path in roots.yaml.
+      - type: bind
+        source: /mnt/POOL/DATASET-WITH-ORIGINALS
+        target: /sources/archive
+        read_only: true
+
+# The "Web UI" button in Apps and on the dashboard. TrueNAS reads this block when the app is created,
+# not when it is edited: to change it, delete the app (its folders stay) and install it again.
+x-portals:
+  - name: Web UI
+    scheme: http
+    host: 0.0.0.0
+    port: 8787
+    path: /
+
+x-notes: |
+  LR Remote Previews builds Lightroom Classic smart previews next to the originals.
+  Dashboard: the Web UI button. The plug-in for Lightroom Classic needs this server's address
+  (http://THIS-NAS:8787) and the token from LRRP_TOKEN.
+  Adobe DNG Converter is not included; see docs/converter.md in the project.
