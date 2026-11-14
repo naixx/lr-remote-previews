@@ -17,7 +17,8 @@ UUID, was shown and used for that other photo, in the Library and in Develop.
    file is discarded and reported.
 4. The plug-in writes under a temporary name in the same folder and renames, so Lightroom never sees a partial file.
 5. The plug-in never replaces an existing smart preview.
-6. The API is reachable only with a token, and every path a client sends is checked against escaping its root.
+6. The API asks for a token whenever one is configured, and every path a client sends is checked against escaping
+   its root. A server without a token accepts every request and says so; that is for development only.
 
 ## Consequences
 

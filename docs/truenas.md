@@ -2,7 +2,8 @@
 
 The server runs on TrueNAS SCALE as a custom app installed from a YAML file
 ([deploy/truenas/app.yaml](../deploy/truenas/app.yaml)). This page is the path from an empty system to a dashboard
-that shows «converter installed». Using it from Lightroom is in the plug-in's README.
+that shows «converter installed». Everything after that, from the plug-in's settings to the first delivered smart
+preview, is in the [guide](guide.md).
 
 *Tried on:* TrueNAS SCALE 25.10 with Docker 28. The image was built on the NAS and the server ran there as a plain
 container with the same settings this file gives the app; **the YAML itself has not been installed through the
