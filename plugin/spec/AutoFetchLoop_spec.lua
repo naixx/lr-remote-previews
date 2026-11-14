@@ -184,6 +184,31 @@ describe('AutoFetchLoop', function()
         assert.are.same({ 0, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 3 }, { unpack(env.fetches, 1, 10) })
     end)
 
+    it('logs the time since the previous look, and at the end of a fast period how often the looks came', function()
+        local env = fakeEnv({ send = true, stopAt = 400, found = function(clock)
+            return clock <= 60 and 100 or 0
+        end, sendText = function(n)
+            return 'sent ' .. n
+        end })
+        env.sleep = function()
+            env.sleeps = env.sleeps + 1
+            env.clock = env.clock + (env.clock < 60 and 20 or 1) -- Lightroom lets the loop run only between bursts
+        end
+        AutoFetchLoop.run(env, { firstDelay = 0 })
+        assert.are.equal(1, count(env.logs, 'automatic send: sent 2 (20 s after the previous look)'))
+        assert.are.equal(1, count(env.logs, 'looking every 60 s again ('))
+        assert.matches('every %d+ s on average, the longest gap 20 s%)', table.concat(env.logs, '|'))
+    end)
+
+    it('tells a loop that has taken no step for too long', function()
+        assert.is_false(AutoFetchLoop.stalled(1000, 1000 + AutoFetchLoop.STALL_SECONDS))
+        assert.is_true(AutoFetchLoop.stalled(1000, 1001 + AutoFetchLoop.STALL_SECONDS))
+        assert.is_true(AutoFetchLoop.stalled(1000, 1031, 30))
+        assert.is_false(AutoFetchLoop.stalled(nil, 5000))
+        assert.are.equal('every 22 s on average, the longest gap 26 s', AutoFetchLoop.gapsText({ 20, 20, 26 }))
+        assert.are.equal('', AutoFetchLoop.gapsText({}))
+    end)
+
     it('skips the fetch step when asked to stop during a look', function()
         local stopped = false
         local env = fakeEnv({ send = true, found = function()

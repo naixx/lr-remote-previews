@@ -20,12 +20,35 @@
 --   sleep(seconds), now() -> seconds, log(format, ...)
 -- options: step (seconds between two steps, default 1), firstDelay (seconds from the start to the first look and the
 -- first sweep, default 20).
--- The same text twice in a row is logged once (for each duty); a nil text is not logged at all.
+-- The same text twice in a row is logged once (for each duty); a nil text is not logged at all. A send line carries the
+-- time since the previous look, and the end of a fast period says how often the looks really came: seen with plug-in
+-- 0.8.0, while Lightroom imports plug-in tasks run only between its bursts, about every 20-26 s, not every 3 s.
 local WatchMode = require 'WatchMode'
 
 local AutoFetchLoop = {}
 
 AutoFetchLoop.DEFAULTS = { step = 1, firstDelay = 20 }
+AutoFetchLoop.STALL_SECONDS = 600 -- a loop that has not taken a step for this long is taken as hanging
+
+-- True when the loop's last step (heartbeat, a time) is more than limit (default STALL_SECONDS) seconds before now: a
+-- call that never returns (an LrTasks.execute of sqlite3 that Lightroom does not run, seen once while Lightroom was
+-- busy removing 1384 photos) holds the loop for good, and a new loop has to be started.
+function AutoFetchLoop.stalled(heartbeat, now, limit)
+    return type(heartbeat) == 'number' and now - heartbeat > (limit or AutoFetchLoop.STALL_SECONDS)
+end
+
+-- 'every 21 s on average, the longest gap 26 s' for the gaps between looks, or '' for none.
+function AutoFetchLoop.gapsText(gaps)
+    if #gaps == 0 then
+        return ''
+    end
+    local total, longest = 0, 0
+    for _, gap in ipairs(gaps) do
+        total = total + gap
+        longest = math.max(longest, gap)
+    end
+    return string.format('every %.0f s on average, the longest gap %.0f s', total / #gaps, longest)
+end
 
 function AutoFetchLoop.run(env, options)
     options = options or {}
@@ -35,14 +58,15 @@ function AutoFetchLoop.run(env, options)
     local nextSweep = nextLook
     local watch = WatchMode.new()
     local looks, lastText, lastFast = 0, {}, false
+    local lastLookAt, fastGaps = nil, {}
     local reason
-    local function report(duty, text)
+    local function report(duty, text, suffix)
         if text == nil then
             return
         end
         text = tostring(text)
         if text ~= lastText[duty] then
-            env.log('automatic %s: %s', duty, text)
+            env.log('automatic %s: %s%s', duty, text, suffix or '')
             lastText[duty] = text
         end
     end
@@ -64,17 +88,24 @@ function AutoFetchLoop.run(env, options)
             end
             if now >= nextLook then
                 looks = looks + 1
+                local gap = lastLookAt and (now - lastLookAt) or nil
+                lastLookAt = now
+                if lastFast and gap then
+                    fastGaps[#fastGaps + 1] = gap
+                end
                 local text, found, imports = env.send()
-                report('send', text)
+                report('send', text, gap and string.format(' (%.0f s after the previous look)', gap) or nil)
                 local after = env.now()
                 WatchMode.found(watch, found or 0, after)
                 WatchMode.imports(watch, imports, after)
                 local fast = WatchMode.fast(watch, after)
                 if fast and not lastFast then
                     env.log('automatic send: looking every %d s while photos come in', WatchMode.FAST_SECONDS)
+                    fastGaps = {}
                 elseif lastFast and not fast then
-                    env.log('automatic send: no new photo for %d s; looking every %d s again', WatchMode.QUIET_SECONDS,
-                        interval)
+                    env.log('automatic send: no new photo for %d s; looking every %d s again (%d looks while photos '
+                        .. 'came in, %s)', WatchMode.QUIET_SECONDS, interval, #fastGaps + 1,
+                        AutoFetchLoop.gapsText(fastGaps))
                 end
                 lastFast = fast
                 nextLook = WatchMode.nextLook(watch, after, interval)

@@ -165,6 +165,7 @@ function AutoFetch.startIfEnabled(reason)
                 return tonumber(prefs()[AutoFetch.TRIGGER_KEY])
             end,
             fetch = function(importing, sweepDue)
+                AutoFetch.heartbeat = os.time()
                 local fetched, text, nextStep = LrTasks.pcall(fetchStep, importing, sweepDue, shouldStop)
                 if not fetched then
                     return 'failed: ' .. tostring(text)
@@ -172,13 +173,15 @@ function AutoFetch.startIfEnabled(reason)
                 return text, nextStep
             end,
             send = function()
-                local sent, text, found, imports = LrTasks.pcall(AutoSend.sendOnce)
+                AutoFetch.heartbeat = os.time()
+                local sent, text, found, imports = LrTasks.pcall(AutoSend.sendOnce, shouldStop)
                 if not sent then
                     return 'failed: ' .. tostring(text), 0, {}
                 end
                 return text, found, imports
             end,
             sleep = function(seconds)
+                AutoFetch.heartbeat = os.time()
                 LrTasks.sleep(seconds)
             end,
             now = os.time,
@@ -194,6 +197,24 @@ function AutoFetch.startIfEnabled(reason)
             Log.error('automatic fetch: the loop stopped with an error: %s', tostring(err))
         end
     end, 'LR Remote Previews automatic fetch')
+    -- The watchdog of this loop: when the loop has taken no step for AutoFetchLoop.STALL_SECONDS (a call that never
+    -- comes back, such as an LrTasks.execute of sqlite3 that Lightroom does not run), it starts a new loop. The old
+    -- one, should it ever come back, sees that its run token is no longer the stored one and ends without doing
+    -- anything.
+    AutoFetch.heartbeat = os.time()
+    LrTasks.startAsyncTask(function()
+        while AutoFetch.token == token and prefs()[AutoFetch.RUN_KEY] == token and not AutoFetch.stopRequested do
+            LrTasks.sleep(30)
+            if AutoFetch.running and AutoFetch.token == token and prefs()[AutoFetch.RUN_KEY] == token
+                and AutoFetchLoop.stalled(AutoFetch.heartbeat, os.time()) then
+                Log.warn('automatic fetch: the loop has taken no step for %d minutes (a call into Lightroom, for '
+                    .. 'example running sqlite3, did not come back); starting a new one',
+                    math.floor(AutoFetchLoop.STALL_SECONDS / 60))
+                AutoFetch.startIfEnabled('the old loop did not move')
+                return
+            end
+        end
+    end, 'LR Remote Previews watchdog')
     return true
 end
 

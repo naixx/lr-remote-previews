@@ -228,21 +228,33 @@ local function sendBatch(context, batch)
     return true
 end
 
--- Sends the photos a read found above the mark. Returns the text for the log.
+-- Deals with the photos a read found above the mark (AutoSendPlan: what is new, what waits, what is taken now), sends
+-- what is taken, and stores the state. Returns the text for the log (nil when nothing happened) and the number of
+-- photos no earlier look had seen.
 local function sendFound(store, settings, catalogPath, state, parsed, now)
+    local plan = AutoSendPlan.sort(state, parsed.photos, #parsed.imports > 0, now)
     local seenAt = AutoSend.clock()
-    local ids, transient, leftOut, candidates = {}, {}, {}, {}
-    local maxSeen = state.seen
     for _, photo in ipairs(parsed.photos) do
-        ids[#ids + 1] = photo.id
-        maxSeen = math.max(maxSeen, photo.id)
-        FastState.firstSeen[photo.id] = FastState.firstSeen[photo.id] or seenAt
-        if photo.incomplete then
-            transient[photo.id] = true
-        elseif photo.virtualCopy then
+        if not state.handled[photo.id] and FastState.firstSeen[photo.id] == nil then
+            FastState.firstSeen[photo.id] = seenAt
+        end
+    end
+    local visible = {}
+    for i, photo in ipairs(parsed.photos) do
+        visible[i] = photo.id
+    end
+    local leftOut, done, candidates = {}, {}, {}
+    add(leftOut, 'gaveUp', #plan.gaveUp)
+    for _, id in ipairs(plan.gaveUp) do
+        done[#done + 1] = id
+    end
+    for _, photo in ipairs(plan.take) do
+        if photo.virtualCopy then
             add(leftOut, 'virtualCopy')
+            done[#done + 1] = photo.id
         elseif photo.badUuid then
             add(leftOut, 'noFileId')
+            done[#done + 1] = photo.id
             Log.warn('automatic send: catalog id %d has a file id that is not a UUID (%s); left out', photo.id,
                 photo.badUuid)
         else
@@ -252,71 +264,64 @@ local function sendFound(store, settings, catalogPath, state, parsed, now)
                 smartPreviewPath = photo.hasSmartPreview and '(registered in the catalog)' or nil }
         end
     end
-    local newState, cutoff, gaveUp = AutoSendPlan.settle(state, ids, transient, maxSeen, now)
-    add(leftOut, 'gaveUp', #gaveUp)
-    local later, ready = 0, {}
-    for _, id in ipairs(ids) do
-        if cutoff ~= nil and id >= cutoff then
-            later = later + 1
+    local function finish(text)
+        AutoSendPlan.handle(state, done)
+        for _, id in ipairs(done) do
+            FastState.firstSeen[id] = nil
         end
+        if AutoSendPlan.advance(state, visible, now) then
+            Log.info('automatic send: no new photo for %d s and nothing waits; every photo up to catalog id %d is '
+                .. 'dealt with', AutoSendPlan.MARK_QUIET, state.mark)
+        end
+        state.looked = now
+        saveState(store, catalogPath, state)
+        return text
     end
-    for _, photo in ipairs(candidates) do
-        if cutoff == nil or photo.id < cutoff then
-            ready[#ready + 1] = photo
+    if #candidates == 0 and #done == 0 then
+        if plan.waiting > 0 and plan.new > 0 then
+            return finish(AutoSendPlan.roundText({ later = plan.waiting })), plan.new
         end
-    end
-    local function forgetSeen()
-        for _, id in ipairs(ids) do
-            if id <= newState.mark then
-                FastState.firstSeen[id] = nil
-            end
-        end
+        return finish(nil), plan.new
     end
 
     -- First what can be told without the server (the photo, the path mappings, and the file types the server took when
     -- it was last asked; any type when it never was). When that leaves nothing, the server is not asked.
     local known = AutoSendPlan.knownExtensions(store)
     local mappings = Settings.mappings(settings)
-    local locally = Selection.classify(ready, { extensions = known, anyExtension = known == nil, mappings = mappings,
-        anyRoot = true })
+    local locally = Selection.classify(candidates, { extensions = known, anyExtension = known == nil,
+        mappings = mappings, anyRoot = true })
     for _, skipped in ipairs(locally.skipped) do
         add(leftOut, skipped.reason)
+        done[#done + 1] = skipped.photo.id
     end
     if #locally.eligible == 0 then
-        saveState(store, catalogPath, newState)
-        forgetSeen()
-        return AutoSendPlan.roundText({ leftOut = leftOut, later = later }) .. ' (the server was not asked)'
+        return finish(AutoSendPlan.roundText({ leftOut = leftOut, later = plan.waiting })
+            .. ' (the server was not asked)'), plan.new
     end
 
-    -- Not sent this look: the mark stays, only what has been seen is kept (so these photos do not count as new again).
-    local function keepSeen()
-        saveState(store, catalogPath, { mark = state.mark, seen = maxSeen, blocked = state.blocked, tries = state.tries,
-            looked = now })
-    end
+    -- Photos not sent by this look stay unhandled: a later look reads and sends them.
     local retryAt = AutoSend.waitUntil(now)
     if retryAt then
-        keepSeen()
-        return string.format('%d photo(s) to send; the server did not answer; next try at %s', #locally.eligible,
-            os.date('%H:%M', retryAt))
+        return finish(string.format('%d photo(s) to send; the server did not answer; next try at %s',
+            #locally.eligible, os.date('%H:%M', retryAt))), plan.new
     end
     local info, infoProblem = AutoSend.serverInfo(settings, store)
     if not info then
         contacted(false, now)
-        keepSeen()
-        return 'not done: ' .. infoProblem.message .. string.format(' (next try at %s)', os.date('%H:%M',
-            cache.retryAt))
+        return finish('not done: ' .. infoProblem.message .. string.format(' (next try at %s)',
+            os.date('%H:%M', cache.retryAt))), plan.new
     end
     local serverProblem = Selection.serverProblem(info, mappings)
     if serverProblem then
         AutoSend.forgetInfo()
-        keepSeen()
-        return 'not done: ' .. serverProblem
+        return finish('not done: ' .. serverProblem), plan.new
     end
     AutoSendPlan.rememberExtensions(store, info.capabilities.extensions)
     local sorted = Selection.classify(locally.eligible, { extensions = info.capabilities.extensions,
         mappings = mappings, availableRoots = Selection.availableRoots(info) })
     for _, skipped in ipairs(sorted.skipped) do
         add(leftOut, skipped.reason)
+        done[#done + 1] = skipped.photo.id
     end
 
     local groups = JobGroups.load(store, catalogPath, now)
@@ -327,20 +332,19 @@ local function sendFound(store, settings, catalogPath, state, parsed, now)
     local batches = JobGroups.plan(sorted.eligible, groups, importDates, CatalogRead.folderName,
         { maxItems = info.capabilities.maxItemsPerJob, append = info.capabilities.appendItems })
     local context = { store = store, settings = settings, catalogPath = catalogPath, info = info, groups = groups,
-        parts = {}, outcome = { sent = 0, jobs = {}, ready = 0, rejected = {}, leftOut = leftOut, later = later } }
+        parts = {}, outcome = { sent = 0, jobs = {}, ready = 0, rejected = {}, leftOut = leftOut,
+            later = plan.waiting } }
     for i, batch in ipairs(batches) do
         local ok, why = sendBatch(context, batch)
-        if not ok then
-            -- The photos of this batch and the ones after it are read and sent again by a later look; the mark stays
-            -- below the first of them.
-            local first, unsent = nil, 0
-            for j = i, #batches do
-                for _, photo in ipairs(batches[j].photos) do
-                    first = math.min(first or photo.id, photo.id)
-                    unsent = unsent + 1
-                end
+        if ok then
+            for _, photo in ipairs(batch.photos) do
+                done[#done + 1] = photo.id
             end
-            newState.mark = math.min(newState.mark, first - 1)
+        else
+            local unsent = 0
+            for j = i, #batches do
+                unsent = unsent + #batches[j].photos
+            end
             context.outcome.unsent, context.outcome.problem = unsent, why
             AutoSend.forgetInfo()
             contacted(false, now)
@@ -351,16 +355,15 @@ local function sendFound(store, settings, catalogPath, state, parsed, now)
         contacted(true, now)
     end
     JobGroups.save(store, catalogPath, groups)
-    saveState(store, catalogPath, newState)
-    forgetSeen()
-    return AutoSendPlan.roundText(context.outcome)
+    return finish(AutoSendPlan.roundText(context.outcome)), plan.new
 end
 
--- One look of the automatic send. Returns a short text for the log (nil when there was nothing to do; the loop logs
--- the same text only once in a row), the number of photos found that no earlier look had seen (for WatchMode: photos
--- read again because they wait for their rows or for the server do not count), and the import records read above the
--- mark ({ { id, date } }).
-function AutoSend.sendOnce()
+-- One look of the automatic send. shouldStop() -> true when the loop must end (a look that comes back after that, for
+-- example from a read that took very long, changes nothing). Returns a short text for the log (nil when there was
+-- nothing to do; the loop logs the same text only once in a row), the number of photos found that no earlier look had
+-- seen (for WatchMode: photos read again because they wait for their rows, their import link or the server do not
+-- count), and the import records read above the mark ({ { id, date } }).
+function AutoSend.sendOnce(shouldStop)
     local store = LrPrefs.prefsForPlugin()
     local settings = Settings.read(store)
     if settings.serverUrl == '' then
@@ -375,6 +378,9 @@ function AutoSend.sendOnce()
     local state = AutoSendPlan.load(store, catalogPath)
     if not state then
         local parsed, err = AutoSend.read(tool, catalogPath, CatalogRead.markSql())
+        if shouldStop and shouldStop() then
+            return nil, 0, {}
+        end
         if not parsed or not parsed.mark then
             return 'not done: reading the catalog failed: ' .. tostring(err or 'no answer'), 0, {}
         end
@@ -383,19 +389,14 @@ function AutoSend.sendOnce()
             .. 'alone)', parsed.mark), 0, {}
     end
     local parsed, err = AutoSend.read(tool, catalogPath, CatalogRead.newSql(state.mark))
+    if shouldStop and shouldStop() then
+        return nil, 0, {}
+    end
     if not parsed then
         return 'not done: reading the catalog failed: ' .. tostring(err), 0, {}
     end
-    if #parsed.photos == 0 then
-        return nil, 0, parsed.imports
-    end
-    local new = 0
-    for _, photo in ipairs(parsed.photos) do
-        if photo.id > state.seen then
-            new = new + 1
-        end
-    end
-    return sendFound(store, settings, catalogPath, state, parsed, now), new, parsed.imports
+    local text, new = sendFound(store, settings, catalogPath, state, parsed, now)
+    return text, new, parsed.imports
 end
 
 return AutoSend

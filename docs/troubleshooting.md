@@ -434,6 +434,14 @@ into one job for the import (log: `automatic send: looking every 3 s while photo
 - **Nothing seems to happen after the notice**: in the one run, Lightroom scanned a network folder of 2768 files for
   about 2 min 20 s before the first photo appeared, then added them in bursts of about a hundred every 22–26 s. Look
   at Lightroom's own progress at the top left.
+- **Only part of an import was sent (plug-in 0.8.0)**: 0.8.0 moved its mark past photos whose rows Lightroom made
+  visible later; in its run 737 of 1384 photos were never sent. 0.8.1 fixes this, but does not go back to them. To
+  repair: select the photos of the import (the Catalog panel's **Previous Import**, or the folder) and run **Build
+  smart previews on the server**. Photos that already have a smart preview are left out, the others are sent in one
+  job, and the automatic fetch places them.
+- **The log says `the loop has taken no step for 10 minutes …; starting a new one`**: a call into Lightroom, for
+  example a sqlite3 run, did not come back (seen once while Lightroom was busy removing many photos). The new loop
+  carries on; nothing needs to be done. sqlite3 runs that take 10 seconds or more are logged as such.
 - **Imported, but not sent to the server**: the automatic send was off, or the line under the checkbox named a reason
   (no server set up, the folder under no path mapping). The automatic send's log lines start with `automatic send:`
   and say what it sent and what it left out, and why. Select the photos and use **Build smart previews on the server**.

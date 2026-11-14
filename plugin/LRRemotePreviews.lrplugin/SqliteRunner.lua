@@ -96,7 +96,11 @@ local function run(build, script, quiet)
     else
         Log.info('sqlite3 command: %s', line)
     end
+    local started = os.time()
     local ok, status = LrTasks.pcall(LrTasks.execute, line)
+    if os.time() - started >= 10 then
+        Log.warn('sqlite3 took %d s to come back (Lightroom busy?)', os.time() - started)
+    end
     local stdout, stderr = readFile(output), readFile(errors)
     removeFile(scriptFile)
     removeFile(output)
