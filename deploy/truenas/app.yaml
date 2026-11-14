@@ -9,6 +9,9 @@ services:
     # The image. Until images are published, build it on the NAS from a checkout of the repository:
     #   sudo docker build -f deploy/Dockerfile -t lr-remote-previews:local .
     image: lr-remote-previews:local
+    # The image exists only on this machine, so it must never be looked for in a registry. Remove this line when
+    # you use a published image.
+    pull_policy: never
     restart: unless-stopped
 
     # The user the server runs as. It must be able to READ the originals, and it must own the data and
