@@ -27,7 +27,8 @@ type or value. `detail` is always one string, also for `422`.
 
 `200` `{"status": "ok", "busy": false}`. For container health checks, and for software that must know whether
 the server is working: `busy` is true while `status.state` (below) is `running`. A NAS that sleeps when idle can
-poll this to stay awake while the queue runs. Never needs a token.
+poll this to stay awake while the queue runs. An automatic scan or a cache clean-up alone does not make it busy.
+Never needs a token.
 
 ## `GET /api/v1/info`
 
@@ -130,7 +131,7 @@ file the server is not permitted to read is `not_found`.
 | `ref` | A string of at most 64 characters chosen by the client and echoed back unchanged. The server does not interpret it. Unique within a job |
 | `seq` | The job's change counter at the item's last state change (see polling) |
 | `error` | `null`, or `{"code": "...", "message": "..."}` for `failed` and `rejected` |
-| `result` | `null` until `ready`. `key` names the DNG in the server's cache (64 lower-case hex characters; see `GET /api/v1/files/{key}`); `size` and `sha256` (lower-case hex) of the DNG; `originalName` and the original pixel size as the DNG records them (`OriginalRawFileName`, `OriginalDefaultFinalSize`), `null` where the DNG has no such tag |
+| `result` | `null` until `ready`, and `null` again on a `ready` item whose DNG the cache clean-up has removed since (its download answers `404` `not_in_cache`). `key` names the DNG in the server's cache (64 lower-case hex characters; see `GET /api/v1/files/{key}`); `size` and `sha256` (lower-case hex) of the DNG; `originalName` and the original pixel size as the DNG records them (`OriginalRawFileName`, `OriginalDefaultFinalSize`), `null` where the DNG has no such tag |
 
 ### The job object
 
@@ -312,8 +313,9 @@ estimate of the time until the queue is empty from the current rate (counting fi
 (idle, paused, waiting, or no rate yet). `today`: since local midnight of the server. `rate` and `today` count
 conversions, not items: a file two jobs asked for counts once, and `rate` counts successful conversions only.
 `cache`: the DNGs kept. `cpuTemperature`: degrees Celsius of the hottest CPU sensor the server can read, or `null`.
-`autoScan`: whether a scan is going on, when the last one finished and how many files it queued (`null` and 0
-before the first), and when the next is due (`null` while the automatic scan is off).
+`autoScan`: whether a scan is going on (true from the moment one is asked for), when the last one finished and how
+many files it queued (`null` and 0 before the first ever; both are kept across restarts), and when the next is due
+(`null` while the automatic scan is off; while a scan runs, its start plus the interval).
 
 ## Settings
 
@@ -409,17 +411,22 @@ were in the cache already (their items are `ready` at once). A folder without ra
 Off unless `autoScan.enabled` is set. Every `intervalMinutes` the server walks the listed roots (all sub-folders;
 not following symbolic links; skipping names that start with a dot), and queues every camera raw file that is not
 in the cache, is not already queued or building, and was last modified at least `settleMinutes` ago (so that a file
-still being copied is left alone). It queues at most `maxFilesPerRun` files per run, oldest folders first; the rest
-wait for the next run. The files go into jobs with `client` `"auto-scan"`, `priority` `"background"`, no `clientId`,
-and the label `Automatic scan: <root id>`. A file that failed in an earlier automatic job is not queued again until
-it changes. Scanning does not depend on `paused` or the working hours; building what it queued does.
+still being copied is left alone). It queues at most `maxFilesPerRun` files per run, oldest folders first (a
+folder is as old as its oldest raw file); the rest wait for the next run. The files go into jobs with `client`
+`"auto-scan"`, `priority` `"background"`, no `clientId`, and the label `Automatic scan: <root id>`. A file that
+failed in an earlier automatic job is not queued again until it changes. Scanning does not depend on `paused` or
+the working hours; building what it queued does.
+
+A scan is due `intervalMinutes` after the previous one finished, and at once when none has ever run. A scan started
+by hand counts as a scan. While the converter is not installed the periodic scan is skipped.
 
 ### `POST /api/v1/autoscan/run`
 
 Starts a scan now, whether or not the automatic scan is enabled, over the roots in `autoScan.roots` (or, with a
-body `{"roots": ["archive"]}`, over those). `202` `{"started": true}`; `409` with `"code": "busy"` when a scan is
-running; `409` `converter_not_installed`; `422` when no root is given and none is configured, or a root id is
-unknown.
+body `{"roots": ["archive"]}`, over those; no body, `{}`, `"roots": null` and an empty list all mean the configured
+roots). `202` `{"started": true}`. Errors, checked in this order: `422` when no root is given and none is
+configured; `422` with `"code": "unknown_root"` for a root id the server does not have; `409`
+`converter_not_installed`; `409` with `"code": "busy"` when a scan is running.
 
 ## The cache clean-up
 
@@ -429,19 +436,23 @@ The cache only grows unless it is cleaned. A clean-up removes, in this order:
 2. DNGs not used for `cache.maxAgeDays` days («used» = built, found by a job or a lookup, or downloaded);
 3. the least recently used DNGs until the cache is no larger than `cache.maxBytes`.
 
-Steps 2 and 3 are skipped while their limit is `null`. A DNG that an item of an active job points to is never
-removed. An original under a root that is unavailable is not treated as gone. The server runs a clean-up once a
-day; removed files are simply built again if somebody asks for them.
+Steps 2 and 3 are skipped while their limit is `null`. A DNG that an item of an active job points to (an item in
+any state) is never removed. An original is not treated as gone while its root is unavailable, is no longer
+configured, or is an empty folder (a volume that is not mounted often leaves one). The server runs a clean-up a
+day after the previous one (not at start); removed files are simply built again if somebody asks for them. An item
+that was `ready` stays `ready` when its DNG is removed; its `result` becomes `null`.
 
 ### `POST /api/v1/cache/clean`
 
-Body optional: `{"dryRun": true}` only counts. `200`:
+Body optional: `{"dryRun": true}` only counts (`dryRun` must be a JSON boolean, anything else is `422`). The
+clean-up runs inside the request, so on a large cache the answer can take minutes. `200`:
 
 ```json
 {"dryRun": false, "removed": {"originalGone": 12, "expired": 0, "overLimit": 0}, "bytesFreed": 6291456}
 ```
 
-`409` with `"code": "busy"` when a clean-up is running.
+`bytesFreed`: the size of the removed DNGs (with `dryRun`, of those that would be removed). `409` with
+`"code": "busy"` when a clean-up is running.
 
 ## The converter
 
