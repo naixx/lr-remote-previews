@@ -24,7 +24,7 @@ finished files. The catalog stays on the user's computer and is never written by
 
 | Topic | Decision |
 |---|---|
-| Kind of project | Open source, AGPL-3.0-or-later. The repository is private while the first stages are built and becomes public with stage 5 |
+| Kind of project | Open source, AGPL-3.0-or-later. The repository is public from the start |
 | Names | Repository `lr-remote-previews`; the product is called «LR Remote Previews» |
 | Parts | A Lightroom Classic plug-in, a server packaged for TrueNAS, a dashboard |
 | Server stack | Python (FastAPI), dashboard in React + TypeScript + Vite |
@@ -142,7 +142,7 @@ The thinnest path through every part, usable for real work.
 - **Releases:** versions, change log, plug-in package and image published together; minimum-version check between
   plug-in and server.
 - **macOS client:** the plug-in on macOS is untested; verify with someone who has one. Windows comes first.
-- The repository becomes public. Optional: submission to the TrueNAS apps catalog.
+- Optional: submission to the TrueNAS apps catalog.
 - Done when: a person who has never seen the project installs and uses it from the documentation alone.
 
 ### Stage 6. Research tracks, no commitment

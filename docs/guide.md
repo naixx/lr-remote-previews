@@ -4,13 +4,16 @@ This guide takes you from nothing to a first smart preview that was built on you
 Lightroom Classic catalog. It assumes that you are comfortable with a NAS, Docker and a command line, and that you
 have never seen this project. When something does not work, see [troubleshooting.md](troubleshooting.md).
 
-> **State of the project: server 0.3.0, plug-in 0.5.0.** Verified with Lightroom Classic 15.6 on Windows and Adobe
+> **State of the project: server 0.5.0, plug-in 0.5.0.** Verified with Lightroom Classic 15.6 on Windows and Adobe
 > DNG Converter 17.2 under Wine 8.0 on a TrueNAS SCALE machine: the server builds smart previews (0.26–0.35 s per
-> 24 MP photo on a 14-core desktop CPU), it survives a restart in the middle of a job, and the plug-in's command
-> «Build smart previews on the server» (in version 0.2.0) placed and registered 157 smart previews. The commands that
-> are new in 0.3.0 (send, fetch, status, automatic fetch) have passed tests outside Lightroom **but have not been run
-> in Lightroom yet**, and neither have those of 0.4.0 and 0.5.0 (among them «Add a folder without previews...»).
-> macOS and other Lightroom versions are untested. Try everything on a test catalog first.
+> 24 MP photo on a 14-core desktop CPU) and survives a restart in the middle of a job; its dashboard, the folder
+> queue, the automatic scan and the cache clean-up ran there with the real converter. In Lightroom, «Build smart
+> previews on the server» (0.2.0) placed and registered 157 smart previews, and «Send to the server» with «Fetch
+> ready smart previews» for the selection (0.3.0) 143 more, from originals on the NAS. Everything else in the
+> plug-in has passed tests outside Lightroom **but has not been run in Lightroom yet**: the status dialog, the
+> automatic fetch, fetching «everything this catalog sent», and all of 0.4.0 and 0.5.0 (among them «Add a folder
+> without previews...»). Parts of this guide still describe the dashboard as it was in server 0.3.0. macOS and
+> other Lightroom versions are untested. Try everything on a test catalog first.
 
 ## 1. What it does and what you need
 
@@ -131,7 +134,7 @@ part of the work in progress; that page says the YAML has not been installed thr
 On the NAS:
 
 ```sh
-git clone <repository URL> lr-remote-previews
+git clone https://github.com/naixx/lr-remote-previews.git
 cd lr-remote-previews/deploy
 ```
 
@@ -262,9 +265,9 @@ and press **Save token**. The token is kept in that browser only; **Forget token
 **Overview** page shows the queue, the latest jobs, the server, the DNG converter (**Not installed** for now), your
 library roots (`archive` should say **Available**) and the raw formats the server accepts.
 
-The dashboard has only this page in 0.3.0. Pages for jobs, for putting a whole folder into the queue, for settings
-that change while the server runs (number of processes, pause, working hours), for a converter self-test and for the
-log are being built (stage 3 of the [plan](plan.md)).
+Since server 0.4.0 the dashboard also has pages for the jobs, for putting a whole folder into the queue, for the
+settings that change while the server runs (number of processes, pause, working hours, the automatic scan, the
+cache limits), for a converter self-test and for the log. This guide does not describe them page by page yet.
 
 Until then, the server's settings are environment variables in `compose.yaml` (`LRRP_WORKERS`, `LRRP_BATCH_SIZE`,
 `LRRP_JOB_RETENTION_DAYS`; all of them in [server/README.md](../server/README.md)). After a change,
@@ -282,8 +285,8 @@ complying with Adobe's terms. In short, the verified way is:
    `C:\ProgramData\Adobe\CameraRaw\CameraProfiles\`.
 3. Copy them into the Wine prefix in the data volume, at the same paths, as the container's user. converter.md has
    a ready `docker compose run` command for that.
-4. Reload the dashboard. The DNG converter card says **Installed**. No restart is needed. (Its version shows as
-   «Unknown»: server 0.3.0 does not read it.)
+4. Reload the dashboard. The DNG converter card says **Installed** and shows the converter's version. No restart
+   is needed.
 
 Two things converter.md explains and the server already handles for you:
 
@@ -556,7 +559,7 @@ When you switch on **Automatic fetch** in the Plug-in Manager, the plug-in fetch
 background, every chosen interval, while Lightroom runs; the first time about 20 seconds after it starts. It is quiet:
 no dialogs and no progress bar, one line in the log per result, for example `automatic fetch: 3 placed, 1 still
 being built` or `automatic fetch: nothing new to fetch`. It never runs at the same time as a manual fetch or the build
-command. It is off by default and, like everything new in 0.3.0, has not been run in Lightroom yet.
+command. It is off by default and has not been run in Lightroom yet.
 
 ## 7. Check the result, and undo it
 
@@ -641,18 +644,19 @@ Limits of this version:
 - «Everything this catalog sent» looks at the newest 200 jobs of the catalog. A catalog that is moved or renamed gets
   a new identity and no longer finds its old jobs; fetch by selection instead.
 - The plug-in checks the length, the original file name and the original pixel size of each DNG, not its SHA-256.
-- Jobs are deleted 30 days after they finished (configurable); the cache is never cleaned up yet (planned for stage
-  4).
+- Jobs are deleted 30 days after they finished (configurable). The cache is cleaned once a day of DNGs whose
+  original is gone or changed; limits on its size and on the age of unused DNGs are off until you set them on the
+  dashboard.
 - The server speaks plain HTTP, and the token is sent with every request. Keep the port inside your home network. A
   reverse proxy with HTTPS in front of it should work, since the plug-in accepts an `https://` address with a path,
   but this has not been tried.
-- The dashboard only shows the overview. Putting a folder into the queue from the dashboard, pausing, working hours,
-  and a «busy» signal that keeps a sleeping NAS awake while the queue runs are coming with stage 3.
+- The server's own time zone decides when the working hours begin; a container without a time zone runs on UTC.
 
 Not verified:
 
-- The 0.3.0 commands **Send to the server**, **Fetch ready smart previews**, **Server status...** and the automatic
-  fetch in Lightroom. They passed tests outside Lightroom only.
+- **Server status...**, the automatic fetch and fetching «everything this catalog sent» in Lightroom (**Send to
+  the server** and **Fetch ready smart previews** for the selection have run there), and everything new in 0.4.0:
+  **Check the server against Lightroom** and the automatic send. They passed tests outside Lightroom only.
 - **Add a folder without previews...** (0.5.0) in Lightroom: how Lightroom's `catalog:addPhoto` behaves (its errors,
   its speed over the network), what Lightroom then reads and renders by itself when it shows such photos, and whether
   it records a JPEG next to a raw file with the raw photo as its import does. It passed tests outside Lightroom only.

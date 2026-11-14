@@ -10,8 +10,10 @@ built itself (stage 5), and an optional automatic send sends photos added to the
 0.5.0, **Add a folder without previews...** adds the photos of a folder to the catalog without Lightroom's import
 dialog and without asking Lightroom for any preview, and can send them to the server in the same go.
 
-Status: **versions 0.3.0, 0.4.0 and 0.5.0 have not been run in Lightroom.** Version 0.2.0 (the build command) was
-run in Lightroom Classic 15.6 on Windows on 157 photos (see the table at the end). Everything new in 0.3.0 to 0.5.0 is
+Status: **most of 0.3.0 and all of 0.4.0 and 0.5.0 have not been run in Lightroom.** Version 0.2.0 (the build
+command) was run in Lightroom Classic 15.6 on Windows on 157 photos, and of 0.3.0 «Send to the server» and «Fetch
+ready smart previews» for the selection on 143 photos whose originals lie on a NAS (see the tables at the end).
+Everything else that is new in 0.3.0 to 0.5.0 is
 checked only by the unit tests and by runs with stand-in Lightroom functions (cooperative tasks, a virtual clock)
 against a fake server that follows the protocol, and the plug-in's server calls also against the real server without
 a converter (no Lightroom involved in either).
@@ -573,16 +575,17 @@ cache:
 | The path setting for `sqlite3`, and a `sqlite3` next to the plug-in | not tried |
 | A catalog or temporary folder whose path has non-ASCII characters | not tried |
 
-Version 0.3.0: nothing has been tried in Lightroom yet.
+Version 0.3.0: send and fetch for the selection ran in Lightroom Classic 15.6 on Windows (33 and 110 photos,
+originals on a NAS); the rest has not been tried.
 
 | What | Result |
 |---|---|
 | The new settings (downloads at once, automatic fetch, interval: `popup_menu`, `checkbox`) | not tried |
-| «Send to the server»: creating the job with the `clientId` and returning at once; several jobs past `maxItemsPerJob` | not tried |
-| «Fetch ready smart previews»: the scope dialog (`LrDialogs.confirm` with a third button); `catalog:getTargetPhoto()` returning `nil` when nothing is selected | not tried |
-| Fetch by selection: `POST /api/v1/lookup`, download by cache key | not tried |
+| «Send to the server»: creating the job with the `clientId` and returning at once; several jobs past `maxItemsPerJob` | works: jobs of 33 and of 110 photos; several jobs not tried |
+| «Fetch ready smart previews»: the scope dialog (`LrDialogs.confirm` with a third button); `catalog:getTargetPhoto()` returning `nil` when nothing is selected | the dialog works (selection chosen); nothing selected: not tried |
+| Fetch by selection: `POST /api/v1/lookup`, download by cache key | works: 33 of 33 and 110 of 110 placed and registered, 0.09–0.16 s per photo |
 | Fetch «everything this catalog sent»: `catalog:findPhotoByPath` (and its case-insensitive form), the job records, a job deleted by the server | not tried |
-| Several downloads at once (`LrTasks.startAsyncTask` tasks with `LrHttp.get`), placing one at a time | not tried |
+| Several downloads at once (`LrTasks.startAsyncTask` tasks with `LrHttp.get`), placing one at a time | works (four at once) |
 | A cancelled or interrupted fetch followed by one that finishes the rest | not tried |
 | «Build smart previews on the server» with the download queue and the fetch lock | not tried |
 | «Server status...»: the dialog (`LrDialogs.presentModalDialog`, `LrBinding.makePropertyTable`, `LrView.osFactory`), «Retry», «Fetch now», «Open the dashboard» (`LrHttp.openUrlInBrowser`) | not tried |

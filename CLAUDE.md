@@ -5,7 +5,8 @@ Read [README.md](README.md), [docs/plan.md](docs/plan.md) and the decision recor
 
 ## Rules that must not be broken
 
-- No code path writes to a Lightroom catalog or any other Lightroom database, or under a root of originals.
+- No code path writes to a Lightroom catalog or any other Lightroom database itself, or under a root of originals.
+  The catalog changes only through Lightroom's own plug-in interface, on the user's command (ADR 0007).
 - Nothing from Adobe is added to the repository or to the image, and nothing downloads it. Adobe DNG Converter is
   the user's to install; we only describe.
 - The repository is English only: code, comments, documentation, commit messages. No translated copies.
