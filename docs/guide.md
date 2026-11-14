@@ -51,7 +51,7 @@ for a test job without Lightroom.
 - It does not contain or download any Adobe software.
 - It converts camera raw files only. JPEG, HEIC, TIFF and video files stay with Lightroom, which builds their smart
   previews itself.
-- It does not build standard previews.
+- It does not build standard previews. Section 6 shows how to import so that you do not have to wait for them.
 
 ## 2. How it works
 
@@ -370,6 +370,37 @@ Both buttons use what is in the fields now, so you can try before you close the 
 
 The commands are under **Library > Plug-in Extras**.
 
+### Originals on a NAS: a workflow without the waiting
+
+Smart previews are half of the waiting. The other half is the import: with «Minimal» or «Standard» previews
+Lightroom reads every original over the network and renders it on your computer. It does not have to:
+
+1. **Import with Add and Build Previews: «Embedded & Sidecar»**, with «Build Smart Previews» unchecked. Lightroom
+   then shows the JPEG the camera made instead of rendering one: the JPEG next to the raw file when the camera wrote
+   RAW+JPEG pairs, otherwise the one inside the raw file. Nothing is rendered, and only a few megabytes per photo
+   travel over the network.
+2. Let the task «Fetching Initial Previews» finish. A photo it has not reached keeps a tiny thumbnail, and Lightroom
+   renders that photo from its original as soon as it comes into view.
+3. Select the imported photos and **Send to the server**; **Fetch ready smart previews** when they are built (or
+   switch on the automatic fetch).
+4. Choose your picks in the Library. Lightroom keeps the camera's previews (the badge «Embedded Preview») and reads
+   an original only when you zoom to 1:1.
+
+Measured on Lightroom Classic 15.6 with 24-megapixel Sony raw files on a NAS reached over Wi-Fi, 1384 photos:
+0.17 s per photo to add them to the catalog, 0.34 s per photo for the previews, about 4 MB read per photo instead
+of 25 MB. The size of these previews is the camera's choice: 3008 px from the paired JPEGs of that camera, 1616 px
+from the JPEG inside its raw files.
+
+Two settings matter:
+
+- Leave **Preferences > General > «Replace embedded previews with standard previews during idle time»** off, or
+  Lightroom reads and renders every original in the background after all.
+- «Build Standard-Sized Previews» always works from the originals while they are reachable, also for photos that
+  have a smart preview. Do not start it for a whole import unless you want exactly that.
+
+Lightroom's **Preferences > Performance > «Use Smart Previews instead of Originals for image editing»** is meant to
+keep the Develop module on the smart previews. Its effect in this workflow has not been measured yet.
+
 ### Which command when
 
 | Command | Use it when | Lightroom must stay open |
@@ -561,7 +592,7 @@ Limits of this version:
 
 - Camera raw files only. The server accepts the extensions listed on the dashboard; among them is `.dng`, but only
   Sony ARW files from two camera models have been converted so far.
-- No standard previews.
+- No standard previews (what to use instead: «Originals on a NAS» in section 6).
 - An existing smart preview is never replaced, even if it is out of date. Removing smart previews is Lightroom's job.
 - One job holds at most 5000 photos. **Build smart previews on the server** refuses more; **Send to the server**
   splits them into several jobs.

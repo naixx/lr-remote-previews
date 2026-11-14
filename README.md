@@ -30,7 +30,8 @@ between the two): 0.26–0.35 s per photo on the server against 0.9–1.2 s thro
 - It does not contain Adobe software. The server needs **Adobe DNG Converter**, which you obtain from Adobe and install
   into the app yourself: [docs/converter.md](docs/converter.md).
 - It converts camera raw files only. JPEG, HEIC, TIFF and video stay with Lightroom.
-- Standard previews are not built by the server (an open research question in the plan).
+- Standard previews are not built by the server. Importing with «Embedded & Sidecar» previews makes them
+  unnecessary for choosing picks: see «Originals on a NAS» in the [user guide](docs/guide.md).
 
 ## Parts
 
