@@ -67,6 +67,9 @@ FastFetch.MAX_TRIES = 3
 FastFetch.CAPABILITIES_SECONDS = 3600 -- what the server can do is asked again after this, while something is pending
 FastFetch.BUSY_STEP = 0.2 -- seconds between two steps of the loop while files are on their way
 FastFetch.WAIT_STEP = 0.5 -- the same while a waiting request is open
+FastFetch.PUMP_SECONDS = 1 -- placing in one step of the loop at most this long (then the step goes on)
+FastFetch.BAR_TICK = 0.25 -- seconds between two updates of the bar while files are placed
+FastFetch.BAR_LOG_SECONDS = 10 -- what the bar says is logged this often
 FastFetch.PAUSE_KEY = 'fetchPaused' -- the run token of the loop whose progress bar the user cancelled
 FastFetch.RUN_KEY = 'autoFetchRun' -- AutoFetch.RUN_KEY: the run token of the loop
 
@@ -91,6 +94,10 @@ local progress = FetchProgress.new()
 local scope -- the progress bar (LrProgressScope) while it is shown
 local dealt, failedCount = 0, 0 -- items dealt with (placed or left out) in this session, and of those left out
 local sessionStart -- os.time() of the first step of this session (RegisterQueue.due counts no photo placed earlier)
+-- The bar while files are placed (0.8.4 updated it once per step of the loop, but one step placed files for as long as
+-- the downloads kept coming, the whole fetch in one go: the bar stood still and then jumped): what it waits for and the
+-- server's next try as the step last saw them, when it was last updated and when it was last logged.
+local barWaiting, barNextTry, barTickAt, barLogAt = nil, nil, 0, 0
 
 local function idText(id)
     return string.format('%d', id)
@@ -250,6 +257,8 @@ local function queueRegistration(entry, placedAt)
     end
 end
 
+local tick -- tickBar, set below (deliver is defined first)
+
 -- Checks and places one downloaded file (in the loop's task, inside DownloadQueue:pump, holding the fetch lock).
 -- A download the server could not serve (unreachable, not there behind its proxy) is fetched again after the back-off,
 -- without a try counted; a download that failed otherwise, a DNG that failed the check and a file that could not be
@@ -330,7 +339,10 @@ local function ensureQueue(settings)
                 return ServerClient.downloadByKey(settings, entry.key)
             end
             return ServerClient.download(settings, entry.itemId)
-        end, deliver), { concurrency = settings.downloadConcurrency })
+        end, function(entry, data, problem)
+            deliver(entry, data, problem)
+            tick()
+        end), { concurrency = settings.downloadConcurrency })
     end
     return queue
 end
@@ -757,6 +769,7 @@ end
 -- Shows, updates or ends the progress bar (FetchProgress); a cancel of the bar pauses the automatic fetch. waiting:
 -- what the fetch waits for (FetchProgress's facts.waiting), or nil.
 local function showProgress(store, waiting, nextTry)
+    barWaiting, barNextTry, barTickAt = waiting, nextTry, AutoSend.clock()
     local ready, coming = 0, 0
     for _, n in pairs(open) do
         ready = ready + n
@@ -800,8 +813,22 @@ local function showProgress(store, waiting, nextTry)
             scope:setCaption(caption)
             scope:setPortionComplete(done, math.max(total, 1))
         end)
+        if AutoSend.clock() - barLogAt >= FastFetch.BAR_LOG_SECONDS then
+            barLogAt = AutoSend.clock()
+            Log.info('automatic fetch: bar: %s', caption)
+        end
     end
 end
+
+-- Between two files placed: the bar is updated (at most every BAR_TICK seconds), and the task yields so that Lightroom
+-- can draw it.
+local function tickBar()
+    if scope and AutoSend.clock() - barTickAt >= FastFetch.BAR_TICK then
+        showProgress(prefs(), barWaiting, barNextTry)
+        LrTasks.yield()
+    end
+end
+tick = tickBar
 
 -- Reads how many of the photos this session sent have a preview better than the placeholder in Lightroom's preview
 -- index. Returns count, total, or nil, nil plus a message.
@@ -833,12 +860,17 @@ end
 -- After the photos of an import stopped coming: true while Lightroom's previews of them are still coming
 -- (PreviewWatch), so that the fetch in one go waits for Lightroom's own preview task.
 local function previewsPending(importing, settings, catalogPath)
-    if importing or not goState.holding then
+    if not importing and not goState.holding then
         PreviewWatch.reset(previews)
         return false
     end
     local now = os.time()
-    if not previews.photosOverAt then
+    -- Read while the photos still come too (since 0.8.5), so that a preview task already over ends the wait the moment
+    -- the photos stop.
+    PreviewWatch.watch(previews, now)
+    if importing then
+        previews.photosOverAt = nil -- photos came (again)
+    elseif not previews.photosOverAt then
         PreviewWatch.photosOver(previews, now)
         Log.info('automatic fetch: the photos stopped coming; waiting for Lightroom\'s previews of them before '
             .. 'fetching (at most %d minutes)', math.floor(PreviewWatch.LIMIT_SECONDS / 60))
@@ -846,6 +878,9 @@ local function previewsPending(importing, settings, catalogPath)
     if PreviewWatch.readDue(previews, now) then
         local count, total, problem = readPreviews(settings, catalogPath)
         PreviewWatch.observe(previews, count, total, now, problem)
+    end
+    if importing then
+        return false
     end
     local over, why = PreviewWatch.over(previews, now)
     if over then
@@ -903,10 +938,10 @@ end
 local function waitingFacts(importing, waiting, waitPreviews)
     if importing then
         waiting = waiting or {}
-        return { kind = waiting.kind or 'photos', untilText = waiting.untilAt and os.date('%H:%M', waiting.untilAt) }
+        return { kind = waiting.kind or 'photos', untilAt = waiting.untilAt, now = os.time() }
     elseif waitPreviews then
         return { kind = 'previews', count = previews.count, total = previews.total,
-            untilText = os.date('%H:%M', previews.photosOverAt + PreviewWatch.LIMIT_SECONDS) }
+            untilAt = previews.photosOverAt + PreviewWatch.LIMIT_SECONDS, now = os.time() }
     end
     return nil
 end
@@ -1013,8 +1048,10 @@ function FastFetch.step(importing, shouldStop, waiting)
                     tempsChecked = true
                 end
                 if placing then
+                    local pumpStarted = AutoSend.clock()
                     q:pump(function()
                         return shouldStop() or backoffHit or not lease.refresh()
+                            or AutoSend.clock() - pumpStarted > FastFetch.PUMP_SECONDS
                     end)
                 end
                 if registerDue then

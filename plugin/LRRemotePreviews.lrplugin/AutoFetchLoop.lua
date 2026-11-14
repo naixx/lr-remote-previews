@@ -105,7 +105,7 @@ function AutoFetchLoop.run(env, options)
                     fastGaps = {}
                 elseif lastFast and not fast then
                     env.log('automatic send: no new photo for %d s; looking every %d s again (%d looks while photos '
-                        .. 'came in, %s)', WatchMode.QUIET_SECONDS, interval, #fastGaps + 1,
+                        .. 'came in, %s)', WatchMode.quiet(watch), interval, #fastGaps + 1,
                         AutoFetchLoop.gapsText(fastGaps))
                 end
                 lastFast = fast

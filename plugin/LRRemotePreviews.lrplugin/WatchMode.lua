@@ -12,14 +12,21 @@
 --     a later read arms whatever its date says.
 --     (Seen with 0.8.3: after a restart the old record armed the fast mode, and the fetch of the files left over waited
 --     five minutes for an import that was not there.)
---   * every look that finds new photos keeps the fast mode on until no new photo has come for QUIET_SECONDS;
+--   * every look that finds new photos keeps the fast mode on until no new photo has come for the quiet time
+--     (WatchMode.quiet; since 0.8.5 QUIET_SECONDS = 45 s, or QUIET_FACTOR times the longest gap between two looks
+--     with new photos in this import, at most QUIET_MAX; it was a fixed 120 s). Measured: bursts 22 to 26 s apart
+--     (0.8.0's run), about 30 s apart on average (0.8.4's: 1384 photos sent from 23:39:36 to 23:46:11). The automatic
+--     fetch also waits for Lightroom's previews, which keep coming while Lightroom works; an early end costs only some
+--     sharing of the link, a late one looked like a hang;
 --   * otherwise the slow interval.
 -- While the fast mode is on, the plug-in counts an import as in progress (the automatic fetch then places files
 -- without calling into the catalog, and Lightroom is asked to register them afterwards).
 local WatchMode = {}
 
 WatchMode.FAST_SECONDS = 3
-WatchMode.QUIET_SECONDS = 120
+WatchMode.QUIET_SECONDS = 45 -- the quiet time at least
+WatchMode.QUIET_FACTOR = 1.5 -- the quiet time is at least this many times the longest gap between bursts
+WatchMode.QUIET_MAX = 120
 WatchMode.FIRST_PHOTO_SECONDS = 300
 WatchMode.CLOCK_SLACK = 120 -- seconds an import record's date may be off from this computer's clock
 
@@ -108,8 +115,20 @@ function WatchMode.imports(state, imports, now)
 end
 
 -- A look found count new photos.
+-- The quiet time: no new photo for this long ends the fast mode (QUIET_SECONDS, or QUIET_FACTOR times the longest gap
+-- between new photos of this import, at most QUIET_MAX).
+function WatchMode.quiet(state)
+    local adapted = math.ceil(WatchMode.QUIET_FACTOR * (state.longestGap or 0))
+    return math.min(WatchMode.QUIET_MAX, math.max(WatchMode.QUIET_SECONDS, adapted))
+end
+
 function WatchMode.found(state, count, now)
     if (count or 0) > 0 then
+        if state.lastNewAt ~= nil and now - state.lastNewAt < WatchMode.quiet(state) then
+            state.longestGap = math.max(state.longestGap or 0, now - state.lastNewAt)
+        else
+            state.longestGap = nil -- the first photos of an import
+        end
         state.lastNewAt = now
         state.armedAt = nil
     end
@@ -117,7 +136,7 @@ end
 
 -- True while the fast mode is on (an import is taken to be in progress).
 function WatchMode.fast(state, now)
-    if state.lastNewAt ~= nil and now - state.lastNewAt < WatchMode.QUIET_SECONDS then
+    if state.lastNewAt ~= nil and now - state.lastNewAt < WatchMode.quiet(state) then
         return true
     end
     return state.armedAt ~= nil and now - state.armedAt < WatchMode.FIRST_PHOTO_SECONDS
@@ -126,8 +145,8 @@ end
 -- What the fast mode waits for, and until when (nil when it is off): { kind = 'photos', untilAt = when it ends if no
 -- new photo comes } or { kind = 'firstPhoto', untilAt = when it ends if the first photo does not come }.
 function WatchMode.waiting(state, now)
-    if state.lastNewAt ~= nil and now - state.lastNewAt < WatchMode.QUIET_SECONDS then
-        return { kind = 'photos', untilAt = state.lastNewAt + WatchMode.QUIET_SECONDS }
+    if state.lastNewAt ~= nil and now - state.lastNewAt < WatchMode.quiet(state) then
+        return { kind = 'photos', untilAt = state.lastNewAt + WatchMode.quiet(state) }
     end
     if state.armedAt ~= nil and now - state.armedAt < WatchMode.FIRST_PHOTO_SECONDS then
         return { kind = 'firstPhoto', untilAt = state.armedAt + WatchMode.FIRST_PHOTO_SECONDS }

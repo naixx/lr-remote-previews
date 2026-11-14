@@ -11,17 +11,37 @@ describe('WatchMode', function()
         assert.are.equal(160, WatchMode.nextLook(state, 100, 60))
     end)
 
-    it('looks fast after new photos until none came for two minutes', function()
+    it('looks fast after new photos until none came for the quiet time (45 s: longer than a gap between bursts)',
+        function()
+            local state = WatchMode.new()
+            WatchMode.found(state, 0, 10)
+            assert.is_false(WatchMode.fast(state, 10))
+            WatchMode.found(state, 125, 100)
+            assert.is_true(WatchMode.fast(state, 100))
+            assert.are.equal(103, WatchMode.nextLook(state, 100, 60))
+            WatchMode.found(state, 0, 125)
+            assert.are.equal(45, WatchMode.quiet(state))
+            assert.is_true(WatchMode.fast(state, 130)) -- Lightroom's next burst comes 22 to 30 s later
+            assert.is_true(WatchMode.fast(state, 144))
+            assert.is_false(WatchMode.fast(state, 145))
+            assert.are.equal(205, WatchMode.nextLook(state, 145, 60))
+        end)
+
+    it('the quiet time grows with the gaps between the bursts of a slow import, up to QUIET_MAX', function()
         local state = WatchMode.new()
-        WatchMode.found(state, 0, 10)
-        assert.is_false(WatchMode.fast(state, 10))
-        WatchMode.found(state, 125, 100)
-        assert.is_true(WatchMode.fast(state, 100))
-        assert.are.equal(103, WatchMode.nextLook(state, 100, 60))
-        WatchMode.found(state, 0, 125)
-        assert.is_true(WatchMode.fast(state, 219))
-        assert.is_false(WatchMode.fast(state, 220))
-        assert.are.equal(280, WatchMode.nextLook(state, 220, 60))
+        WatchMode.found(state, 100, 1000)
+        WatchMode.found(state, 100, 1026) -- 26 s: still 45
+        assert.are.equal(45, WatchMode.quiet(state))
+        WatchMode.found(state, 100, 1066) -- 40 s apart: 60
+        assert.are.equal(60, WatchMode.quiet(state))
+        assert.is_true(WatchMode.fast(state, 1066 + 59))
+        assert.is_false(WatchMode.fast(state, 1066 + 60))
+        assert.are.same({ kind = 'photos', untilAt = 1126 }, WatchMode.waiting(state, 1100))
+        WatchMode.found(state, 100, 1125) -- 59 s apart: 89
+        WatchMode.found(state, 100, 1210) -- 85 s: 128, at most 120
+        assert.are.equal(WatchMode.QUIET_MAX, WatchMode.quiet(state))
+        WatchMode.found(state, 100, 5000) -- a new import long after: the gaps start again
+        assert.are.equal(45, WatchMode.quiet(state))
     end)
 
     it('waits fast for the first photo after the trigger, for five minutes at most', function()
@@ -30,11 +50,11 @@ describe('WatchMode', function()
         assert.is_true(WatchMode.fast(state, 1001 + 299))
         assert.is_false(WatchMode.fast(state, 1001 + 300))
         assert.is_false(WatchMode.triggered(state, 1000, 1010)) -- the same trigger once
-        -- the first photos end the wait; then the two-minute rule
+        -- the first photos end the wait; then the QUIET_SECONDS rule
         assert.is_true(WatchMode.triggered(state, 2000, 2000))
         WatchMode.found(state, 50, 2150)
-        assert.is_true(WatchMode.fast(state, 2269))
-        assert.is_false(WatchMode.fast(state, 2270))
+        assert.is_true(WatchMode.fast(state, 2150 + WatchMode.QUIET_SECONDS - 1))
+        assert.is_false(WatchMode.fast(state, 2150 + WatchMode.QUIET_SECONDS))
     end)
 
     it('does not arm for a trigger left from an earlier session', function()

@@ -97,12 +97,12 @@ describe('AutoFetchLoop', function()
         assert.are.same({}, env.fetches)
     end)
 
-    it('looks every few seconds after new photos and back at the interval after two quiet minutes', function()
+    it('looks every few seconds after new photos and back at the interval after QUIET_SECONDS', function()
         local env = fakeEnv({ send = true, stopAt = 400, found = function(clock)
             return (clock == 10 or clock == 31) and 100 or 0
         end })
         AutoFetchLoop.run(env, { firstDelay = 10 })
-        -- 10: found -> every 3 s; 31 (by 3-second steps from 10, the 8th look) found again; quiet until 151, then 60 s
+        -- 10: found -> every 3 s; 31 (by 3-second steps from 10, the 8th look) found again; quiet until 76, then 60 s
         assert.are.equal(10, env.sends[1])
         assert.are.equal(13, env.sends[2])
         assert.are.equal(3, env.sends[3] - env.sends[2])
@@ -118,7 +118,7 @@ describe('AutoFetchLoop', function()
         assert.is_true(fastEnd < 31 + WatchMode.QUIET_SECONDS + 2 * WatchMode.FAST_SECONDS)
         assert.is_true(last > fastEnd)
         assert.are.equal(1, count(env.logs, 'automatic send: looking every 3 s while photos come in'))
-        assert.are.equal(1, count(env.logs, 'automatic send: no new photo for 120 s; looking every 60 s again'))
+        assert.are.equal(1, count(env.logs, 'automatic send: no new photo for 45 s; looking every 60 s again'))
     end)
 
     it('tells the fetch that an import is in progress while it looks fast', function()
@@ -127,7 +127,7 @@ describe('AutoFetchLoop', function()
         end })
         AutoFetchLoop.run(env, { firstDelay = 0 })
         assert.is_true(env.importing[1])
-        assert.is_true(env.importing[100])
+        assert.is_true(env.importing[WatchMode.QUIET_SECONDS - 5])
         assert.is_false(env.importing[#env.importing])
     end)
 

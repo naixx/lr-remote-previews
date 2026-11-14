@@ -26,16 +26,31 @@ describe('PreviewWatch', function()
         local at, why, state = run(1000, 1384, function(t)
             return math.min(1300, 600 + math.floor((t - 1000) * 3))
         end)
-        -- 1300 reached at 1234 (seen at the read of 1240); none new for 30 s: the read at 1270
+        -- 1300 reached at 1234 (seen at the read of 1235); none new for 15 s: the read at 1250
         assert.are.equal('stable', why)
-        assert.are.equal(1270, at)
-        assert.are.equal('1300 of 1384 photos of the import have a preview; none new for 30 s',
+        assert.are.equal(1250, at)
+        assert.are.equal('1300 of 1384 photos of the import have a preview; none new for 15 s',
             PreviewWatch.text(state, why, at))
+    end)
+
+    it('reads while the photos still come: a preview task already over ends the wait when the photos stop', function()
+        local state = PreviewWatch.new()
+        assert.is_false(PreviewWatch.readDue(state, 900))
+        PreviewWatch.watch(state, 900) -- an import holds the fetch
+        for t = 900, 1000, PreviewWatch.READ_SECONDS do
+            assert.is_true(PreviewWatch.readDue(state, t))
+            PreviewWatch.observe(state, math.min(1351, (t - 900) * 30), 1384, t)
+            assert.is_false(PreviewWatch.over(state, t)) -- the photos still come
+        end
+        PreviewWatch.photosOver(state, 1000) -- the last preview came at 950, the last photo at 970
+        local over, why = PreviewWatch.over(state, 1000)
+        assert.is_true(over)
+        assert.are.equal('stable', why)
     end)
 
     it('ends at once when every photo has a preview', function()
         local at, why = run(1000, 50, function(t)
-            return t >= 1020 and 50 or 49
+            return t >= 1020 and 50 or 40 + math.floor((t - 1000) / 5) -- one more every 5 s, all at 1020
         end)
         assert.are.equal('all', why)
         assert.are.equal(1020, at)
@@ -43,7 +58,7 @@ describe('PreviewWatch', function()
 
     it('does not wait for ever: a preview task that crawls ends at the limit', function()
         local at, why, state = run(1000, 1000, function(t)
-            return math.floor((t - 1000) / 20) -- one preview every 20 s: never quiet for 30 s
+            return math.floor((t - 1000) / 10) -- one preview every 10 s: never quiet for 15 s
         end)
         assert.are.equal('limit', why)
         assert.are.equal(1000 + PreviewWatch.LIMIT_SECONDS, at)

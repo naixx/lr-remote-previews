@@ -38,5 +38,5 @@ return {
         { title = 'LRRP: Diagnostics: try buildSmartPreview on selected photos', file = 'DiagnosticsTryBuild.lua' },
         { title = 'LRRP: Diagnostics: new photos for the automatic send', file = 'DiagnosticsNewPhotos.lua' },
     },
-    VERSION = { major = 0, minor = 8, revision = 4, build = 0 },
+    VERSION = { major = 0, minor = 8, revision = 5, build = 0 },
 }

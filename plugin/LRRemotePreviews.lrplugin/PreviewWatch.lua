@@ -8,18 +8,23 @@
 -- QUIET_SECONDS (or all of them have one). The plug-in cannot see Lightroom's tasks; it reads the preview index:
 -- <catalog name> Previews.lrdata/previews.db next to the catalog, table Pyramid (uuid = the file UUID, the same value
 -- as AgLibraryFile.id_global; quality 'thumbnail' for the placeholder, then 'embedded', 'standard', 'final',
--- 'bigThumbnail'), with sqlite3, read-only, every READ_SECONDS. At most LIMIT_SECONDS after the photos stopped (a
+-- 'bigThumbnail'), with sqlite3, read-only, every READ_SECONDS from the moment an import holds the fetch (since
+-- 0.8.5; before, from the moment the photos stopped, so a preview task already over still cost QUIET_SECONDS more).
+-- QUIET_SECONDS is 15 since 0.8.5 (Lightroom made about 3 previews a second, so 15 s without one is a stop; it was
+-- 30, with reads every 10 s). At most LIMIT_SECONDS after the photos stopped (a
 -- preview task the user cancelled, photos that never get a preview) the fetch begins anyway; when the index cannot be
 -- read, or no photo of the import is known (after a restart), at once, as before 0.8.3.
 --
 --   local state = PreviewWatch.new()
---   PreviewWatch.photosOver(state, now)                 -- the photos stopped coming
+--   PreviewWatch.watch(state, now)                      -- an import holds the fetch: read from now on
+--   PreviewWatch.photosOver(state, now)                 -- the photos stopped coming (photosOverAt = nil: they came
+--                                                          again)
 --   if PreviewWatch.readDue(state, now) then PreviewWatch.observe(state, count, total, now, problem) end
 --   local over, why = PreviewWatch.over(state, now)     -- why: 'all', 'stable', 'limit', 'unreadable', 'none'
 local PreviewWatch = {}
 
-PreviewWatch.READ_SECONDS = 10 -- between two reads of the preview index
-PreviewWatch.QUIET_SECONDS = 30 -- the count has not grown for this long: Lightroom's preview task is over
+PreviewWatch.READ_SECONDS = 5 -- between two reads of the preview index
+PreviewWatch.QUIET_SECONDS = 15 -- the count has not grown for this long: Lightroom's preview task is over
 PreviewWatch.LIMIT_SECONDS = 15 * 60 -- after the photos stopped, the fetch begins anyway
 PreviewWatch.CHUNK = 500 -- file UUIDs per SELECT
 
@@ -33,6 +38,12 @@ function PreviewWatch.reset(state)
     end
 end
 
+function PreviewWatch.watch(state, now)
+    if not state.watching then
+        state.watching = now
+    end
+end
+
 function PreviewWatch.photosOver(state, now)
     if not state.photosOverAt then
         state.photosOverAt = now
@@ -40,7 +51,7 @@ function PreviewWatch.photosOver(state, now)
 end
 
 function PreviewWatch.readDue(state, now)
-    return state.photosOverAt ~= nil and not state.unreadable
+    return (state.watching ~= nil or state.photosOverAt ~= nil) and not state.unreadable
         and (state.readAt == nil or now - state.readAt >= PreviewWatch.READ_SECONDS)
 end
 
