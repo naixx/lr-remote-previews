@@ -64,6 +64,16 @@ describe('ServerInfo.normalize', function()
             '{"name": "x", "version": "1", "api": 1, "capabilities": {"maxItemsPerJob": "many"}}')))
     end)
 
+    it('reads how long the server keeps finished jobs', function()
+        local info = ServerInfo.normalize(decoded(
+            '{"name": "x", "version": "0.3.0", "api": 1, "capabilities": {"jobRetentionDays": 30}}'))
+        assert.are.equal(30, info.capabilities.jobRetentionDays)
+        assert.is_nil(ServerInfo.normalize(decoded('{"name": "x", "version": "0.2.0", "api": 1}'))
+            .capabilities.jobRetentionDays)
+        assert.is_nil(ServerInfo.normalize(decoded(
+            '{"name": "x", "version": "1", "api": 1, "capabilities": {"jobRetentionDays": "30"}}')))
+    end)
+
     it('flags an API version it does not speak', function()
         local info = ServerInfo.normalize({ name = 'x', version = '9', api = 2 })
         assert.is_false(info.apiSupported)

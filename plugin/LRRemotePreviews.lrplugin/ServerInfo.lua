@@ -2,10 +2,11 @@
 -- status dialog shows. Pure Lua 5.1: no Lightroom imports, so it runs in unit tests.
 --
 -- Contract (API 1, docs/protocol.md):
---   {"name": "LR Remote Previews", "version": "0.2.0", "api": 1, "auth": "token",
+--   {"name": "LR Remote Previews", "version": "0.3.0", "api": 1, "auth": "token",
 --    "converter": {"installed": false, "path": "C:\\...\\Adobe DNG Converter.exe", "version": null},
 --    "roots": [{"id": "archive", "label": "Archive", "available": true}],
---    "capabilities": {"extensions": [".arw", ".cr2"], "previewLongEdge": 2560, "maxItemsPerJob": 5000}}
+--    "capabilities": {"extensions": [".arw", ".cr2"], "previewLongEdge": 2560, "maxItemsPerJob": 5000,
+--                     "jobRetentionDays": 30}}
 -- A 401 answer carries {"detail": "..."}.
 local Json = require 'Json'
 
@@ -148,6 +149,8 @@ local function build(decoded)
         extensions = {},
         previewLongEdge = optionalOfType(capabilities, 'previewLongEdge', 'capabilities.previewLongEdge', 'number'),
         maxItemsPerJob = optionalOfType(capabilities, 'maxItemsPerJob', 'capabilities.maxItemsPerJob', 'number'),
+        jobRetentionDays = optionalOfType(capabilities, 'jobRetentionDays', 'capabilities.jobRetentionDays',
+            'number'),
     }
     for i, extension in ipairs(optionalList(capabilities, 'extensions', 'capabilities.extensions') or {}) do
         if type(extension) ~= 'string' then
@@ -162,7 +165,8 @@ end
 --   { name, version, api, apiSupported, auth ('unknown' when missing),
 --     converter = { installed (boolean), path (or nil), version (or nil) },
 --     roots = { { id, label (defaults to id), available (boolean) }, ... },
---     capabilities = { extensions = { lower-case strings }, previewLongEdge (or nil), maxItemsPerJob (or nil) } }
+--     capabilities = { extensions = { lower-case strings }, previewLongEdge (or nil), maxItemsPerJob (or nil),
+--                      jobRetentionDays (or nil) } }
 -- Unknown fields are ignored. Returns nil plus a message when a field is missing or has the wrong type.
 function ServerInfo.normalize(decoded)
     local ok, result = pcall(build, decoded)

@@ -187,6 +187,50 @@ describe('PathMap.map', function()
     end)
 end)
 
+describe('PathMap.localPaths', function()
+    it('maps a root and relative path back to drive, UNC and POSIX prefixes', function()
+        assert.are.same({ 'Z:\\2026\\2026.06.20 - shoot\\IMG_0001.ARW' },
+            PathMap.localPaths('archive', '2026/2026.06.20 - shoot/IMG_0001.ARW', { mapping('Z:\\', 'archive') }))
+        assert.are.same({ 'Z:\\Photos\\a\\b.arw' },
+            PathMap.localPaths('p', 'a/b.arw', { mapping('Z:/Photos/', 'p') }))
+        assert.are.same({ '\\\\nas\\photos\\Trip\\IMG_0021.CR2' },
+            PathMap.localPaths('archive', 'Trip/IMG_0021.CR2', { mapping('\\\\nas\\photos', 'archive') }))
+        assert.are.same({ '/Volumes/Photos/2026/a.arw' },
+            PathMap.localPaths('p', '2026/a.arw', { mapping('/Volumes/Photos/', 'p') }))
+        assert.are.same({ '/a.arw' }, PathMap.localPaths('p', 'a.arw', { mapping('/', 'p') }))
+    end)
+
+    it('lists one path per mapping of the root, in order, each spelling once', function()
+        local mappings = { mapping('Z:\\', 'archive'), mapping('Y:\\Other', 'other'),
+            mapping('\\\\nas\\photos', 'archive'), mapping('z:/', 'archive'), mapping('relative', 'archive') }
+        assert.are.same({ 'Z:\\a\\b.arw', '\\\\nas\\photos\\a\\b.arw' },
+            PathMap.localPaths('archive', 'a/b.arw', mappings))
+        assert.are.same({}, PathMap.localPaths('nowhere', 'a/b.arw', mappings))
+    end)
+
+    it('is the reverse of PathMap.map', function()
+        local mappings = { mapping('Z:\\', 'archive'), mapping('Z:\\Photos', 'photos'), mapping('/Volumes/P', 'p') }
+        local paths = { 'Z:\\2026\\Caf\195\169\\IMG_0001.ARW', 'Z:\\Photos\\x\\y.cr2', '/Volumes/P/q/r.nef' }
+        for _, path in ipairs(paths) do
+            local mapped = assert(PathMap.map(path, mappings))
+            local back = PathMap.localPaths(mapped.rootId, mapped.relativePath, mappings)
+            assert.are.equal(PathMap.fileKey(path), PathMap.fileKey(back[1]))
+        end
+    end)
+
+    it('refuses relative paths the server should never send', function()
+        local mappings = { mapping('Z:\\', 'archive') }
+        for _, bad in ipairs({ '', '/a.arw', 'a\\b.arw', 'a//b.arw', 'a/', './a.arw', 'a/../b.arw', 'C:/a.arw',
+            'a\0b' }) do
+            local paths, message = PathMap.localPaths('archive', bad, mappings)
+            assert.is_nil(paths, bad)
+            assert.is_string(message)
+        end
+        assert.is_nil(PathMap.localPaths('', 'a.arw', mappings))
+        assert.is_nil(PathMap.localPaths(nil, 'a.arw', mappings))
+    end)
+end)
+
 describe('PathMap.fileKey', function()
     it('gives one key for every spelling of the same Windows path', function()
         assert.are.equal(PathMap.fileKey('Z:\\Photos\\A.ARW'), PathMap.fileKey('z:/photos//a.arw'))

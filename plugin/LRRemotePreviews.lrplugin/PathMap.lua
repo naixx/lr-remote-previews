@@ -119,4 +119,55 @@ function PathMap.map(localPath, mappings)
     return { rootId = best.rootId, relativePath = relativePath }
 end
 
+-- Checks a relative path as the server echoes it: forward slashes, not empty, not absolute, no backslash, NUL,
+-- empty segment, '.' or '..' segment (docs/protocol.md, "Paths"). Returns true, or nil plus a message.
+function PathMap.checkRelativePath(relativePath)
+    if type(relativePath) ~= 'string' or relativePath == '' then
+        return nil, 'no relative path given'
+    end
+    if relativePath:find('[%z\\]') then
+        return nil, 'the relative path contains a backslash or NUL: ' .. relativePath
+    end
+    if relativePath:sub(1, 1) == '/' or relativePath:match('^%a:') then
+        return nil, 'the relative path is absolute: ' .. relativePath
+    end
+    for segment in (relativePath .. '/'):gmatch('([^/]*)/') do
+        if segment == '' or segment == '.' or segment == '..' then
+            return nil, 'the relative path has an empty, "." or ".." segment: ' .. relativePath
+        end
+    end
+    return true
+end
+
+-- The reverse of PathMap.map: the local paths a server root id and relative path stand for, one per mapping with
+-- that root id, in the order of the mappings (several local prefixes may lead to the same root; spellings of the
+-- same path are listed once). Windows prefixes give backslashes. Invalid mappings are skipped.
+-- Returns a list (empty when no mapping has the root id), or nil plus a message for a bad relative path.
+function PathMap.localPaths(rootId, relativePath, mappings)
+    if type(rootId) ~= 'string' or rootId == '' then
+        return nil, 'no root id given'
+    end
+    local ok, why = PathMap.checkRelativePath(relativePath)
+    if not ok then
+        return nil, why
+    end
+    local paths, seen = {}, {}
+    for _, mapping in ipairs(type(mappings) == 'table' and mappings or {}) do
+        if type(mapping) == 'table' and mapping.rootId == rootId
+            and PathMap.checkMapping(mapping.localPrefix, mapping.rootId) then
+            local prefix, windows = canonical(mapping.localPrefix)
+            local path = prefix .. '/' .. relativePath
+            if windows then
+                path = path:gsub('/', '\\')
+            end
+            local key = PathMap.fileKey(path)
+            if not seen[key] then
+                seen[key] = true
+                paths[#paths + 1] = path
+            end
+        end
+    end
+    return paths
+end
+
 return PathMap

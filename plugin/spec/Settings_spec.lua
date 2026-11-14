@@ -5,7 +5,8 @@ package.path = here .. '../LRRemotePreviews.lrplugin/?.lua;' .. package.path
 local Settings = require 'Settings'
 
 local EMPTY = { serverUrl = '', token = '', localPrefix1 = '', rootId1 = '', localPrefix2 = '', rootId2 = '',
-    localPrefix3 = '', rootId3 = '', sqlitePath = '' }
+    localPrefix3 = '', rootId3 = '', sqlitePath = '', downloadConcurrency = 4, autoFetch = false,
+    autoFetchInterval = 60 }
 
 local function with(values)
     local settings = {}
@@ -19,7 +20,7 @@ local function with(values)
 end
 
 describe('Settings', function()
-    it('reads every key, trimmed, with missing values as empty strings', function()
+    it('reads every key, trimmed, with missing values as empty strings or defaults', function()
         assert.are.same(with({ serverUrl = 'http://nas.local:8787', token = 'abc', rootId2 = 'b',
             sqlitePath = 'C:\\Tools\\sqlite3.exe' }),
             Settings.read({ serverUrl = ' http://nas.local:8787 ', token = 'abc\n', rootId1 = 42, rootId2 = ' b ',
@@ -40,14 +41,56 @@ describe('Settings', function()
             rootId1 = '' }))
     end)
 
+    it('reads the options in their kind and bounds', function()
+        local read = Settings.read({ downloadConcurrency = 2, autoFetch = true, autoFetchInterval = 300 })
+        assert.are.equal(2, read.downloadConcurrency)
+        assert.is_true(read.autoFetch)
+        assert.are.equal(300, read.autoFetchInterval)
+        read = Settings.read({ downloadConcurrency = '6', autoFetch = 'yes', autoFetchInterval = 5 })
+        assert.are.equal(6, read.downloadConcurrency)
+        assert.is_false(read.autoFetch)
+        assert.are.equal(30, read.autoFetchInterval)
+        read = Settings.read({ downloadConcurrency = 99, autoFetchInterval = 'often' })
+        assert.are.equal(8, read.downloadConcurrency)
+        assert.are.equal(60, read.autoFetchInterval)
+        assert.are.equal(1, Settings.option('downloadConcurrency', 0))
+        assert.are.equal(3, Settings.option('downloadConcurrency', 3.7))
+        assert.are.equal(4, Settings.option('downloadConcurrency', 0 / 0))
+    end)
+
+    it('offers choices that are within the bounds and include the defaults', function()
+        local function within(choices, key)
+            local option, hasDefault = Settings.OPTIONS[key], false
+            for _, value in ipairs(choices) do
+                assert.are.equal(value, Settings.option(key, value))
+                hasDefault = hasDefault or value == option.default
+            end
+            assert.is_true(hasDefault)
+        end
+        within(Settings.CONCURRENCY_CHOICES, 'downloadConcurrency')
+        within(Settings.INTERVAL_CHOICES, 'autoFetchInterval')
+    end)
+
     it('writes every key, trimmed, and mapping 1 also under the 0.1.0 keys', function()
         local store = { unrelated = 'kept' }
         Settings.write(store, { serverUrl = 'http://nas:8787 ', token = ' t ', localPrefix1 = 'Z:\\', rootId1 = 'a',
-            localPrefix3 = ' /Volumes/Photos ', rootId3 = 'b' })
+            localPrefix3 = ' /Volumes/Photos ', rootId3 = 'b', downloadConcurrency = 2, autoFetch = true })
         assert.are.same({ unrelated = 'kept', serverUrl = 'http://nas:8787', token = 't', localPrefix1 = 'Z:\\',
             rootId1 = 'a', localPrefix2 = '', rootId2 = '', localPrefix3 = '/Volumes/Photos', rootId3 = 'b',
-            sqlitePath = '', localPrefix = 'Z:\\', rootId = 'a' }, store)
+            sqlitePath = '', localPrefix = 'Z:\\', rootId = 'a', downloadConcurrency = 2, autoFetch = true,
+            autoFetchInterval = 60 }, store)
         assert.are.same(Settings.read(store), Settings.read(store))
+    end)
+
+    it('lists every key once', function()
+        local seen = {}
+        for _, key in ipairs(Settings.KEYS) do
+            assert.is_nil(seen[key])
+            seen[key] = true
+        end
+        for key in pairs(EMPTY) do
+            assert.is_true(seen[key])
+        end
     end)
 
     it('gives the mappings whose both halves are set, in order', function()

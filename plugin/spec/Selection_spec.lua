@@ -57,6 +57,13 @@ describe('Selection.serverProblem', function()
             assert.matches(case[3], Selection.serverProblem(case[1], case[2]), 1, true)
         end
     end)
+
+    it('does not need the converter for fetching only', function()
+        local noConverter = info({ converter = { installed = false } })
+        assert.is_nil(Selection.serverProblem(noConverter, MAPPINGS, { fetchOnly = true }))
+        assert.matches('API 2', Selection.serverProblem(info({ api = 2 }), MAPPINGS, { fetchOnly = true }), 1, true)
+        assert.matches('No path mapping', Selection.serverProblem(noConverter, {}, { fetchOnly = true }), 1, true)
+    end)
 end)
 
 describe('Selection helpers', function()

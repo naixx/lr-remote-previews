@@ -65,4 +65,67 @@ describe('RunSummary', function()
         assert.are.equal('IMG_0003.ARW: notDelivered (Not finished: the run stopped first)',
             RunSummary.photoLine('IMG_0003.ARW', 'notDelivered'))
     end)
+
+    it('writes the summary of a fetch with its own header, headings and notes', function()
+        local summary = RunSummary.new(6)
+        summary:outcome('delivered')
+        summary:outcome('pending')
+        summary:outcome('absent')
+        summary:outcome('rejected', 'not_found')
+        summary:outcome('notInCache')
+        summary:skip('hasSmartPreview')
+        summary:skip('notInCatalog')
+        assert.are.equal(table.concat({
+            'Stopped. Placed ones stay.',
+            '',
+            '6 photo(s) selected, 4 looked up on the server.',
+            '',
+            '    Smart previews placed and registered by Lightroom: 1',
+            '    Gone from the server\'s cache since it was looked up (fetch again): 1',
+            '    The server refused them: 1 (not_found: 1)',
+            '    Still being built on the server: 1',
+            '    Not on the server (never sent, or the original changed since; send them again): 1',
+            '',
+            'Left out (2):',
+            '    already have a smart preview: 1',
+            '    built on the server, but not in this catalog (removed, or the path mappings changed): 1',
+            '',
+            'On the server: 3 queued.',
+        }, '\n'), summary:text({ cancelled = true, cancelledText = 'Stopped. Placed ones stay.',
+            header = '6 photo(s) selected, 4 looked up on the server.', skipHeading = 'Left out',
+            notes = { 'On the server: 3 queued.' } }))
+        assert.are.equal(1, summary:placed())
+        assert.is_true(summary:troubled())
+        assert.are.equal('1 placed, 1 downloads failed, 1 still being built, 1 not on the server, 1 refused',
+            summary:shortText())
+        assert.are.equal('nothing to place', RunSummary.new(0):shortText())
+        assert.is_false(RunSummary.new(0):troubled())
+    end)
+
+    it('writes the text after sending', function()
+        local summary = RunSummary.new(5)
+        summary.sent = 4
+        summary:outcome('rejected', 'not_found')
+        summary:skip('video')
+        assert.are.equal(table.concat({
+            '4 photos were sent to the server (job 12). The server builds the smart previews in the background; '
+                .. 'Lightroom does not have to stay open.',
+            '',
+            '    Built already (the server had them): 2',
+            '    Refused by the server: 1 (not_found: 1)',
+            '',
+            'Fetch later.',
+            '',
+            'Not sent (1):',
+            '    videos: 1',
+            '',
+            'See the log.',
+        }, '\n'), summary:sendText({ jobIds = { 12 }, ready = 2, rejected = 1, fetchHint = 'Fetch later.',
+            logHint = 'See the log.' }))
+        local one = RunSummary.new(1)
+        one.sent = 1
+        assert.matches('^1 photo was sent to the server %(jobs 3, 4%)%.', one:sendText({ jobIds = { 3, 4 },
+            failedParts = 'Part 3 failed.' }))
+        assert.matches('\n\nPart 3 failed%.$', one:sendText({ jobIds = { 3, 4 }, failedParts = 'Part 3 failed.' }))
+    end)
 end)

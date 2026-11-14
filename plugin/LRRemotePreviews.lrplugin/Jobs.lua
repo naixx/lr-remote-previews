@@ -1,43 +1,88 @@
--- Jobs and items of the server's API (docs/protocol.md, "Jobs and items"): URLs, the request that creates a
--- job, and checking the job and item objects the server sends. Pure Lua 5.1: no Lightroom imports.
+-- Jobs, items and lookups of the server's API (docs/protocol.md, "Jobs and items" and "Asking for files without a
+-- job"): URLs, the request bodies, and checking the job, item and lookup objects the server sends. Pure Lua 5.1:
+-- no Lightroom imports.
 local Json = require 'Json'
 
 local Jobs = {}
 
-Jobs.CLIENT = 'lr-plugin/0.2.0' -- kept equal to VERSION in Info.lua (a spec checks it)
+Jobs.CLIENT = 'lr-plugin/0.3.0' -- kept equal to VERSION in Info.lua (a spec checks it)
 Jobs.LABEL = 'Lightroom selection'
-Jobs.PAGE_LIMIT = 500
+Jobs.PAGE_LIMIT = 500 -- items per page while polling one job
+Jobs.READ_LIMIT = 1000 -- items per page when reading the ready items of a job (the protocol's maximum)
+Jobs.LIST_LIMIT = 200 -- jobs per list (the protocol's maximum)
 Jobs.MAX_REF_LENGTH = 64
+Jobs.MAX_CLIENT_ID_LENGTH = 64
 
 -- Every item state, and whether it is final.
 Jobs.FINAL = { queued = false, building = false, ready = true, failed = true, rejected = true, cancelled = true }
 
+-- The states of a lookup answer.
+Jobs.LOOKUP_STATES = { ready = true, pending = true, absent = true, rejected = true }
+
 local function integer(value)
     return string.format('%d', value)
+end
+
+-- Percent-encodes everything except the unreserved characters of RFC 3986.
+function Jobs.urlEncode(text)
+    return (tostring(text):gsub('[^%w%-%._~]', function(char)
+        return string.format('%%%02X', string.byte(char))
+    end))
 end
 
 function Jobs.jobsUrl(base)
     return base .. '/api/v1/jobs'
 end
 
+-- GET /api/v1/jobs for one clientId, newest first.
+function Jobs.listUrl(base, clientId, limit)
+    return Jobs.jobsUrl(base) .. '?clientId=' .. Jobs.urlEncode(clientId) .. '&limit='
+        .. integer(limit or Jobs.LIST_LIMIT)
+end
+
 function Jobs.jobUrl(base, jobId)
     return base .. '/api/v1/jobs/' .. integer(jobId)
 end
 
-function Jobs.itemsUrl(base, jobId, since, limit)
-    return Jobs.jobUrl(base, jobId) .. '/items?since=' .. integer(since or 0) .. '&limit='
+-- GET /api/v1/jobs/{id}/items; state (optional) asks for items in that one state only.
+function Jobs.itemsUrl(base, jobId, since, limit, state)
+    local url = Jobs.jobUrl(base, jobId) .. '/items?since=' .. integer(since or 0) .. '&limit='
         .. integer(limit or Jobs.PAGE_LIMIT)
+    if state then
+        url = url .. '&state=' .. Jobs.urlEncode(state)
+    end
+    return url
+end
+
+function Jobs.retryUrl(base, jobId)
+    return Jobs.jobUrl(base, jobId) .. '/retry'
 end
 
 function Jobs.fileUrl(base, itemId)
     return base .. '/api/v1/items/' .. integer(itemId) .. '/file'
 end
 
--- The JSON body of POST /api/v1/jobs. entries: { { ref, rootId, relativePath }, ... } with unique string refs.
--- Returns the body, or nil plus a message.
-function Jobs.createBody(entries, client, label)
+function Jobs.lookupUrl(base)
+    return base .. '/api/v1/lookup'
+end
+
+-- True for a cache key as the protocol defines it: 64 lower-case hexadecimal characters.
+function Jobs.isCacheKey(key)
+    return type(key) == 'string' and #key == 64 and key:find('^[0-9a-f]+$') ~= nil
+end
+
+-- GET /api/v1/files/{key}; or nil plus a message for a key that is not one.
+function Jobs.fileByKeyUrl(base, key)
+    if not Jobs.isCacheKey(key) then
+        return nil, 'not a cache key: ' .. tostring(key)
+    end
+    return base .. '/api/v1/files/' .. key
+end
+
+-- Checks a list of { ref, rootId, relativePath } and returns the items of a request, or nil plus a message.
+local function requestItems(entries)
     if type(entries) ~= 'table' or #entries == 0 then
-        return nil, 'a job needs at least one item'
+        return nil, 'a request needs at least one item'
     end
     local items, refs = {}, {}
     for i, entry in ipairs(entries) do
@@ -54,7 +99,33 @@ function Jobs.createBody(entries, client, label)
         refs[ref] = true
         items[i] = { ref = ref, root = entry.rootId, path = entry.relativePath }
     end
-    return Json.encode({ client = client or Jobs.CLIENT, label = label or Jobs.LABEL, items = items })
+    return items
+end
+
+-- The JSON body of POST /api/v1/jobs. entries: { { ref, rootId, relativePath }, ... } with unique string refs.
+-- options (optional): { client, label, clientId }; client and label default to Jobs.CLIENT and Jobs.LABEL,
+-- clientId is left out when not given. Returns the body, or nil plus a message.
+function Jobs.createBody(entries, options)
+    options = options or {}
+    local items, err = requestItems(entries)
+    if not items then
+        return nil, err
+    end
+    local clientId = options.clientId
+    if clientId ~= nil and (type(clientId) ~= 'string' or clientId == '' or #clientId > Jobs.MAX_CLIENT_ID_LENGTH) then
+        return nil, 'not a valid client id: ' .. tostring(clientId)
+    end
+    return Json.encode({ client = options.client or Jobs.CLIENT, label = options.label or Jobs.LABEL,
+        clientId = clientId, items = items })
+end
+
+-- The JSON body of POST /api/v1/lookup; entries as for Jobs.createBody. Returns the body, or nil plus a message.
+function Jobs.lookupBody(entries)
+    local items, err = requestItems(entries)
+    if not items then
+        return nil, err
+    end
+    return Json.encode({ items = items })
 end
 
 -- Checking ---------------------------------------------------------------------------------------------------
@@ -70,9 +141,30 @@ local function optional(value, expected)
     return nil
 end
 
+local function normalizeError(raw)
+    if type(raw) ~= 'table' then
+        return nil
+    end
+    return { code = optional(raw.code, 'string'), message = optional(raw.message, 'string') }
+end
+
+local function normalizeResult(raw)
+    if type(raw) ~= 'table' then
+        return nil
+    end
+    return {
+        key = optional(raw.key, 'string'),
+        size = isCount(raw.size) and raw.size or nil,
+        sha256 = optional(raw.sha256, 'string'),
+        originalName = optional(raw.originalName, 'string'),
+        originalWidth = optional(raw.originalWidth, 'number'),
+        originalHeight = optional(raw.originalHeight, 'number'),
+    }
+end
+
 -- Checks an item object. Returns
 --   { id, ref, state, seq, root, path, error = { code, message } | nil,
---     result = { size, sha256, originalName, originalWidth, originalHeight } | nil }
+--     result = { key, size, sha256, originalName, originalWidth, originalHeight } | nil }
 -- (fields of error and result are nil when absent or of the wrong type), or nil plus a message.
 function Jobs.normalizeItem(raw)
     if type(raw) ~= 'table' or raw[1] ~= nil then
@@ -91,31 +183,30 @@ function Jobs.normalizeItem(raw)
     if not isCount(raw.seq) then
         return nil, name .. ' has no valid "seq"'
     end
-    local item = {
+    return {
         id = raw.id,
         ref = raw.ref,
         state = raw.state,
         seq = raw.seq,
         root = optional(raw.root, 'string'),
         path = optional(raw.path, 'string'),
+        error = normalizeError(raw.error),
+        result = normalizeResult(raw.result),
     }
-    if type(raw.error) == 'table' then
-        item.error = { code = optional(raw.error.code, 'string'), message = optional(raw.error.message, 'string') }
-    end
-    if type(raw.result) == 'table' then
-        local result = raw.result
-        item.result = {
-            size = isCount(result.size) and result.size or nil,
-            sha256 = optional(result.sha256, 'string'),
-            originalName = optional(result.originalName, 'string'),
-            originalWidth = optional(result.originalWidth, 'number'),
-            originalHeight = optional(result.originalHeight, 'number'),
-        }
-    end
-    return item
 end
 
--- Checks a job object. Returns { id, state, seq, counts } or nil plus a message.
+-- The counts of a job object with every state present (0 when missing or not a count).
+local function normalizeCounts(raw)
+    local counts = {}
+    raw = type(raw) == 'table' and raw or {}
+    for _, key in ipairs({ 'total', 'queued', 'building', 'ready', 'failed', 'rejected', 'cancelled' }) do
+        counts[key] = isCount(raw[key]) and raw[key] or 0
+    end
+    return counts
+end
+
+-- Checks a job object. Returns { id, state, seq, counts, label, client, clientId, created, finished } (the last
+-- five nil when absent) or nil plus a message. counts has every state of the contract, 0 when missing.
 function Jobs.normalizeJob(raw)
     if type(raw) ~= 'table' or raw[1] ~= nil then
         return nil, 'the job is not an object'
@@ -130,7 +221,12 @@ function Jobs.normalizeJob(raw)
         id = raw.id,
         state = raw.state,
         seq = isCount(raw.seq) and raw.seq or nil,
-        counts = optional(raw.counts, 'table') or {},
+        counts = normalizeCounts(raw.counts),
+        label = optional(raw.label, 'string'),
+        client = optional(raw.client, 'string'),
+        clientId = optional(raw.clientId, 'string'),
+        created = optional(raw.created, 'string'),
+        finished = optional(raw.finished, 'string'),
     }
 end
 
@@ -170,6 +266,63 @@ function Jobs.parseItemsPage(decoded)
     end
     created.more = decoded.more == true
     return created
+end
+
+-- The 200 answer of GET /api/v1/jobs/{id} or POST /api/v1/jobs/{id}/retry: the job, or nil plus a message.
+function Jobs.parseJobAnswer(decoded)
+    return Jobs.normalizeJob(type(decoded) == 'table' and decoded.job)
+end
+
+-- The 200 answer of GET /api/v1/jobs: a list of jobs (newest first, as the server sent them), or nil plus a
+-- message.
+function Jobs.parseJobList(decoded)
+    if type(decoded) ~= 'table' or type(decoded.jobs) ~= 'table' then
+        return nil, 'the answer has no "jobs" list'
+    end
+    local jobs = {}
+    for i, raw in ipairs(decoded.jobs) do
+        local job, err = Jobs.normalizeJob(raw)
+        if not job then
+            return nil, err
+        end
+        jobs[i] = job
+    end
+    return jobs
+end
+
+-- The 200 answer of POST /api/v1/lookup for the requested entries ({ ref, ... }). Returns a table keyed by ref:
+-- { ref, state, error = { code, message } | nil, result = { key, size, ... } | nil }, or nil plus a message when
+-- the answer does not have exactly one valid entry per requested ref.
+function Jobs.parseLookup(decoded, entries)
+    if type(decoded) ~= 'table' or type(decoded.items) ~= 'table' then
+        return nil, 'the answer has no "items" list'
+    end
+    local wanted = {}
+    for _, entry in ipairs(entries) do
+        wanted[entry.ref] = true
+    end
+    local byRef, count = {}, 0
+    for i, raw in ipairs(decoded.items) do
+        if type(raw) ~= 'table' or type(raw.ref) ~= 'string' then
+            return nil, 'lookup entry ' .. i .. ' has no "ref"'
+        end
+        if not wanted[raw.ref] then
+            return nil, 'the server answered ref "' .. raw.ref .. '" that was not asked for'
+        end
+        if byRef[raw.ref] then
+            return nil, 'the server answered ref "' .. raw.ref .. '" twice'
+        end
+        if type(raw.state) ~= 'string' or not Jobs.LOOKUP_STATES[raw.state] then
+            return nil, 'lookup entry ' .. raw.ref .. ' has an unknown state ' .. tostring(raw.state)
+        end
+        byRef[raw.ref] = { ref = raw.ref, state = raw.state, error = normalizeError(raw.error),
+            result = normalizeResult(raw.result) }
+        count = count + 1
+    end
+    if count ~= #entries then
+        return nil, string.format('the server answered %d entries for %d asked for', count, #entries)
+    end
+    return byRef
 end
 
 -- Checks that the server answered every requested ref exactly once. Returns true, or nil plus a message.

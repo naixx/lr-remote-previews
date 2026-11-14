@@ -26,14 +26,16 @@ function Selection.availableRoots(info)
     return available
 end
 
--- Why the server cannot be used for building, or nil when it can. info: ServerInfo.normalize's result;
--- mappings: Settings.mappings().
-function Selection.serverProblem(info, mappings)
+-- Why the server cannot be used, or nil when it can. info: ServerInfo.normalize's result; mappings:
+-- Settings.mappings(). options.fetchOnly: the command only fetches what is already built, so the server needs no
+-- converter.
+function Selection.serverProblem(info, mappings, options)
+    options = options or {}
     if not info.apiSupported then
         return 'The server speaks API ' .. tostring(info.api) .. ', this plug-in speaks API ' .. ServerInfo.API_VERSION
             .. '. Update the plug-in or the server.'
     end
-    if not info.converter.installed then
+    if not options.fetchOnly and not info.converter.installed then
         return 'Adobe DNG Converter is not installed on the server, so it cannot build smart previews. '
             .. 'See the server documentation for how to install it.'
     end

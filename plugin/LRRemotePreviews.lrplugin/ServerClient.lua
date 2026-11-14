@@ -155,13 +155,7 @@ function ServerClient.cancelJob(settings, jobId)
     return true
 end
 
--- GET /api/v1/items/{id}/file. Returns the file content (a string), or nil plus a problem.
-function ServerClient.download(settings, itemId)
-    local root, problem = base(settings)
-    if not root then
-        return nil, problem
-    end
-    local url = Jobs.fileUrl(root, itemId)
+local function downloadFrom(settings, url)
     Log.trace('GET %s', url)
     local body, status, transportError = exchange('GET', url, settings.token, nil, DOWNLOAD_TIMEOUT_SECONDS)
     local failure = HttpJson.problem(body, status, transportError, hasToken(settings))
@@ -172,6 +166,146 @@ function ServerClient.download(settings, itemId)
         return nil, { kind = 'http', message = 'The server sent no file.' }
     end
     return body
+end
+
+-- GET /api/v1/items/{id}/file. Returns the file content (a string), or nil plus a problem.
+function ServerClient.download(settings, itemId)
+    local root, problem = base(settings)
+    if not root then
+        return nil, problem
+    end
+    return downloadFrom(settings, Jobs.fileUrl(root, itemId))
+end
+
+-- GET /api/v1/files/{key}. Returns the file content, or nil plus a problem (problem.code 'not_in_cache' when the
+-- server no longer has it).
+function ServerClient.downloadByKey(settings, key)
+    local root, problem = base(settings)
+    if not root then
+        return nil, problem
+    end
+    local url, urlError = Jobs.fileByKeyUrl(root, key)
+    if not url then
+        return nil, { kind = 'badJson', message = 'The server named the file with an invalid key (' .. urlError
+            .. ').' }
+    end
+    return downloadFrom(settings, url)
+end
+
+-- GET /api/v1/jobs?clientId=. Returns the jobs (Jobs.parseJobList), or nil plus a problem. quiet: no log line on
+-- success (the automatic fetch asks every minute).
+function ServerClient.listJobs(settings, clientId, quiet)
+    local root, problem = base(settings)
+    if not root then
+        return nil, problem
+    end
+    local url = Jobs.listUrl(root, clientId)
+    if not quiet then
+        Log.info('GET %s', url)
+    end
+    local body, status, transportError = exchange('GET', url, settings.token, nil, TIMEOUT_SECONDS)
+    local decoded, failure = HttpJson.decode(body, status, transportError, hasToken(settings))
+    if not decoded then
+        Log.warn('listing the jobs failed: %s', failure.message)
+        return nil, failure
+    end
+    local jobs, err = Jobs.parseJobList(decoded)
+    if not jobs then
+        return nil, { kind = 'badJson', message = 'The list of jobs is not as expected: ' .. err .. '.' }
+    end
+    return jobs
+end
+
+-- Every item of a job in one state with seq > since, all pages. Returns the items (ordered by seq), or nil plus a
+-- problem; problem.gone is set when the server no longer knows the job.
+-- isCanceled (optional) is asked between pages; a cancel returns nil plus { kind = 'cancelled' }.
+function ServerClient.readItems(settings, jobId, since, state, isCanceled)
+    local root, problem = base(settings)
+    if not root then
+        return nil, problem
+    end
+    local items = {}
+    while true do
+        if isCanceled and isCanceled() then
+            return nil, { kind = 'cancelled', message = 'Cancelled.' }
+        end
+        local url = Jobs.itemsUrl(root, jobId, since, Jobs.READ_LIMIT, state)
+        Log.trace('GET %s', url)
+        local body, status, transportError = exchange('GET', url, settings.token, nil, TIMEOUT_SECONDS)
+        local decoded, failure = HttpJson.decode(body, status, transportError, hasToken(settings))
+        if not decoded then
+            failure.gone = failure.status == 404
+            return nil, failure
+        end
+        local page, err = Jobs.parseItemsPage(decoded)
+        if not page then
+            return nil, { kind = 'badJson', message = 'The list of items is not as expected: ' .. err .. '.' }
+        end
+        for _, item in ipairs(page.items) do
+            items[#items + 1] = item
+            if item.seq > since then
+                since = item.seq
+            end
+        end
+        if not page.more or #page.items == 0 then
+            return items
+        end
+    end
+end
+
+-- POST /api/v1/lookup for entries { ref, rootId, relativePath }. Returns the answers keyed by ref
+-- (Jobs.parseLookup), or nil plus a problem.
+function ServerClient.lookup(settings, entries)
+    local root, problem = base(settings)
+    if not root then
+        return nil, problem
+    end
+    local body, bodyError = Jobs.lookupBody(entries)
+    if not body then
+        return nil, { kind = 'request', message = 'Cannot build the lookup request: ' .. bodyError .. '.' }
+    end
+    local url = Jobs.lookupUrl(root)
+    Log.info('POST %s (%d file(s))', url, #entries)
+    local answer, status, transportError = exchange('POST', url, settings.token, body, JOB_TIMEOUT_SECONDS)
+    local decoded, failure = HttpJson.decode(answer, status, transportError, hasToken(settings))
+    if not decoded then
+        if failure.status == 404 or failure.status == 405 then
+            failure.message = 'The server cannot look files up; it needs to be version 0.3.0 or newer. '
+                .. failure.message
+        end
+        Log.warn('lookup failed: %s', failure.message)
+        return nil, failure
+    end
+    local byRef, err = Jobs.parseLookup(decoded, entries)
+    if not byRef then
+        return nil, { kind = 'badJson', message = 'The answer to the lookup is not as expected: ' .. err .. '.' }
+    end
+    return byRef
+end
+
+-- POST /api/v1/jobs/{id}/retry. Returns the job, or nil plus a problem.
+function ServerClient.retryJob(settings, jobId)
+    local root, problem = base(settings)
+    if not root then
+        return nil, problem
+    end
+    local url = Jobs.retryUrl(root, jobId)
+    Log.info('POST %s', url)
+    local body, status, transportError = exchange('POST', url, settings.token, nil, TIMEOUT_SECONDS)
+    local decoded, failure = HttpJson.decode(body, status, transportError, hasToken(settings))
+    if not decoded then
+        if failure.code == 'job_cancelled' then
+            failure.message = 'Job ' .. tostring(jobId) .. ' was cancelled; its items cannot be retried. '
+                .. failure.message
+        end
+        Log.warn('retrying job %s failed: %s', tostring(jobId), failure.message)
+        return nil, failure
+    end
+    local job, err = Jobs.parseJobAnswer(decoded)
+    if not job then
+        return nil, { kind = 'badJson', message = 'The answer to the retry is not as expected: ' .. err .. '.' }
+    end
+    return job
 end
 
 return ServerClient
