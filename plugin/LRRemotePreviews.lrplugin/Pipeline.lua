@@ -317,12 +317,16 @@ function Pipeline.withLease(label, fn)
     if not lease then
         return false, busy
     end
-    local results = { LrTasks.pcall(fn, lease) }
-    lease.release()
-    if not results[1] then
-        error(results[2], 0)
+    -- The results are counted with select('#', ...): Lightroom's Lua has no table.maxn (seen in Lightroom
+    -- Classic 15.6: "attempt to call field 'maxn' (a nil value)"), and the length operator stops at a nil.
+    local function finish(ok, ...)
+        lease.release()
+        if not ok then
+            error((...), 0)
+        end
+        return true, ...
     end
-    return true, unpack(results, 2, table.maxn(results))
+    return finish(LrTasks.pcall(fn, lease))
 end
 
 return Pipeline
