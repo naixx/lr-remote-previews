@@ -50,7 +50,9 @@ Never needs a token.
     "extensions": [".arw", ".cr2"],
     "previewLongEdge": 2560,
     "maxItemsPerJob": 5000,
-    "jobRetentionDays": 30
+    "jobRetentionDays": 30,
+    "appendItems": true,
+    "maxWaitSeconds": 55
   }
 }
 ```
@@ -67,6 +69,8 @@ Never needs a token.
 | `capabilities.previewLongEdge` | Long edge of the smart previews it builds, in pixels |
 | `capabilities.maxItemsPerJob` | The most items one job, or one lookup, may have |
 | `capabilities.jobRetentionDays` | A job is deleted this many days after it left `active`. Its DNGs stay in the cache |
+| `capabilities.appendItems` | `true` when items can be added to a job that exists (`POST /api/v1/jobs/{id}/items`). Absent on servers before 0.6.0 |
+| `capabilities.maxWaitSeconds` | The longest time the server holds a request that asks to wait for a change (`wait` of `GET /api/v1/jobs/{id}/items`). Absent on servers before 0.6.0, which answer at once |
 
 ## Paths
 
@@ -191,6 +195,35 @@ cache is `ready`, the others are `queued`. A job is created even if every item i
 be built. `413` with `"code": "too_many_items"`. `422` for a malformed body; duplicate `ref`s give `422` with
 `"code": "duplicate_ref"`.
 
+### `POST /api/v1/jobs/{id}/items`
+
+Adds items to a job that exists, so that one job can stand for a piece of work that grows: an import in
+Lightroom, whose photos appear over several minutes, is one job. Only on servers with
+`capabilities.appendItems`.
+
+```json
+{"items": [{"ref": "18", "root": "archive", "path": "2026/2026.06.20 - shoot/IMG_0002.ARW"}]}
+```
+
+`items` has 1 to `capabilities.maxItemsPerJob` entries; their `ref`s are unique in the request and not used by
+an item the job already has.
+
+`200`:
+
+```json
+{"job": { …job object… }, "items": [ …one item object per added item, in request order… ]}
+```
+
+Each added item is checked exactly as when a job is created (`rejected`, `ready` or `queued`) and gets the next
+values of the job's `seq`, so a client that polls with `since` sees the added items like any other change. A
+`done` job becomes `active` again when an added item has to be built, and `done` again when it is built; `finished`
+follows (`null` while active). The job keeps its priority, label and `clientId`.
+
+`404` for an unknown job. `409` with `"code": "job_cancelled"` for a cancelled job (start a new one). `409`
+`converter_not_installed` and `422` `duplicate_ref` as for a new job; a `ref` the job already has is a
+`duplicate_ref` too. `413` with `"code": "too_many_items"` when the job would then hold more than
+`capabilities.maxItemsPerJob` items: start another job for the rest.
+
 ### `GET /api/v1/jobs`
 
 Query: `limit` (1–200, default 50), `state` (`active`, `done`, `cancelled`; default all), `clientId` (only the
@@ -203,7 +236,8 @@ jobs created with exactly this `clientId`; an empty value matches nothing). `200
 
 ### `GET /api/v1/jobs/{id}/items`
 
-Query: `since` (default 0), `limit` (1–1000, default 500), `state` (optional; one state).
+Query: `since` (default 0), `limit` (1–1000, default 500), `state` (optional; one state), `wait` (seconds, 0 to
+`capabilities.maxWaitSeconds`, default 0).
 
 `200`:
 
@@ -219,6 +253,15 @@ Items get their first `seq` when the job is created: every item in the answer to
 `seq` of at least 1, whatever its state, and the job's `seq` in that answer is the largest of them. A client that
 has processed that answer polls with `since=<the job's seq from that answer>` and receives only later changes.
 `since=0` returns every item of the job.
+
+**Waiting for a change:** with `wait` greater than 0 and nothing to return, the server holds the request until an
+item of the job that the request would return appears (a state change, or an added item; with `state`, one in
+that state), until the job is deleted (`404`), or until `wait` seconds have passed, and then answers as usual;
+after the time has passed that is an answer with no items. A client that waits for smart previews asks with
+`since=<its largest seq>&state=ready&wait=<seconds>` and gets each one within a moment of its being built,
+without asking again and again. Each waiting request holds one connection, so a client keeps at most one per
+job. A server without `capabilities.maxWaitSeconds` ignores `wait` and answers at once: against such a server a
+client must fall back to asking at intervals, not loop.
 
 ### `GET /api/v1/items/{id}/file`
 
