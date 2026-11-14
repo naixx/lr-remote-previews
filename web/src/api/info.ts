@@ -42,6 +42,8 @@ export interface Capabilities {
   previewLongEdge: number;
   /** The most items one job may have; null from an older server (0.1) that does not send it. */
   maxItemsPerJob: number | null;
+  /** Days a job is kept after it left `active`; null from an older server (before 0.3). */
+  jobRetentionDays: number | null;
 }
 
 /** Response of `GET /api/v1/info`. */
@@ -79,6 +81,11 @@ function parseCapabilities(value: unknown, path: string): Capabilities {
     extensions: asArray(obj.extensions, fieldPath(path, 'extensions'), asString),
     previewLongEdge: asInteger(obj.previewLongEdge, fieldPath(path, 'previewLongEdge')),
     maxItemsPerJob: optional(obj.maxItemsPerJob, fieldPath(path, 'maxItemsPerJob'), asCount),
+    jobRetentionDays: optional(
+      obj.jobRetentionDays,
+      fieldPath(path, 'jobRetentionDays'),
+      asCount,
+    ),
   };
 }
 

@@ -97,6 +97,42 @@ export function asNullableTimestamp(value: unknown, path: string): string | null
   return value === null ? null : asTimestamp(value, path);
 }
 
+/** A field the protocol describes as «or null»: null stays null, anything else is checked. */
+export function nullable<T>(
+  value: unknown,
+  path: string,
+  parse: (value: unknown, path: string) => T,
+): T | null {
+  return value === null ? null : parse(value, path);
+}
+
+/** A number that is zero or more, fractions included: durations, rates. */
+export function asNonNegative(value: unknown, path: string): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    throw new ShapeError(path, 'a number of zero or more', value);
+  }
+  return value;
+}
+
+/** A positive whole number: ids. */
+export function asId(value: unknown, path: string): number {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) {
+    throw new ShapeError(path, 'a positive whole number', value);
+  }
+  return value;
+}
+
+// 24-hour clock time as the settings use it.
+const CLOCK_TIME = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
+
+/** A local time of day written `HH:MM` in 24-hour form. */
+export function asClockTime(value: unknown, path: string): string {
+  if (typeof value !== 'string' || !CLOCK_TIME.test(value)) {
+    throw new ShapeError(path, 'a time such as "22:00"', value);
+  }
+  return value;
+}
+
 /**
  * A field an older server may not send at all: null when it is absent, otherwise checked with
  * `parse`. Use only where the dashboard has a sensible fallback.

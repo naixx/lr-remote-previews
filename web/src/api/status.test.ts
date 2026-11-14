@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { busyStatus, idleStatus } from '../test/fixtures';
+import { busyStatus, idleStatus, legacyStatus } from '../test/fixtures';
 import { isQueueBusy, parseServerStatus } from './status';
 import { ShapeError } from './validate';
 
@@ -22,6 +22,36 @@ describe('parseServerStatus', () => {
 
   it('accepts a whole-number rate', () => {
     expect(parseServerStatus(idleStatus()).rate.perMinute).toBe(0);
+  });
+
+  it('reads state, time left and temperature, each null where the server has none', () => {
+    expect(parseServerStatus(busyStatus())).toMatchObject({
+      state: 'running',
+      etaSeconds: 104,
+      cpuTemperature: 67.5,
+    });
+    expect(parseServerStatus(idleStatus())).toMatchObject({
+      state: 'idle',
+      etaSeconds: null,
+      cpuTemperature: null,
+    });
+    for (const state of ['paused', 'waiting']) {
+      expect(parseServerStatus({ ...idleStatus(), state }).state).toBe(state);
+    }
+  });
+
+  it('accepts a server before 0.4 that sends none of them', () => {
+    expect(parseServerStatus(legacyStatus())).toMatchObject({
+      state: null,
+      etaSeconds: null,
+      cpuTemperature: null,
+    });
+  });
+
+  it('rejects an unknown state, a negative time left and a temperature that is not a number', () => {
+    expect(shapeErrorOf({ ...busyStatus(), state: 'sleeping' }).path).toBe('state');
+    expect(shapeErrorOf({ ...busyStatus(), etaSeconds: -5 }).path).toBe('etaSeconds');
+    expect(shapeErrorOf({ ...busyStatus(), cpuTemperature: '67' }).path).toBe('cpuTemperature');
   });
 
   it('rejects a missing section', () => {

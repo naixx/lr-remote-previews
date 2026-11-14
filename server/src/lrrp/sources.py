@@ -42,6 +42,15 @@ class Source:
 
 
 @dataclass(frozen=True)
+class Folder:
+    """A folder under a root: ``path`` relative to the root (``""`` for the root itself)."""
+
+    root: str
+    path: str
+    folder: Path
+
+
+@dataclass(frozen=True)
 class Rejection:
     """Why a requested file is not acceptable; ``code`` is one of the protocol's codes."""
 
@@ -155,6 +164,37 @@ class Resolver:
         return Source(
             root=root_id, path=path, file=file, size=info.st_size, mtime_ns=info.st_mtime_ns
         )
+
+    def resolve_folder(self, root_id: str, path: str) -> Folder | Rejection:
+        """Check a requested folder (``""`` is the root itself) as ``resolve`` checks a file.
+
+        The codes, in this order: ``unknown_root``, ``bad_path`` (the form), ``root_unavailable``,
+        ``bad_path`` (outside the root, symbolic links included), ``not_found`` (also a folder
+        the server may not read), ``not_a_folder``.
+        """
+        root = self._roots.get(root_id)
+        if root is None:
+            return Rejection("unknown_root", f"The server has no root {_quote(root_id)}")
+        problem = None if path == "" else path_problem(path)
+        if problem is not None:
+            return Rejection("bad_path", problem)
+        available = self._available.get(root_id)
+        if available is None:
+            available = self._available[root_id] = _is_dir(root.path)
+        if not available:
+            return Rejection("root_unavailable", f"The root {_quote(root_id)} is not available")
+        if not self._folder_inside(root, path):
+            return Rejection("bad_path", "The path leads outside its root")
+        folder = root.path.joinpath(*path.split("/")) if path else root.path
+        try:
+            info = os.stat(folder)
+        except (FileNotFoundError, NotADirectoryError):
+            return Rejection("not_found", "No such folder")
+        except (OSError, ValueError):
+            return Rejection("not_found", "The folder cannot be read")
+        if not stat.S_ISDIR(info.st_mode):
+            return Rejection("not_a_folder", "Not a folder")
+        return Folder(root=root_id, path=path, folder=folder)
 
     def _folder_inside(self, root: Root, folder: str) -> bool:
         """Whether a folder under a root ("" is the root itself) really lies inside it."""

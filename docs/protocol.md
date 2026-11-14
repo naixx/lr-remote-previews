@@ -298,10 +298,11 @@ For the dashboard.
 ```
 
 `state`: `running` (building, or about to), `idle` (nothing queued), `paused` (the `paused` setting is on),
-`waiting` (work is queued but the working hours have not begun). `queue`: items over all jobs.
+`waiting` (work is queued but the working hours have not begun). While a wave or a self-test is in progress the
+state is `running` whatever the settings say; otherwise `paused` wins over `idle`, and `idle` over `waiting`. `queue`: items over all jobs.
 `workers.configured`: the number of converter processes the server may run side by side; `busy`: how many run now.
 `rate.perMinute`: items built in the last `windowSeconds`, scaled to a minute; 0 when idle. `etaSeconds`: an
-estimate of the time until the queue is empty from the current rate, or `null` when there is nothing to estimate
+estimate of the time until the queue is empty from the current rate (counting files, like `rate`), or `null` when there is nothing to estimate
 (idle, paused, waiting, or no rate yet). `today`: since local midnight of the server. `rate` and `today` count
 conversions, not items: a file two jobs asked for counts once, and `rate` counts successful conversions only.
 `cache`: the DNGs kept. `cpuTemperature`: degrees Celsius of the hottest CPU sensor the server can read, or `null`.
@@ -334,8 +335,11 @@ variables only give their first values.
 ### `PATCH /api/v1/settings`
 
 A JSON object with any subset of `workers`, `batchSize`, `paused`, `workingHours` (the whole `workingHours` object
-when it is given). `200` with the settings object after the change. `422` when a value is not acceptable; nothing
-is changed then. A change takes effect with the next wave.
+when it is given). `200` with the settings object after the change. `422` when a value is not acceptable
+(including an explicit `null`, and `from` equal to `to` even when `enabled` is false); nothing is changed then.
+Fields the server does not know, and the read-only `effectiveWorkers`, are ignored, so a client may send back
+what it read. A change takes effect with the next wave. A value that was never changed this way keeps following
+the server's environment variables.
 
 ## Browsing the roots and queueing a folder
 
@@ -357,7 +361,8 @@ Query: `root` (a root id), `path` (a folder relative to the root; empty or absen
 ```
 
 `parent` is the path of the folder above, `""` for a folder directly under the root, `null` for the root itself.
-`dirs`: the sub-folders, sorted by name without regard to case; names that start with a dot are left out.
+`dirs`: the sub-folders, sorted by name without regard to case. Names that start with a dot and symbolic links are
+left out, here and in every count, and so are names a client could not send back as a path.
 `rawFiles`: the files directly in this folder that the server accepts as camera raw files; `builtFiles`: how many
 of those have their DNG in the cache now; `otherFiles`: the other files directly in this folder. Nothing is counted
 in sub-folders. `truncated` is true when the folder has more than 5000 sub-folders and the list was cut. Errors:
@@ -372,7 +377,8 @@ Queues the raw files of a folder.
 ```
 
 `recursive` (default false) also takes the files of all sub-folders (not following symbolic links, skipping names
-that start with a dot). `label` is optional; without it the jobs are labelled with the folder's path.
+that start with a dot). `label` is optional; without it the jobs are labelled with the folder's path (the root's
+id for the root itself). `path` may be absent or empty for the root.
 
 `201`:
 

@@ -6,11 +6,12 @@ with the application's lifespan (``Services``).
 
 import asyncio
 import logging
+import math
 import mimetypes
 import re
 import secrets
 import time
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -21,22 +22,32 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import AfterValidator, BaseModel, Field
+from pydantic import AfterValidator, BaseModel, Field, ValidationInfo, field_validator
 
-from lrrp import __version__, converter, sources
+from lrrp import __version__, converter, folders, runtime, sensors, sources
 from lrrp.cache import CACHE_KEY, Cache, CacheEntry
 from lrrp.display import Display, Xvfb
+from lrrp.logring import LogRing
+from lrrp.peversion import VersionCache
 from lrrp.runner import Runner, RunnerConfig, default_config
+from lrrp.runtime import Controls
 from lrrp.scheduler import Scheduler
+from lrrp.selftest import SelfTest, SelfTestBusy
 from lrrp.settings import Settings
-from lrrp.store import DATABASE_NAME, ITEM_STATES, Item, Job, NewItem, Store
+from lrrp.store import DATABASE_NAME, ITEM_STATES, Item, Job, NewItem, NewJob, Store
 
 log = logging.getLogger(__name__)
 
 NAME = "LR Remote Previews"
 API_VERSION = 1
 MAX_ITEMS_PER_JOB = 5000
+MAX_LISTED_FOLDERS = 5000
+"""The most sub-folders ``GET /api/v1/browse`` lists."""
+MAX_FOLDER_FILES = 50000
+"""The most raw files ``POST /api/v1/folders`` queues at once."""
+FOLDER_CLIENT = "dashboard"
 RATE_WINDOW_SECONDS = 60
+LOG_LIMIT_DEFAULT = 200
 DNG_MEDIA_TYPE = "image/x-adobe-dng"
 SHA256_HEADER = "X-LRRP-SHA256"
 NO_DASHBOARD = (
@@ -100,6 +111,9 @@ def describe_validation_errors(errors: Sequence[Any], shown: int = 5) -> str:
         for part in location:
             where += f"[{part}]" if isinstance(part, int) else f"{'.' if where else ''}{part}"
         message = str(error.get("msg", "invalid value"))
+        cause = (error.get("ctx") or {}).get("error")
+        if error.get("type") == "value_error" and isinstance(cause, ValueError):
+            message = str(cause)  # our own message, without pydantic's "Value error, "
         parts.append(f"{where}: {message}" if where else message)
     if len(errors) > shown:
         parts.append(f"and {len(errors) - shown} more")
@@ -124,6 +138,7 @@ ShortText = Annotated[Text, Field(max_length=100)]
 
 class Health(BaseModel):
     status: Literal["ok"]
+    busy: bool
 
 
 class ConverterInfo(BaseModel):
@@ -278,13 +293,116 @@ class JobsStatus(BaseModel):
     active: int
 
 
+ServerState = Literal["running", "idle", "paused", "waiting"]
+
+
 class Status(BaseModel):
+    state: ServerState
     queue: QueueStatus
     workers: WorkerStatus
     rate: RateStatus
+    eta_seconds: int | None = Field(serialization_alias="etaSeconds")
     today: TodayStatus
     cache: CacheStatus
     jobs: JobsStatus
+    cpu_temperature: float | None = Field(serialization_alias="cpuTemperature")
+
+
+class WorkingHoursOut(BaseModel):
+    enabled: bool
+    start: str = Field(serialization_alias="from")
+    end: str = Field(serialization_alias="to")
+
+
+class SettingsOut(BaseModel):
+    workers: Literal["auto"] | int
+    effective_workers: int = Field(serialization_alias="effectiveWorkers")
+    batch_size: int = Field(serialization_alias="batchSize")
+    paused: bool
+    working_hours: WorkingHoursOut = Field(serialization_alias="workingHours")
+
+
+class SettingsPatch(BaseModel):
+    """Any subset of the settings; each value is checked by ``lrrp.runtime``."""
+
+    workers: Any = Field(default=None, description='"auto" or 1 to 32, never 2')
+    batch_size: Any = Field(default=None, alias="batchSize", description="1 to 64")
+    paused: Any = Field(default=None, description="true or false")
+    working_hours: Any = Field(
+        default=None,
+        alias="workingHours",
+        description='{"enabled": bool, "from": "HH:MM", "to": "HH:MM"}, from != to',
+    )
+
+    @field_validator("workers", "batch_size", "paused", "working_hours")
+    @classmethod
+    def _check(cls, value: Any, info: ValidationInfo) -> Any:
+        assert info.field_name is not None
+        name = cls.model_fields[info.field_name].alias or info.field_name
+        return runtime.PARSERS[name][1](value)
+
+    def changes(self) -> dict[str, Any]:
+        """The checked values that were given, by API name."""
+        return {
+            (SettingsPatch.model_fields[field].alias or field): getattr(self, field)
+            for field in self.model_fields_set
+        }
+
+
+class FolderEntry(BaseModel):
+    name: str
+    path: str
+
+
+class BrowseAnswer(BaseModel):
+    root: str
+    path: str
+    parent: str | None
+    dirs: list[FolderEntry]
+    raw_files: int = Field(serialization_alias="rawFiles")
+    built_files: int = Field(serialization_alias="builtFiles")
+    other_files: int = Field(serialization_alias="otherFiles")
+    truncated: bool
+
+
+class FolderRequest(BaseModel):
+    root: Text
+    path: Text | None = None
+    recursive: bool = False
+    label: ShortText | None = None
+
+
+class FolderQueued(BaseModel):
+    files: int
+    already_built: int = Field(serialization_alias="alreadyBuilt")
+    jobs: list[JobOut]
+
+
+class SelfTestRequest(BaseModel):
+    root: Text | None = None
+    path: Text | None = None
+
+
+class SelfTestStep(BaseModel):
+    name: Literal["installed", "display", "warm-up", "conversion"]
+    ok: bool
+    detail: str
+
+
+class SelfTestAnswer(BaseModel):
+    ok: bool
+    steps: list[SelfTestStep]
+
+
+class LogLineOut(BaseModel):
+    time: str
+    level: str
+    logger: str
+    message: str
+
+
+class LogAnswer(BaseModel):
+    lines: list[LogLineOut]
 
 
 # --- Background services ---------------------------------------------------------------------
@@ -292,16 +410,30 @@ class Status(BaseModel):
 
 @dataclass
 class Services:
-    """What runs behind the API: the database, the cache, the converter runner, the scheduler."""
+    """What runs behind the API: the database, the cache, the converter runner, the scheduler,
+    the runtime settings and the self-test."""
 
     store: Store
     cache: Cache
     runner: Runner
     scheduler: Scheduler
     display: Display
+    controls: Controls
+    selftest: SelfTest
+    sysfs: Path | None
+    """Where sysfs is for the CPU temperature; None: ``/sys`` on Linux, nothing elsewhere."""
 
     @classmethod
-    def start(cls, settings: Settings, runner_config: RunnerConfig, display: Display) -> "Services":
+    def start(
+        cls,
+        settings: Settings,
+        runner_config: RunnerConfig,
+        display: Display,
+        *,
+        converter_version: Callable[[], str | None],
+        local_clock: Callable[[], datetime] | None = None,
+        sysfs: Path | None = None,
+    ) -> "Services":
         settings.data_dir.mkdir(parents=True, exist_ok=True)
         cache = Cache(settings.cache_dir)
         cache.prepare()
@@ -309,6 +441,18 @@ class Services:
         recovered = store.recover(time.time())
         if recovered:
             log.info("put %d item(s) left building by the last run back into the queue", recovered)
+        controls = Controls.from_settings(settings, store, local_clock)
+        current = controls.current()
+        log.info(
+            "%d converter process(es) side by side (workers: %s), batches of up to %d files%s%s",
+            controls.effective_workers(current),
+            "auto" if current.workers is None else current.workers,
+            current.batch_size,
+            "; paused" if current.paused else "",
+            f"; working hours {current.working_hours.start}-{current.working_hours.end}"
+            if current.working_hours.enabled
+            else "",
+        )
         runner = Runner(runner_config, cache.new_work_dir, display)
         scheduler = Scheduler(
             store,
@@ -318,14 +462,39 @@ class Services:
             settings.workers,
             settings.batch_size,
             job_retention_days=settings.job_retention_days,
+            controls=controls,
         )
         scheduler.start()
-        return cls(store=store, cache=cache, runner=runner, scheduler=scheduler, display=display)
+        return cls(
+            store=store,
+            cache=cache,
+            runner=runner,
+            scheduler=scheduler,
+            display=display,
+            controls=controls,
+            selftest=SelfTest(settings, runner, scheduler, converter_version),
+            sysfs=sysfs,
+        )
 
     def close(self) -> None:
         self.scheduler.stop()
         self.display.stop()
         self.store.close()
+
+    def state(self, queued: int, building: int) -> ServerState:
+        """``status.state``: a wave in progress (or a self-test's converter) is ``running`` even
+        when paused meanwhile; then ``paused``; ``idle`` with nothing queued; ``waiting`` outside
+        the working hours; else ``running`` (a wave is about to start)."""
+        if building > 0 or self.runner.busy > 0 or (queued > 0 and self.scheduler.in_wave):
+            return "running"
+        gate = self.controls.gate()
+        if gate == "paused":
+            return "paused"
+        if queued == 0:
+            return "idle"
+        if gate == "waiting":
+            return "waiting"
+        return "running"
 
 
 # --- Dependencies ----------------------------------------------------------------------------
@@ -339,8 +508,18 @@ def get_services(request: Request) -> Services:
     return request.app.state.services
 
 
+def get_versions(request: Request) -> VersionCache:
+    return request.app.state.converter_versions
+
+
+def get_log_ring(request: Request) -> LogRing:
+    return request.app.state.log_ring
+
+
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 ServicesDep = Annotated[Services, Depends(get_services)]
+VersionsDep = Annotated[VersionCache, Depends(get_versions)]
+LogRingDep = Annotated[LogRing, Depends(get_log_ring)]
 
 _bearer = HTTPBearer(auto_error=False, description="The server's token (LRRP_TOKEN).")
 
@@ -368,16 +547,17 @@ api = APIRouter(prefix="/api", dependencies=[Depends(require_token)])
 
 
 @api.get("/v1/info")
-def get_info(settings: SettingsDep) -> Info:
+def get_info(settings: SettingsDep, versions: VersionsDep) -> Info:
+    installed = converter.is_installed(settings.wineprefix, settings.converter_exe)
     return Info(
         name=NAME,
         version=__version__,
         api=API_VERSION,
         auth="token" if settings.token else "none",
         converter=ConverterInfo(
-            installed=converter.is_installed(settings.wineprefix, settings.converter_exe),
+            installed=installed,
             path=settings.converter_exe,
-            version=None,
+            version=_converter_version(settings, versions) if installed else None,
         ),
         roots=[
             RootInfo(id=root.id, label=root.label, available=_is_dir(root.path))
@@ -428,11 +608,7 @@ def create_job(body: JobRequest, settings: SettingsDep, services: ServicesDep) -
             )
         )
     if to_build and not converter.is_installed(settings.wineprefix, settings.converter_exe):
-        raise ApiError(
-            409,
-            "Adobe DNG Converter is not installed on the server, so these files cannot be built",
-            "converter_not_installed",
-        )
+        raise _converter_not_installed()
     # An empty label, client or clientId counts as none (null in the job object).
     job, items = services.store.create_job(
         body.client or None,
@@ -562,20 +738,211 @@ def get_file(key: str, services: ServicesDep) -> FileResponse:
 
 
 @api.get("/v1/status")
-def get_status(settings: SettingsDep, services: ServicesDep) -> Status:
+def get_status(services: ServicesDep) -> Status:
     now = time.time()
     midnight = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
     status = services.store.status(now - RATE_WINDOW_SECONDS, midnight.timestamp())
+    state = services.state(status.queued, status.building)
+    per_minute = status.built_recently * 60 / RATE_WINDOW_SECONDS
+    eta = None
+    if state == "running" and per_minute > 0 and status.pending_files > 0:
+        # Files, not items: two jobs that ask for one file share its build.
+        eta = math.ceil(status.pending_files * 60 / per_minute)
     return Status(
+        state=state,
         queue=QueueStatus(queued=status.queued, building=status.building),
-        workers=WorkerStatus(configured=settings.workers, busy=services.runner.busy),
-        rate=RateStatus(
-            per_minute=status.built_recently * 60 / RATE_WINDOW_SECONDS,
-            window_seconds=RATE_WINDOW_SECONDS,
+        workers=WorkerStatus(
+            configured=services.controls.effective_workers(), busy=services.runner.busy
         ),
+        rate=RateStatus(per_minute=per_minute, window_seconds=RATE_WINDOW_SECONDS),
+        eta_seconds=eta,
         today=TodayStatus(built=status.built_today, failed=status.failed_today),
         cache=CacheStatus(entries=status.cache_entries, bytes=status.cache_bytes),
         jobs=JobsStatus(active=status.active_jobs),
+        cpu_temperature=sensors.cpu_temperature(services.sysfs),
+    )
+
+
+# --- Settings --------------------------------------------------------------------------------
+
+
+@api.get("/v1/settings")
+def get_runtime_settings(services: ServicesDep) -> SettingsOut:
+    return _settings_out(services.controls)
+
+
+@api.patch("/v1/settings")
+def patch_runtime_settings(body: SettingsPatch, services: ServicesDep) -> SettingsOut:
+    services.controls.update(body.changes())
+    services.scheduler.wake()
+    return _settings_out(services.controls)
+
+
+def _settings_out(controls: Controls) -> SettingsOut:
+    current = controls.current()
+    hours = current.working_hours
+    return SettingsOut(
+        workers="auto" if current.workers is None else current.workers,
+        effective_workers=controls.effective_workers(current),
+        batch_size=current.batch_size,
+        paused=current.paused,
+        working_hours=WorkingHoursOut(enabled=hours.enabled, start=hours.start, end=hours.end),
+    )
+
+
+# --- Browsing and queueing folders -----------------------------------------------------------
+
+
+@api.get("/v1/browse")
+def browse(settings: SettingsDep, services: ServicesDep, root: str, path: str = "") -> BrowseAnswer:
+    folder = _existing_folder(settings, root, path)
+    try:
+        listing = folders.list_folder(folder)
+    except folders.FolderUnreadable:
+        raise ApiError(404, "The folder cannot be read", "not_found") from None
+    built = len(_built_keys(services, folder.root, listing.raw))
+    shown = listing.dirs[:MAX_LISTED_FOLDERS]
+    return BrowseAnswer(
+        root=folder.root,
+        path=folder.path,
+        parent=None if folder.path == "" else folder.path.rpartition("/")[0],
+        dirs=[
+            FolderEntry(name=name, path=f"{folder.path}/{name}" if folder.path else name)
+            for name in shown
+        ],
+        raw_files=len(listing.raw),
+        built_files=built,
+        other_files=listing.other,
+        truncated=len(listing.dirs) > len(shown),
+    )
+
+
+@api.post("/v1/folders", status_code=201)
+def queue_folder(body: FolderRequest, settings: SettingsDep, services: ServicesDep) -> FolderQueued:
+    folder = _existing_folder(settings, body.root, body.path or "")
+    try:
+        files = folders.find_raw_files(folder, recursive=body.recursive, limit=MAX_FOLDER_FILES)
+    except folders.FolderUnreadable:
+        raise ApiError(404, "The folder cannot be read", "not_found") from None
+    except folders.TooManyFiles:
+        raise ApiError(
+            422,
+            f"The folder has more than {MAX_FOLDER_FILES} raw files; queue its sub-folders instead",
+            "too_many_files",
+        ) from None
+    if not files:
+        return FolderQueued(files=0, already_built=0, jobs=[])
+    recipe = converter.recipe()
+    keys = [
+        sources.cache_key(folder.root, file.path, file.size, file.mtime_ns, recipe)
+        for file in files
+    ]
+    built = _built_keys(services, folder.root, files, keys)
+    to_build = len(files) - sum(key in built for key in keys)
+    if to_build and not converter.is_installed(settings.wineprefix, settings.converter_exe):
+        raise _converter_not_installed()
+    label = body.label or _folder_label(folder)
+    items = [
+        NewItem(
+            ref=str(index),
+            root=folder.root,
+            path=file.path,
+            state="ready" if key in built else "queued",
+            cache_key=key,
+            size=file.size,
+            mtime_ns=file.mtime_ns,
+        )
+        for index, (file, key) in enumerate(zip(files, keys, strict=True), start=1)
+    ]
+    per_job = MAX_ITEMS_PER_JOB
+    jobs = services.store.create_jobs(
+        [
+            NewJob(client=FOLDER_CLIENT, label=label, items=items[start : start + per_job])
+            for start in range(0, len(items), per_job)
+        ],
+        time.time(),
+    )
+    if to_build:
+        services.scheduler.wake()
+    log.info(
+        "queued the folder %r of root %r%s: %d raw file(s), %d already built, in %d job(s)",
+        folder.path,
+        folder.root,
+        " with its sub-folders" if body.recursive else "",
+        len(files),
+        len(files) - to_build,
+        len(jobs),
+    )
+    return FolderQueued(
+        files=len(files), already_built=len(files) - to_build, jobs=[_job_out(j) for j in jobs]
+    )
+
+
+def _existing_folder(settings: Settings, root: str, path: str) -> sources.Folder:
+    found = sources.Resolver({r.id: r for r in settings.roots}).resolve_folder(root, path)
+    if isinstance(found, sources.Rejection):
+        status = 422 if found.code in ("bad_path", "not_a_folder") else 404
+        raise ApiError(status, found.message, found.code)
+    return found
+
+
+def _built_keys(
+    services: Services,
+    root: str,
+    files: Sequence[folders.RawFile],
+    keys: Sequence[str] | None = None,
+) -> set[str]:
+    """The cache keys of these files whose DNG is in the cache now."""
+    if keys is None:
+        recipe = converter.recipe()
+        keys = [sources.cache_key(root, f.path, f.size, f.mtime_ns, recipe) for f in files]
+    entries = services.store.cache_entries(keys)
+    return {key for key, entry in entries.items() if services.cache.has(key, entry.size)}
+
+
+def _folder_label(folder: sources.Folder) -> str:
+    label = folder.path or folder.root
+    limit = 100
+    return label if len(label) <= limit else "…" + label[-(limit - 1) :]
+
+
+# --- The converter self-test and the log -----------------------------------------------------
+
+
+@api.post("/v1/converter/selftest")
+def converter_selftest(
+    settings: SettingsDep, services: ServicesDep, body: SelfTestRequest | None = None
+) -> SelfTestAnswer:
+    source = None
+    if body is not None and (body.root is not None or body.path is not None):
+        if body.root is None or body.path is None:
+            raise ApiError(422, "Name the file to convert with both root and path")
+        found = sources.Resolver({r.id: r for r in settings.roots}).resolve(body.root, body.path)
+        if isinstance(found, sources.Rejection):
+            raise ApiError(422, found.message, found.code)
+        source = found
+    try:
+        steps = services.selftest.run(source)
+    except SelfTestBusy:
+        raise ApiError(409, "Another converter self-test is running", "busy") from None
+    return SelfTestAnswer(
+        ok=all(step.ok for step in steps),
+        steps=[SelfTestStep.model_validate(vars(step)) for step in steps],
+    )
+
+
+@api.get("/v1/log")
+def get_log(
+    ring: LogRingDep,
+    limit: Annotated[int, Query(ge=1, le=1000)] = LOG_LIMIT_DEFAULT,
+) -> LogAnswer:
+    return LogAnswer(
+        lines=[
+            LogLineOut(
+                time=_iso(line.time), level=line.level, logger=line.logger, message=line.message
+            )
+            for line in ring.lines(limit)
+        ]
     )
 
 
@@ -603,6 +970,23 @@ def _job_cancelled() -> ApiError:
 
 def _not_in_cache() -> ApiError:
     return ApiError(404, "The DNG is not in the server's cache", "not_in_cache")
+
+
+def _converter_not_installed() -> ApiError:
+    return ApiError(
+        409,
+        "Adobe DNG Converter is not installed on the server, so these files cannot be built",
+        "converter_not_installed",
+    )
+
+
+def _converter_version(settings: Settings, versions: VersionCache) -> str | None:
+    """The converter's product version, from its executable (read again only when it changes)."""
+    try:
+        exe = converter.prefix_path(settings.wineprefix, settings.converter_exe)
+    except ValueError:
+        return None
+    return versions.get(exe)
 
 
 class _Requested(Protocol):
@@ -711,8 +1095,13 @@ def _iso(timestamp: float) -> str:
 # --- Health check and dashboard --------------------------------------------------------------
 
 
-def healthz() -> Health:
-    return Health(status="ok")
+def healthz(request: Request) -> Health:
+    """No token, and cheap: one small query (the queue's counts) and a look at the settings."""
+    services: Services | None = getattr(request.app.state, "services", None)
+    if services is None:
+        return Health(status="ok", busy=False)
+    queued, building = services.store.pending()
+    return Health(status="ok", busy=services.state(queued, building) == "running")
 
 
 def dashboard(path: str, settings: SettingsDep) -> Response:
@@ -766,25 +1155,44 @@ def create_app(
     *,
     runner_config: RunnerConfig | None = None,
     display: Display | None = None,
+    local_clock: Callable[[], datetime] | None = None,
+    sysfs: Path | None = None,
 ) -> FastAPI:
-    """Build the application. ``runner_config`` and ``display`` replace Wine and Xvfb in tests."""
+    """Build the application. ``runner_config`` and ``display`` replace Wine and Xvfb in tests,
+    ``local_clock`` the local time the working hours are checked against, and ``sysfs`` the
+    folder the CPU temperature is read from (default: ``/sys`` on Linux, nothing elsewhere)."""
+    versions = VersionCache()
+    ring = LogRing(secret=settings.token)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        services = await asyncio.to_thread(
-            Services.start,
-            settings,
-            runner_config or default_config(settings),
-            display or Xvfb(),
-        )
-        app.state.services = services
+        # The ring is attached here, not earlier: uvicorn configures logging before this runs.
+        server_log = logging.getLogger("lrrp")
+        server_log.addHandler(ring)
+        if server_log.level == logging.NOTSET and server_log.getEffectiveLevel() > logging.INFO:
+            server_log.setLevel(logging.INFO)
         try:
-            yield
+            services = await asyncio.to_thread(
+                Services.start,
+                settings,
+                runner_config or default_config(settings),
+                display or Xvfb(),
+                converter_version=lambda: _converter_version(settings, versions),
+                local_clock=local_clock,
+                sysfs=sysfs,
+            )
+            app.state.services = services
+            try:
+                yield
+            finally:
+                await asyncio.to_thread(services.close)
         finally:
-            await asyncio.to_thread(services.close)
+            server_log.removeHandler(ring)
 
     app = FastAPI(title=NAME, version=__version__, redoc_url=None, lifespan=lifespan)
     app.state.settings = settings
+    app.state.converter_versions = versions
+    app.state.log_ring = ring
     app.add_exception_handler(ApiError, _api_error)
     app.add_exception_handler(RequestValidationError, _validation_error)
     app.add_api_route("/healthz", healthz, methods=["GET"])

@@ -12,7 +12,7 @@ The roots are the folders with originals, as the container sees them. The YAML f
 import os
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Self
 
@@ -27,6 +27,7 @@ DEFAULT_CACHE_DIR = "/cache"
 DEFAULT_WEB_DIR = "/app/web"
 DEFAULT_BATCH_SIZE = 8
 MAX_BATCH_SIZE = 64
+MAX_WORKERS = 32
 DEFAULT_JOB_RETENTION_DAYS = 30
 
 ROOT_ID_PATTERN = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
@@ -50,7 +51,7 @@ class Root:
 class Settings:
     host: str
     port: int
-    token: str | None
+    token: str | None = field(repr=False)
     data_dir: Path
     cache_dir: Path
     web_dir: Path
@@ -58,8 +59,13 @@ class Settings:
     converter_exe: str
     roots: tuple[Root, ...]
     workers: int = 1
+    """Converter processes side by side, as ``LRRP_WORKERS`` gives it (``auto`` resolved)."""
     batch_size: int = DEFAULT_BATCH_SIZE
     job_retention_days: int = DEFAULT_JOB_RETENTION_DAYS
+    workers_auto: bool = False
+    """Whether ``LRRP_WORKERS`` is ``auto`` (or unset)."""
+    cpu_count: int = 1
+    """CPU threads the server may use; what ``auto`` is worked out from."""
 
     @classmethod
     def from_env(
@@ -85,6 +91,8 @@ class Settings:
                 f"prefix, such as {DEFAULT_CONVERTER_EXE!r}; got {converter_exe!r}"
             )
         config = get("LRRP_CONFIG")
+        cpus = available_cpus() if cpu_count is None else cpu_count
+        workers = get("LRRP_WORKERS")
         cache_dir = Path(get("LRRP_CACHE_DIR") or DEFAULT_CACHE_DIR)
         roots = load_roots(Path(config)) if config else ()
         _reject_dirs_under_roots({"LRRP_DATA_DIR": data_dir, "LRRP_CACHE_DIR": cache_dir}, roots)
@@ -98,11 +106,11 @@ class Settings:
             wineprefix=Path(wineprefix) if wineprefix else data_dir / "wine",
             converter_exe=converter_exe,
             roots=roots,
-            workers=_parse_workers(
-                get("LRRP_WORKERS"), available_cpus() if cpu_count is None else cpu_count
-            ),
+            workers=_parse_workers(workers, cpus),
             batch_size=_parse_batch_size(get("LRRP_BATCH_SIZE")),
             job_retention_days=_parse_job_retention_days(get("LRRP_JOB_RETENTION_DAYS")),
+            workers_auto=workers is None or workers.lower() == "auto",
+            cpu_count=cpus,
         )
 
 
@@ -137,6 +145,8 @@ def _parse_workers(value: str | None, cpu_count: int) -> int:
         raise SettingsError(f"LRRP_WORKERS must be 'auto' or a number, got {value!r}") from None
     if workers < 1:
         raise SettingsError(f"LRRP_WORKERS must be at least 1, got {workers}")
+    if workers > MAX_WORKERS:
+        raise SettingsError(f"LRRP_WORKERS must be at most {MAX_WORKERS}, got {workers}")
     if workers == 2:
         raise SettingsError(
             "LRRP_WORKERS=2 is not allowed: two converter processes side by side take twice the "

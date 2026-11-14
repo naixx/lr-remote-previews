@@ -144,7 +144,7 @@ def test_a_0_2_0_database_is_migrated_in_place(tmp_path: Path) -> None:
         assert [j.id for j in store.list_jobs(10)] == [2, 1]
     finally:
         store.close()
-    assert user_version(path) == SCHEMA_VERSION == 2
+    assert user_version(path) == SCHEMA_VERSION == 3
     assert "client_id" in columns(path, "jobs")
 
     # Opening it again changes nothing.
@@ -153,6 +153,97 @@ def test_a_0_2_0_database_is_migrated_in_place(tmp_path: Path) -> None:
         assert [(j.id, j.client_id) for j in store.list_jobs(10)] == [(2, "mine"), (1, None)]
     finally:
         store.close()
+
+
+# The schema of server 0.3.0 (schema version 2), as it created a new database.
+SCHEMA_0_3_0 = (
+    SCHEMA_0_2_0.replace(
+        "    seq INTEGER NOT NULL DEFAULT 0\n);",
+        "    seq INTEGER NOT NULL DEFAULT 0,\n    client_id TEXT\n);",
+        1,
+    )
+    + """
+CREATE INDEX IF NOT EXISTS jobs_by_client ON jobs (client_id, id);
+CREATE INDEX IF NOT EXISTS jobs_by_finished ON jobs (finished);
+"""
+)
+
+ROWS_0_3_0: list[tuple[str, tuple[object, ...]]] = [
+    (
+        "INSERT INTO jobs (id, client, label, client_id, state, created, finished, seq)"
+        " VALUES (1, 'lr-plugin/0.3.0', 'Selection', 'catalog-1', 'done', ?, ?, 3)",
+        (T0, T0 + 5),
+    ),
+    *OLD_ROWS[1:],
+]
+
+
+def create_0_3_0_database(path: Path, rows: list[tuple[str, tuple[object, ...]]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    db = sqlite3.connect(path)
+    db.executescript(f"BEGIN; {SCHEMA_0_3_0} PRAGMA user_version = 2; COMMIT;")
+    with db:
+        for sql, params in rows:
+            db.execute(sql, params)
+    db.close()
+
+
+def tables(path: Path) -> set[str]:
+    db = sqlite3.connect(path)
+    try:
+        return {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    finally:
+        db.close()
+
+
+def test_a_0_3_0_database_is_migrated_in_place(tmp_path: Path) -> None:
+    path = tmp_path / "lrrp.sqlite3"
+    create_0_3_0_database(path, ROWS_0_3_0)
+    assert "settings" not in tables(path)
+    assert "client_id" in columns(path, "jobs")
+
+    store = Store(path)
+    try:
+        job = store.get_job(1)
+        assert job is not None
+        assert (job.client, job.label, job.client_id) == (
+            "lr-plugin/0.3.0",
+            "Selection",
+            "catalog-1",
+        )
+        assert (job.state, job.seq, job.counts) == ("done", 3, {"ready": 1, "rejected": 1})
+        assert store.cache_entry(KEY_A) is not None
+        assert store.status(0, 0).built_today == 1
+        assert store.settings() == {}
+        store.save_settings({"paused": True, "workers": "auto"})
+        assert store.settings() == {"paused": True, "workers": "auto"}
+    finally:
+        store.close()
+    assert user_version(path) == SCHEMA_VERSION == 3
+    assert "settings" in tables(path)
+
+    store = Store(path)
+    try:
+        assert store.settings() == {"paused": True, "workers": "auto"}
+        assert [j.client_id for j in store.list_jobs(10)] == ["catalog-1"]
+    finally:
+        store.close()
+
+
+def test_the_server_starts_on_a_0_3_0_database(harness: Harness) -> None:
+    create_0_3_0_database(harness.database, ROWS_0_3_0)
+    with harness.client(workers=3, batch_size=8) as client:
+        assert client.get("/api/v1/jobs/1").json()["job"]["clientId"] == "catalog-1"
+        settings = client.get("/api/v1/settings").json()
+        assert (settings["workers"], settings["batchSize"], settings["paused"]) == (3, 8, False)
+        response = client.patch("/api/v1/settings", json={"paused": True, "batchSize": 2})
+        assert response.status_code == 200
+    with harness.client(workers=3, batch_size=8) as client:
+        settings = client.get("/api/v1/settings").json()
+        assert (settings["batchSize"], settings["paused"]) == (2, True)
+        assert client.get("/api/v1/status").json()["state"] == "paused"
+        assert [job["id"] for job in client.get("/api/v1/jobs").json()["jobs"]] == [1]
+    assert user_version(harness.database) == SCHEMA_VERSION
 
 
 def test_a_database_of_a_newer_server_is_refused(tmp_path: Path) -> None:

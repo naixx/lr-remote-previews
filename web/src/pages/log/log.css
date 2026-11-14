@@ -1,0 +1,131 @@
+.log-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-4);
+}
+
+.log-toolbar__state {
+  flex: 1 1 200px;
+  color: var(--color-text-muted);
+  font-size: 13px;
+}
+
+.log-toolbar__count {
+  color: var(--color-text-muted);
+  font-size: 13px;
+}
+
+.log-frame {
+  position: relative;
+}
+
+.log {
+  height: min(70vh, 640px);
+  min-height: 240px;
+  overflow: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.log__empty {
+  padding: var(--space-4);
+  color: var(--color-text-muted);
+  font-family: var(--font-sans);
+}
+
+.log__lines {
+  margin: 0;
+  padding: var(--space-2) 0;
+  list-style: none;
+}
+
+/* Time, level and logger in fixed columns; the message wraps under nothing else. */
+.log__line {
+  display: grid;
+  grid-template-columns: minmax(8.5ch, max-content) 9ch minmax(0, 16ch) minmax(0, 1fr);
+  gap: 0 var(--space-3);
+  padding: 1px var(--space-4);
+  border-left: 3px solid transparent;
+}
+
+.log__time {
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.log__logger {
+  overflow: hidden;
+  color: var(--color-text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.log__message {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* The level is written out on every line; weight, a border style and colour only add to it. */
+.log__level {
+  font-weight: 600;
+}
+
+.log__line--debug {
+  color: var(--color-text-muted);
+}
+
+.log__line--debug .log__level {
+  font-weight: 400;
+}
+
+.log__line--warning {
+  border-left-style: dashed;
+  border-left-color: var(--color-warn);
+  background: var(--color-warn-soft);
+}
+
+.log__line--warning .log__level {
+  color: var(--color-warn);
+}
+
+.log__line--error {
+  border-left-color: var(--color-bad);
+  background: var(--color-bad-soft);
+}
+
+.log__line--error .log__level {
+  color: var(--color-bad);
+  font-weight: 800;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.log-frame__jump {
+  position: absolute;
+  right: var(--space-4);
+  bottom: var(--space-4);
+  box-shadow: var(--shadow-card);
+}
+
+@media (max-width: 640px) {
+  .log {
+    font-size: 12px;
+  }
+
+  /* Time, level and logger on one row, the message under them. */
+  .log__line {
+    grid-template-columns: max-content max-content minmax(0, 1fr);
+    gap: 0 var(--space-2);
+    padding: 3px var(--space-3);
+  }
+
+  .log__message {
+    grid-column: 1 / -1;
+  }
+}

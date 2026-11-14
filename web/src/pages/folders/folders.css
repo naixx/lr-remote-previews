@@ -1,0 +1,100 @@
+/* Folder browser */
+
+.breadcrumb__list {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 14px;
+}
+
+.breadcrumb__item {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.breadcrumb__item + .breadcrumb__item::before {
+  content: '/';
+  margin: 0 var(--space-2);
+  color: var(--color-text-muted);
+}
+
+.breadcrumb__item [aria-current='page'] {
+  font-weight: 650;
+}
+
+.folder-facts {
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+}
+
+.queue-folder {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--color-border);
+}
+
+.queue-folder__controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3) var(--space-5);
+}
+
+.folder-up::before {
+  content: '↑ ';
+}
+
+.folder-filter {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  max-width: 360px;
+}
+
+.folder-filter .field-label {
+  margin-top: 0;
+}
+
+.folder-filter .input {
+  flex: none;
+}
+
+.folder-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 240px), 1fr));
+  gap: 2px var(--space-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.folder-link {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 32px;
+  padding: 2px 0;
+  overflow-wrap: anywhere;
+}
+
+.folder-icon {
+  width: 16px;
+  height: 12px;
+  flex: none;
+  border: 1.5px solid currentColor;
+  border-radius: 2px 2px 3px 3px;
+  opacity: 0.7;
+}
+
+.folder-roots .folder-link {
+  display: inline;
+  min-height: 0;
+  padding: 0;
+}

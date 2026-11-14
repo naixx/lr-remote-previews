@@ -5,8 +5,37 @@ import {
   formatLocalTime,
   formatQuantity,
   formatRelative,
+  formatTemperature,
+  formatTimeLeft,
+  plural,
   rateParts,
 } from './format';
+
+describe('formatTimeLeft', () => {
+  it('stays rough: minutes, then hours and minutes, then days', () => {
+    expect(formatTimeLeft(0)).toBe('less than a minute left');
+    expect(formatTimeLeft(29)).toBe('less than a minute left');
+    expect(formatTimeLeft(104)).toBe('about 2 min left');
+    expect(formatTimeLeft(59 * 60)).toBe('about 59 min left');
+    expect(formatTimeLeft(3600)).toBe('about 1 h left');
+    expect(formatTimeLeft(8100)).toBe('about 2 h 15 min left');
+    expect(formatTimeLeft(47 * 3600)).toBe('about 47 h left');
+    expect(formatTimeLeft(5 * 86400)).toBe('about 5 days left');
+  });
+});
+
+describe('formatTemperature and plural', () => {
+  it('rounds to whole degrees', () => {
+    expect(formatTemperature(67.5)).toBe('68 °C');
+    expect(formatTemperature(41.2)).toBe('41 °C');
+  });
+
+  it('picks the word for the count and groups digits', () => {
+    expect(plural(1, 'file', 'files')).toBe('1 file');
+    expect(plural(0, 'file', 'files')).toBe('0 files');
+    expect(plural(1384, 'file', 'files')).toBe('1,384 files');
+  });
+});
 
 describe('formatCount', () => {
   it('groups thousands as the English page does', () => {

@@ -3,7 +3,9 @@
 The server part of LR Remote Previews: a FastAPI application (Python package `lrrp`) that runs next to the photo
 originals, answers the plug-in and the dashboard, and serves the built dashboard. It takes jobs (lists of raw files),
 builds their smart preview DNGs with Adobe DNG Converter under Wine in the background, keeps them in a cache and
-serves them, by job or by a lookup that needs no job (stages 1 and 2 of the [plan](../docs/plan.md)).
+serves them, by job or by a lookup that needs no job (stages 1 and 2 of the [plan](../docs/plan.md)). For the
+dashboard (stage 3) it also reports its state, takes settings that change while it runs (processes, batch size, pause,
+working hours), browses the roots and queues whole folders, tests the converter step by step and keeps its recent log.
 
 In production it runs in the container built from [`deploy/`](../deploy/). This page is about running it from source.
 
@@ -60,8 +62,8 @@ Environment variables. An empty variable counts as unset.
 | `LRRP_WEB_DIR` | `/app/web` | The built dashboard (`web/dist`) |
 | `LRRP_WINEPREFIX` | `<LRRP_DATA_DIR>/wine` | The Wine prefix the converter is installed into |
 | `LRRP_CONVERTER_EXE` | `C:\Program Files\Adobe\Adobe DNG Converter\Adobe DNG Converter.exe` | The converter, as a Windows path inside the Wine prefix |
-| `LRRP_WORKERS` | `auto` | Converter processes run side by side: `auto` or a number. `auto` is 6 with 16 or more CPU threads, 4 with 8 or more, 3 with 6 or more, else 1. **2 is refused**: two converter processes side by side take twice the CPU time per photo (measured; the cause is unknown) |
-| `LRRP_BATCH_SIZE` | `8` | Files given to one converter process at a time, 1 to 64 |
+| `LRRP_WORKERS` | `auto` | First value of the `workers` setting (below): converter processes run side by side, `auto` or 1 to 32. `auto` is 6 with 16 or more CPU threads, 4 with 8 or more, 3 with 6 or more, else 1. **2 is refused**: two converter processes side by side take twice the CPU time per photo (measured; the cause is unknown) |
+| `LRRP_BATCH_SIZE` | `8` | First value of the `batchSize` setting: files given to one converter process at a time, 1 to 64 |
 | `LRRP_JOB_RETENTION_DAYS` | `30` | Days a job is kept after it finished (or was cancelled), a whole number of at least 1. Its DNGs stay in the cache |
 
 The converter is found when that Windows path exists in the prefix: `C:\x\y` is looked up as
@@ -70,6 +72,23 @@ The converter is found when that Windows path exists in the prefix: `C:\x\y` is 
 
 `LRRP_DATA_DIR` and `LRRP_CACHE_DIR` must not lie inside a root: the server writes there, and it never writes under a
 root of originals.
+
+### Settings that change while the server runs
+
+`GET`/`PATCH /api/v1/settings` (the dashboard's settings page):
+
+| Setting | First value | Meaning |
+|---|---|---|
+| `workers` | `LRRP_WORKERS` | `"auto"` or 1 to 32, never 2; `effectiveWorkers` in the answer is what it comes to here |
+| `batchSize` | `LRRP_BATCH_SIZE` | 1 to 64 |
+| `paused` | `false` | No new wave starts; a wave that runs finishes |
+| `workingHours` | off, 22:00 to 07:00 | `{"enabled", "from", "to"}`: waves start only from `from` up to `to` (`HH:MM`, the server's local time; `from` later than `to` crosses midnight; `from` equal to `to` is refused) |
+
+A value changed through the API is kept in the database and wins over the environment from then on, across
+restarts; a value never changed follows the environment. A change applies from the next wave on. The scheduler looks
+at the pause and the working hours before every wave, and at least every 10 seconds while it may not start one, so the
+window opens within 10 seconds of its time. In a container the local time is the container's: set `TZ` (and have the
+time zone data in the image) for working hours in local time; without it they are UTC.
 
 ### Roots
 
@@ -98,9 +117,10 @@ the entry.
   nanoseconds and the converter options. A changed original gets a new key; so do new options. DNGs are stored as
   `<LRRP_CACHE_DIR>/<key[0:2]>/<key>.dng`, renamed into place from the batch folder (same file system), and indexed in
   the database with their size, SHA-256 and the original name and size the DNG records.
-- **One scheduler thread** works in waves. It takes up to `LRRP_WORKERS × LRRP_BATCH_SIZE` distinct files from the head
+- **One scheduler thread** works in waves. Before each wave it reads the settings above: paused or outside the
+  working hours, it starts none. It takes up to `workers × batchSize` distinct files from the head
   of the queue (two jobs that ask for the same file share one build), picks the number of converter processes for the
-  wave (as many as needed, at most `LRRP_WORKERS`, and three instead of two, or one when there are only two files),
+  wave (as many as needed, at most `workers`, and three instead of two, or one when there are only two files),
   splits the files evenly so that no batch holds two files with the same base name, checks every source again
   (changed or gone: `source_changed`), starts all processes together, each in its own output folder and process
   group, and waits for all of them before the next wave. So the number of converter processes running at the same
@@ -131,9 +151,21 @@ the entry.
   or were cancelled more than `LRRP_JOB_RETENTION_DAYS` days ago; a cancelled job whose last items are still
   building waits for them. The cache and its index are not touched, so the DNGs stay available through a lookup or
   a new job, and their keys stay valid. Job ids are never reused.
+- **A folder** queued from the dashboard becomes one job per `maxItemsPerJob` raw files (client `dashboard`), at most
+  50000 files at once. The walk never follows a symbolic link and skips names that start with a dot (so macOS's
+  `._IMG_0001.ARW` files are not taken for raw files); a name a client could not send back as a path (a backslash,
+  bytes that are not UTF-8) is skipped too. Browsing counts by the same rules. Each raw file costs one `stat` (its
+  size and time make its cache key) and the cache index is asked in batches, as for a lookup.
+- **The converter self-test** waits for a running wave to finish and holds the scheduler until it is done, so its
+  converter processes never run beside a wave's (it runs one at a time). It uses the runner's own preparation (display,
+  wineserver, warm-up) and its own batch run and checks; the DNG it makes is thrown away, and nothing is written to the
+  cache or the database.
+- **The log** keeps the last 1000 records of the `lrrp` loggers in memory (not uvicorn's request lines). The token is
+  never logged; as a guard, it is replaced by `[token]` in every record that reaches the console or the log endpoint,
+  and the converter's environment does not get `LRRP_TOKEN`.
 - **The database** carries a schema version. A database of an older server is brought up to date in place at start
-  (0.3.0 adds a column for `clientId` to a 0.2.0 database); nothing is dropped. A database of a newer server stops
-  the start with a message.
+  (0.3.0 adds a column for `clientId` to a 0.2.0 database, 0.4.0 a table for the settings); nothing is dropped. A
+  database of a newer server stops the start with a message.
 
 ## API
 
@@ -141,8 +173,8 @@ The contract is [docs/protocol.md](../docs/protocol.md); every call in it is imp
 
 | Call | Token | Answer |
 |---|---|---|
-| `GET /healthz` | never | `{"status": "ok"}` |
-| `GET /api/v1/info` | when configured | Name, version, protocol version, auth mode, converter state, roots, capabilities |
+| `GET /healthz` | never | `{"status": "ok", "busy": false}`; `busy` while `status.state` is `running` |
+| `GET /api/v1/info` | when configured | Name, version, protocol version, auth mode, converter state and version, roots, capabilities |
 | `POST /api/v1/jobs` | when configured | Create a job from a list of files, optionally with the client's `clientId` |
 | `GET /api/v1/jobs` | when configured | Jobs, newest first; `state` and `clientId` filter them |
 | `GET /api/v1/jobs/{id}` | when configured | One job |
@@ -152,7 +184,13 @@ The contract is [docs/protocol.md](../docs/protocol.md); every call in it is imp
 | `GET /api/v1/items/{id}/file` | when configured | The DNG of a ready item |
 | `POST /api/v1/lookup` | when configured | For a list of files: `ready` (with the result), `pending`, `absent` or `rejected`, without a job |
 | `GET /api/v1/files/{key}` | when configured | The DNG with this cache key (`result.key` of an item or a lookup) |
-| `GET /api/v1/status` | when configured | Queue, workers, rate, today's counts, cache, active jobs |
+| `GET /api/v1/status` | when configured | State, queue, workers, rate, time left, today's counts, cache, active jobs, CPU temperature |
+| `GET /api/v1/settings` | when configured | The settings that change while the server runs |
+| `PATCH /api/v1/settings` | when configured | Change any of them; `422` and no change for a bad value |
+| `GET /api/v1/browse` | when configured | A folder of a root: its sub-folders, and how many raw files (and built ones) and other files it has |
+| `POST /api/v1/folders` | when configured | Queue the raw files of a folder, optionally with its sub-folders |
+| `POST /api/v1/converter/selftest` | when configured | Check the converter step by step, optionally converting one file |
+| `GET /api/v1/log` | when configured | The newest of the last 1000 log lines, oldest first |
 | `GET /docs`, `GET /openapi.json` | no | Generated OpenAPI description |
 
 `GET /api/v1/info` looks like this:
@@ -160,13 +198,13 @@ The contract is [docs/protocol.md](../docs/protocol.md); every call in it is imp
 ```json
 {
   "name": "LR Remote Previews",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "api": 1,
   "auth": "token",
   "converter": {
-    "installed": false,
+    "installed": true,
     "path": "C:\\Program Files\\Adobe\\Adobe DNG Converter\\Adobe DNG Converter.exe",
-    "version": null
+    "version": "17.2"
   },
   "roots": [{"id": "archive", "label": "Archive", "available": true}],
   "capabilities": {
@@ -177,6 +215,17 @@ The contract is [docs/protocol.md](../docs/protocol.md); every call in it is imp
   }
 }
 ```
+
+`converter.version` is the `ProductVersion` recorded in the executable's version resource (`17.2` for Adobe DNG
+Converter 17.2), read without running it and with a few small reads (the file is about 227 MB); it is read again only
+when the file's size or modification time changes, and is `null` when it cannot be read.
+
+`status.state` is `running` while a wave (or a self-test's converter) runs, also when `paused` was switched on
+meanwhile, and when work is queued and a wave may start; then `paused`, `idle` (nothing queued) or `waiting` (queued,
+outside the working hours). `etaSeconds` is the files still queued or building (a file two jobs want counts once)
+divided by the rate of the last 60 seconds, only while `running`. `cpuTemperature` is the hottest reading of the CPU's
+own sensors under `/sys/class/hwmon` (`coretemp`, `k10temp`, `zenpower`; on AMD `Tdie` rather than an offset `Tctl`),
+else of the CPU thermal zones under `/sys/class/thermal`; `null` when there is none (always off Linux).
 
 `roots[].available` is `true` when the root's folder exists. A missing or wrong token gives `401` with
 `{"detail": "Missing bearer token"}` or `{"detail": "Invalid token"}`. Unknown paths under `/api/` give a JSON `404`.
@@ -192,13 +241,19 @@ Every other `GET` path serves the dashboard from `LRRP_WEB_DIR`: an existing fil
 |---|---|
 | `src/lrrp/__main__.py` | `python -m lrrp`: reads the settings, sets up logging and starts uvicorn |
 | `src/lrrp/settings.py` | Settings from the environment and the roots file |
+| `src/lrrp/runtime.py` | The settings that change while the server runs: checks, keeping them, working hours, whether a wave may start |
 | `src/lrrp/app.py` | The FastAPI application: the API, the dashboard, the background services' lifespan |
-| `src/lrrp/sources.py` | Checking a requested root and path; the cache key |
-| `src/lrrp/store.py` | The SQLite database: jobs, items, the cache index, the build log |
+| `src/lrrp/sources.py` | Checking a requested root and path (file or folder); the cache key |
+| `src/lrrp/folders.py` | Listing a folder and finding the raw files of a folder tree |
+| `src/lrrp/store.py` | The SQLite database: jobs, items, the cache index, the build log, the changed settings |
 | `src/lrrp/cache.py` | The DNG files of the cache and the batch folders |
 | `src/lrrp/dng.py` | Reading `OriginalRawFileName` and `OriginalDefaultFinalSize` from a DNG |
 | `src/lrrp/converter.py` | Finding the converter in the Wine prefix, its command line, and the measured facts about running it |
 | `src/lrrp/runner.py` | Running the converter: wave planning, processes, timeouts, the warm-up, checking outputs |
 | `src/lrrp/display.py` | The one Xvfb the converter uses |
 | `src/lrrp/scheduler.py` | The background thread that turns the queue into waves and publishes the results |
-| `tests/` | pytest tests; `tests/fake_converter.py` stands in for the converter |
+| `src/lrrp/selftest.py` | The converter self-test |
+| `src/lrrp/peversion.py` | Reading the product version from a Windows executable |
+| `src/lrrp/sensors.py` | The CPU temperature from Linux sysfs |
+| `src/lrrp/logring.py` | The last log records in memory; keeping the token out of log lines |
+| `tests/` | pytest tests; `tests/fake_converter.py` stands in for the converter, `tests/pe_builder.py` makes small executables with a version resource |

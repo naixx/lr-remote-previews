@@ -1,0 +1,90 @@
+/* Jobs list and job page */
+
+.back-link::before {
+  content: '← ';
+}
+
+/* Data of a previous filter or page, shown dimmed until the new one arrives. */
+.is-stale {
+  opacity: 0.55;
+  transition: opacity 150ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .is-stale {
+    transition: none;
+  }
+}
+
+.client-id {
+  font-size: 13px;
+  font-weight: 400;
+  overflow-wrap: anywhere;
+}
+
+.job-progress {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.job-progress__fraction {
+  flex: none;
+  font-size: 14px;
+  font-weight: 600;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.items-table td:first-child {
+  width: 45%;
+}
+
+.items-table td:nth-child(2) {
+  width: 1%;
+  white-space: nowrap;
+}
+
+.item-name {
+  display: block;
+  font-weight: 600;
+}
+
+.item-where {
+  display: block;
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+.item-error {
+  display: block;
+}
+
+.item-error__code {
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--color-surface-muted);
+  font-size: 12px;
+}
+
+.item-error__hint {
+  display: block;
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+@media (max-width: 640px) {
+  .items-table td:first-child,
+  .items-table td:nth-child(2) {
+    width: 100%;
+  }
+
+  /* The file name, the state badge and the details explain themselves. */
+  .items-table td[data-label]::before {
+    content: none;
+  }
+
+  .items-table td + td {
+    padding-top: var(--space-1);
+  }
+}

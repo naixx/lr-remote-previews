@@ -1,4 +1,5 @@
-"""The server's state in SQLite (WAL): jobs, their items, the cache index and a log of builds.
+"""The server's state in SQLite (WAL): jobs, their items, the cache index, a log of builds and
+the settings changed through the API.
 
 One connection, used from the API threads and the scheduler thread, serialised by a lock. Every
 change runs in one ``BEGIN IMMEDIATE`` transaction.
@@ -9,22 +10,23 @@ have distinct ``seq`` values, and a client that asks for ``seq > since`` sees ev
 The counter lives in the database, so a restart of the server never sets it back.
 
 Schema versions (``PRAGMA user_version``): 1 is server 0.2.0; 2 (server 0.3.0) adds
-``jobs.client_id``. An older database is brought up to date in place when it is opened; nothing
-is dropped.
+``jobs.client_id``; 3 (server 0.4.0) adds the ``settings`` table. An older database is brought up
+to date in place when it is opened; nothing is dropped.
 """
 
+import json
 import sqlite3
 import threading
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from lrrp.cache import CacheEntry
 
 DATABASE_NAME = "lrrp.sqlite3"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 ITEM_STATES = ("queued", "building", "ready", "failed", "rejected", "cancelled")
 JOB_STATES = ("active", "done", "cancelled")
@@ -72,6 +74,10 @@ CREATE TABLE IF NOT EXISTS builds (
     id INTEGER PRIMARY KEY,
     finished REAL NOT NULL,
     ok INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS settings (
+    name TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 );
 """
 
@@ -151,9 +157,19 @@ class Candidate:
 
 
 @dataclass(frozen=True)
+class NewJob:
+    client: str | None
+    label: str | None
+    items: Sequence[NewItem]
+    client_id: str | None = None
+
+
+@dataclass(frozen=True)
 class Status:
     queued: int
     building: int
+    pending_files: int
+    """Distinct files (cache keys) among the queued and building items."""
     built_recently: int
     built_today: int
     failed_today: int
@@ -231,50 +247,19 @@ class Store:
     ) -> tuple[Job, list[Item]]:
         """Add a job; return it and its items as created, before the scheduler can touch them."""
         with self._lock:
-            job_id = self._insert_job(client, label, client_id, items, now)
+            with self._transaction() as db:
+                job_id = _insert_job(db, NewJob(client, label, items, client_id), now)
             job = self.get_job(job_id)
             assert job is not None
             return job, self.items_of_job(job_id)
 
-    def _insert_job(
-        self,
-        client: str | None,
-        label: str | None,
-        client_id: str | None,
-        items: Sequence[NewItem],
-        now: float,
-    ) -> int:
-        with self._transaction() as db:
-            cursor = db.execute(
-                "INSERT INTO jobs (client, label, client_id, state, created, seq)"
-                " VALUES (?, ?, ?, 'active', ?, 0)",
-                (client, label, client_id, now),
-            )
-            job_id = cursor.lastrowid or 0
-            db.executemany(
-                "INSERT INTO items (job_id, ref, root, path, state, seq, error_code, error_message,"
-                " cache_key, size, mtime_ns, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                [
-                    (
-                        job_id,
-                        item.ref,
-                        item.root,
-                        item.path,
-                        item.state,
-                        seq,
-                        item.error_code,
-                        item.error_message,
-                        item.cache_key,
-                        item.size,
-                        item.mtime_ns,
-                        now,
-                    )
-                    for seq, item in enumerate(items, start=1)
-                ],
-            )
-            db.execute("UPDATE jobs SET seq = ? WHERE id = ?", (len(items), job_id))
-            _settle(db, [job_id], now)
-        return job_id
+    def create_jobs(self, jobs: Sequence[NewJob], now: float) -> list[Job]:
+        """Add several jobs in one transaction; return them as created."""
+        with self._lock:
+            with self._transaction() as db:
+                ids = [_insert_job(db, job, now) for job in jobs]
+            created = [self.get_job(job_id) for job_id in ids]
+        return [job for job in created if job is not None]
 
     def get_job(self, job_id: int) -> Job | None:
         with self._lock:
@@ -491,6 +476,26 @@ class Store:
             ).fetchall()
             _change(db, rows, "failed", now, code, message)
 
+    # --- Settings --------------------------------------------------------------------------------
+
+    def settings(self) -> dict[str, Any]:
+        """The settings changed through the API, by name, as they were saved."""
+        found: dict[str, Any] = {}
+        for name, value in self._query("SELECT name, value FROM settings"):
+            try:
+                found[name] = json.loads(value)
+            except ValueError:
+                continue
+        return found
+
+    def save_settings(self, values: Mapping[str, Any]) -> None:
+        """Save these settings (JSON values), replacing what was saved under their names."""
+        with self._transaction() as db:
+            db.executemany(
+                "INSERT OR REPLACE INTO settings (name, value) VALUES (?, ?)",
+                [(name, json.dumps(value)) for name, value in values.items()],
+            )
+
     # --- The cache index and the status ---------------------------------------------------------
 
     def cache_entries(self, keys: Iterable[str]) -> dict[str, CacheEntry]:
@@ -517,14 +522,22 @@ class Store:
                 found.add(key)
         return found
 
+    def pending(self) -> tuple[int, int]:
+        """The numbers of queued and of building items over all jobs."""
+        counts = dict(
+            self._query(
+                "SELECT state, COUNT(*) FROM items WHERE state IN ('queued', 'building')"
+                " GROUP BY state"
+            )
+        )
+        return counts.get("queued", 0), counts.get("building", 0)
+
     def status(self, recent_since: float, today_since: float) -> Status:
         with self._lock:
-            pending = dict(
-                self._query(
-                    "SELECT state, COUNT(*) FROM items WHERE state IN ('queued', 'building')"
-                    " GROUP BY state"
-                )
-            )
+            queued, building = self.pending()
+            (files,) = self._query(
+                "SELECT COUNT(DISTINCT cache_key) FROM items WHERE state IN ('queued', 'building')"
+            )[0]
             (recent,) = self._query(
                 "SELECT COUNT(*) FROM builds WHERE ok = 1 AND finished >= ?", (recent_since,)
             )[0]
@@ -536,8 +549,9 @@ class Store:
             entries, size = self._query("SELECT COUNT(*), COALESCE(SUM(size), 0) FROM cache")[0]
             (active,) = self._query("SELECT COUNT(*) FROM jobs WHERE state = 'active'")[0]
         return Status(
-            queued=pending.get("queued", 0),
-            building=pending.get("building", 0),
+            queued=queued,
+            building=building,
+            pending_files=files,
             built_recently=recent,
             built_today=built,
             failed_today=failed,
@@ -545,6 +559,39 @@ class Store:
             cache_bytes=size,
             active_jobs=active,
         )
+
+
+def _insert_job(db: sqlite3.Connection, job: NewJob, now: float) -> int:
+    cursor = db.execute(
+        "INSERT INTO jobs (client, label, client_id, state, created, seq)"
+        " VALUES (?, ?, ?, 'active', ?, 0)",
+        (job.client, job.label, job.client_id, now),
+    )
+    job_id = cursor.lastrowid or 0
+    db.executemany(
+        "INSERT INTO items (job_id, ref, root, path, state, seq, error_code, error_message,"
+        " cache_key, size, mtime_ns, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            (
+                job_id,
+                item.ref,
+                item.root,
+                item.path,
+                item.state,
+                seq,
+                item.error_code,
+                item.error_message,
+                item.cache_key,
+                item.size,
+                item.mtime_ns,
+                now,
+            )
+            for seq, item in enumerate(job.items, start=1)
+        ],
+    )
+    db.execute("UPDATE jobs SET seq = ? WHERE id = ?", (len(job.items), job_id))
+    _settle(db, [job_id], now)
+    return job_id
 
 
 def _change(

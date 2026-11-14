@@ -37,7 +37,8 @@ describe('OverviewPage', () => {
 
     const server = await screen.findByRole('region', { name: 'Server' });
     expect(within(server).getByText('LR Remote Previews')).toBeTruthy();
-    expect(within(server).getByText('0.2.0')).toBeTruthy();
+    expect(within(server).getByText('0.4.0')).toBeTruthy();
+    expect(document.title).toBe('Overview · LR Remote Previews');
     expect(within(server).getByText('Token required')).toBeTruthy();
     expect(within(server).getByText('1')).toBeTruthy();
     expect(screen.queryByText('Connecting to the server…')).toBeNull();
@@ -159,19 +160,21 @@ describe('OverviewPage', () => {
     expect(server.authOf('info', 0)).toBe('Bearer old-token');
   });
 
-  it('forgets the token on request and asks for it again', async () => {
+  it('tries again when the same token is entered once more', async () => {
     window.localStorage.setItem(TOKEN_STORAGE_KEY, 'secret-token');
     const server = idleServer();
+    server.reply('info', UNAUTHORIZED, 401);
     const user = userEvent.setup();
     renderOverview(server);
 
-    await screen.findByRole('region', { name: 'Server' });
-    server.reply('info', UNAUTHORIZED, 401);
-    await user.click(screen.getByRole('button', { name: 'Forget token' }));
+    await screen.findByRole('heading', { name: 'Access token required' });
+    expect(document.title).toBe('Access token required · LR Remote Previews');
+    // The server accepts the token again (it was restarted with it, say).
+    server.reply('info', sampleInfo());
+    await user.type(screen.getByLabelText('Access token'), 'secret-token');
+    await user.click(screen.getByRole('button', { name: 'Save token' }));
 
-    expect(await screen.findByRole('heading', { name: 'Access token required' })).toBeTruthy();
-    expect(window.localStorage.getItem(TOKEN_STORAGE_KEY)).toBeNull();
-    expect(server.authOf('info', -1)).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Forget token' })).toBeNull();
+    expect(await screen.findByRole('region', { name: 'Server' })).toBeTruthy();
+    expect(server.calls('info')).toBe(2);
   });
 });

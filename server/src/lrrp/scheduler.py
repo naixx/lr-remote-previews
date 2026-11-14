@@ -12,24 +12,32 @@ One thread for the whole server, so the event loop never waits for the converter
 Items of a wave that a shutdown interrupts stay ``building``; the next start puts them back into
 the queue (``Store.recover``).
 
+Before every wave the scheduler reads the runtime settings (``lrrp.runtime.Controls``): paused,
+or outside the working hours, it starts no wave (a wave that runs finishes); a changed number of
+processes or batch size applies from the next wave on. A wave runs while holding a lock that the
+converter self-test takes too (``hold``), so the two never run converters at the same time.
+
 The same thread deletes expired jobs: at start and then once a day, between waves.
 """
 
 import logging
 import threading
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 
 from lrrp import sources
 from lrrp.cache import Cache
 from lrrp.runner import BatchFile, FileResult, Runner, plan_wave
+from lrrp.runtime import Controls, RuntimeSettings
 from lrrp.settings import DEFAULT_JOB_RETENTION_DAYS, Root
 from lrrp.store import Candidate, Store
 
 log = logging.getLogger(__name__)
 
 IDLE_WAIT = 10.0
-"""Seconds the scheduler sleeps when the queue is empty, unless woken earlier."""
+"""Seconds the scheduler sleeps when the queue is empty, or no wave may start (paused, outside
+the working hours, a self-test running), unless woken earlier."""
 
 DAY = 24 * 3600.0
 
@@ -48,18 +56,24 @@ class Scheduler:
         batch_size: int,
         clock: Callable[[], float] = time.time,
         job_retention_days: int = DEFAULT_JOB_RETENTION_DAYS,
+        controls: Controls | None = None,
     ) -> None:
+        """``controls`` gives the settings of every wave; without it, ``workers`` and
+        ``batch_size`` are used for all of them."""
         self._store = store
         self._cache = cache
         self._runner = runner
         self._roots: Mapping[str, Root] = {root.id: root for root in roots}
-        self._workers = workers
-        self._batch_size = batch_size
+        self.controls = controls or Controls(
+            RuntimeSettings(workers=workers, batch_size=batch_size), cpu_count=1
+        )
         self._clock = clock
         self._job_retention = job_retention_days * DAY
         self._next_expiry = float("-inf")
         self._wake = threading.Event()
         self._stopping = threading.Event()
+        self._wave_lock = threading.Lock()
+        self._in_wave = False
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
@@ -82,8 +96,20 @@ class Scheduler:
         return deleted
 
     def wake(self) -> None:
-        """Something was queued: look at the queue now."""
+        """Something was queued, or a setting changed: look at the queue now."""
         self._wake.set()
+
+    @property
+    def in_wave(self) -> bool:
+        """Whether the scheduler is working on a wave now."""
+        return self._in_wave
+
+    @contextmanager
+    def hold(self) -> Iterator[None]:
+        """Wait for a running wave to finish, and start none until the block ends."""
+        with self._wave_lock:
+            yield
+        self.wake()
 
     def stop(self, timeout: float = 30.0) -> None:
         """Kill running converters, finish the current step and end the thread."""
@@ -102,23 +128,35 @@ class Scheduler:
                 self.expire_jobs_if_due()
             except Exception:
                 log.exception("cannot delete expired jobs; trying again in a day")
+            if self.controls.gate() != "open" or not self._wave_lock.acquire(blocking=False):
+                self._wake.wait(IDLE_WAIT)
+                continue
+            failed = False
             try:
+                self._in_wave = True
                 worked = self.run_wave()
             except Exception:
                 log.exception("the scheduler failed; trying again shortly")
+                failed = True
                 # Only this thread makes items building, and it is between waves now.
                 try:
                     self._store.recover(self._clock())
                 except Exception:
                     log.exception("cannot put the building items back into the queue")
+            finally:
+                self._in_wave = False
+                self._wave_lock.release()
+            if failed:
                 self._stopping.wait(5.0)
-                continue
-            if not worked:
+            elif not worked:
                 self._wake.wait(IDLE_WAIT)
 
     def run_wave(self) -> bool:
         """Run one wave. Returns False when the queue was empty."""
-        candidates = self._store.queued_candidates(self._workers * self._batch_size)
+        settings = self.controls.current()
+        workers = self.controls.effective_workers(settings)
+        batch_size = settings.batch_size
+        candidates = self._store.queued_candidates(workers * batch_size)
         if not candidates:
             return False
         entries = self._store.cache_entries(c.key for c in candidates)
@@ -143,7 +181,7 @@ class Scheduler:
             return True
 
         files, changed = self._check_sources(waiting)
-        batches, _later = plan_wave(files, self._workers, self._batch_size)
+        batches, _later = plan_wave(files, workers, batch_size)
         planned = [file for batch in batches for file in batch]
         self._store.mark_building([f.key for f in planned] + changed, self._clock())
         for key in changed:
@@ -169,7 +207,7 @@ class Scheduler:
             files, changed = self._check_files(retry)
             for key in changed:
                 self._fail_changed(key)
-            batches, retry = plan_wave(files, self._workers, 1)
+            batches, retry = plan_wave(files, workers, 1)
             if not batches:
                 break
             results = self._runner.run(batches, final=True)

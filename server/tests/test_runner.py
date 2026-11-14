@@ -14,6 +14,7 @@ from lrrp.runner import (
     BatchFile,
     Runner,
     RunnerConfig,
+    WarmUp,
     default_config,
     plan_wave,
     process_count,
@@ -217,3 +218,25 @@ def test_default_config(tmp_path: Path) -> None:
     config = default_config(settings, {})
     assert config.env["USER"] == "lrrp"
     assert config.gpu_config == gpu_config_path(settings.wineprefix, "lrrp")
+
+
+def test_the_converter_does_not_get_the_token() -> None:
+    settings = Settings.from_env({"LRRP_DATA_DIR": "/srv/data", "LRRP_TOKEN": "secret-token"})
+    config = default_config(settings, {"LRRP_TOKEN": "secret-token", "PATH": "/bin"})
+    assert "LRRP_TOKEN" not in config.env
+    assert "secret-token" not in config.env.values()
+
+
+def test_warm_up_reports_what_it_did(tmp_path: Path) -> None:
+    runner = make_runner(tmp_path)
+    assert runner.warm_up() == WarmUp(needed=False)
+    config = gpu_config_path(tmp_path / "wine", WINE_USER)
+    fresh = make_runner(
+        tmp_path,
+        gpu_config=config,
+        env={**make_runner(tmp_path).config.env, "FAKE_CONVERTER_FRESH_PREFIX": "1"},
+    )
+    assert fresh.prepare_display() is None
+    assert fresh.describe_display() == "the DISPLAY of the server's environment"
+    assert fresh.warm_up() == WarmUp(needed=True, exit_code=3)
+    assert fresh.warm_up() == WarmUp(needed=False)

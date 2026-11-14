@@ -4,6 +4,7 @@ import sys
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -13,7 +14,7 @@ from fastapi.testclient import TestClient
 
 from lrrp.app import create_app
 from lrrp.converter import gpu_config_path, wine_path
-from lrrp.display import NoDisplay
+from lrrp.display import Display, NoDisplay
 from lrrp.runner import RunnerConfig
 from lrrp.settings import Settings
 from lrrp.store import DATABASE_NAME
@@ -97,13 +98,17 @@ class Harness:
     def client(
         self,
         *,
-        workers: int = 3,
+        workers: int | str = 3,
         batch_size: int = 8,
         timeout_base: float = 30.0,
         timeout_per_file: float = 10.0,
         fake: dict[str, str] | None = None,
+        display: Display | None = None,
+        local_clock: Callable[[], datetime] | None = None,
+        sysfs: Path | None = None,
         **variables: str,
     ) -> TestClient:
+        """``sysfs`` defaults to an empty folder: no CPU temperature, whatever the machine has."""
         settings = Settings.from_env(
             {
                 **self.settings_env,
@@ -128,7 +133,14 @@ class Harness:
             gpu_config=self.gpu_config,
             warm_up_timeout=30.0,
         )
-        return TestClient(create_app(settings, runner_config=config, display=NoDisplay()))
+        app = create_app(
+            settings,
+            runner_config=config,
+            display=display or NoDisplay(),
+            local_clock=local_clock,
+            sysfs=sysfs or self.tmp / "no-sysfs",
+        )
+        return TestClient(app)
 
     @property
     def gpu_config(self) -> Path:

@@ -30,6 +30,9 @@ class Display(Protocol):
         None leaves ``DISPLAY`` as the environment has it. Raises ``DisplayError``.
         """
 
+    def describe(self) -> str:
+        """For a person: the display the converter gets (after ``ensure``)."""
+
     def stop(self) -> None: ...
 
 
@@ -46,6 +49,9 @@ class NoDisplay:
 
     def ensure(self) -> str | None:
         return None
+
+    def describe(self) -> str:
+        return "the DISPLAY of the server's environment"
 
     def stop(self) -> None:
         pass
@@ -82,6 +88,10 @@ class Xvfb:
             self._process, self._display = self._start()
             log.info("Xvfb started on display %s", self._display)
             return self._display
+
+    def describe(self) -> str:
+        with self._lock:
+            return f"Xvfb on {self._display}" if self._process is not None else "Xvfb, not running"
 
     def stop(self) -> None:
         with self._lock:
