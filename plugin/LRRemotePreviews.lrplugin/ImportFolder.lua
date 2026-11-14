@@ -9,7 +9,8 @@
 --      shows and sets the plug-in's automatic send (the setting of the Plug-in Manager). Switched on here, the plug-in
 --      records the catalog's largest id as the automatic send's mark before the import, so that every photo of the
 --      import counts as new; the automatic send then sends what is new, round by round, while Lightroom imports.
---   3. The record read again (it must not have changed since the dialog), then the trigger.
+--   3. The record read again (it must not have changed since the dialog), then the trigger. The time of the trigger is
+--      stored (importTriggered), so that the automatic loop looks for the new photos every few seconds (WatchMode).
 -- Dialogs appear only before the import and for refusals and errors. No progress bar, no waiting, no sending, no fetch
 -- lock: Lightroom shows its own progress, and the automatic send works in the background. Seen with plug-in 0.6.0 in
 -- Lightroom Classic 15.6: the trigger returned after 0.16 s, and Lightroom then imported by itself for minutes.
@@ -30,6 +31,7 @@ local Settings = require 'Settings'
 local SqliteRunner = require 'SqliteRunner'
 
 local TITLE = 'Import a folder without the dialog'
+local AUTO_TRIGGER_KEY = 'importTriggered' -- AutoFetch.TRIGGER_KEY (that module is not loaded here)
 local P = ImportPlan.LOG_PREFIX
 
 -- The time in seconds; LrDate.currentTime() has fractions of a second (seen in Lightroom Classic 15.6).
@@ -168,6 +170,8 @@ local function run(context)
         return
     end
     local started = now()
+    -- The automatic loop looks every few seconds from now on until the photos have come (WatchMode).
+    prefs[AUTO_TRIGGER_KEY] = os.time()
     Log.info('%strigger called at %s (catalog ids up to %d were there before): %s', P, os.date('%Y-%m-%d %H:%M:%S'),
         again.mark, folder)
     local ok, value = LrTasks.pcall(function()

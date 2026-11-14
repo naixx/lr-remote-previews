@@ -151,6 +151,8 @@ local function build(decoded)
         maxItemsPerJob = optionalOfType(capabilities, 'maxItemsPerJob', 'capabilities.maxItemsPerJob', 'number'),
         jobRetentionDays = optionalOfType(capabilities, 'jobRetentionDays', 'capabilities.jobRetentionDays',
             'number'),
+        appendItems = optionalOfType(capabilities, 'appendItems', 'capabilities.appendItems', 'boolean') == true,
+        maxWaitSeconds = optionalOfType(capabilities, 'maxWaitSeconds', 'capabilities.maxWaitSeconds', 'number'),
     }
     for i, extension in ipairs(optionalList(capabilities, 'extensions', 'capabilities.extensions') or {}) do
         if type(extension) ~= 'string' then
@@ -166,7 +168,8 @@ end
 --     converter = { installed (boolean), path (or nil), version (or nil) },
 --     roots = { { id, label (defaults to id), available (boolean) }, ... },
 --     capabilities = { extensions = { lower-case strings }, previewLongEdge (or nil), maxItemsPerJob (or nil),
---                      jobRetentionDays (or nil) } }
+--                      jobRetentionDays (or nil), appendItems (boolean; false when absent: servers before 0.6.0),
+--                      maxWaitSeconds (or nil: the server cannot hold a request) } }
 -- Unknown fields are ignored. Returns nil plus a message when a field is missing or has the wrong type.
 function ServerInfo.normalize(decoded)
     local ok, result = pcall(build, decoded)

@@ -1,9 +1,10 @@
 -- Help > Plug-in Extras > Diagnostics: new photos for the automatic send.
--- Shows what the automatic send would see now, by both ways it can find new photos (AutoSend.lua), so that what the
--- SDK does not document can be checked in Lightroom: that photos added by an import get larger catalog ids
--- (photo.localIdentifier) than every photo before them, how long catalog:getAllPhotos() and the scan take, and
--- whether catalog:findPhotos with "touchTime" (Edit Date) "inLast" finds freshly imported photos. Read-only: it
--- sends nothing, writes nothing and does not move the automatic send's mark. The result goes to a dialog and the log.
+-- Shows what the automatic send would see now (AutoSend.lua, since version 0.8.0 one read of the catalog through
+-- sqlite3: CatalogRead): its mark, the photos above it with their folder, import and smart preview state, the import
+-- records above it, and how long the read took. So what the catalog does not document can be checked in Lightroom:
+-- that photos added by an import get larger catalog ids than every photo before them, and that the read sees them while
+-- Lightroom imports. Read-only: it sends nothing, writes nothing and does not move the automatic send's mark. The
+-- result goes to a dialog and the log.
 local LrApplication = import 'LrApplication'
 local LrDialogs = import 'LrDialogs'
 local LrPrefs = import 'LrPrefs'
@@ -11,27 +12,28 @@ local LrTasks = import 'LrTasks'
 
 local AutoSend = require 'AutoSend'
 local AutoSendPlan = require 'AutoSendPlan'
+local CatalogRead = require 'CatalogRead'
 local Log = require 'Log'
-local PhotoAccess = require 'PhotoAccess'
+local Settings = require 'Settings'
 
 local TITLE = 'New photos for the automatic send'
 local SHOWN = 10
-local WINDOW_HOURS = 24
 
-local function clock()
-    return os.clock and os.clock() or 0
-end
-
-local function describeLine(entry)
-    local photo = PhotoAccess.describe(entry.photo, 1)
-    return string.format('    %d  %s  %s  %s', entry.id, photo.fileName,
-        photo.smartPreviewPath and 'has a smart preview' or 'no smart preview', tostring(photo.path))
+local function photoLine(photo)
+    if photo.incomplete then
+        return string.format('    %d  (its file, folder or root row is not in the catalog database yet)', photo.id)
+    end
+    return string.format('    %d  %s  import %s  %s%s  %s', photo.id, tostring(photo.fileName),
+        photo.importId > 0 and string.format('%d', photo.importId) or '-',
+        photo.hasSmartPreview and 'has a smart preview' or 'no smart preview',
+        photo.virtualCopy and ', virtual copy' or '', tostring(photo.path))
 end
 
 local function run()
     local catalog = LrApplication.activeCatalog()
-    local state = AutoSendPlan.load(LrPrefs.prefsForPlugin(), catalog:getPath())
-    local mark = state and state.mark or nil
+    local catalogPath = catalog:getPath()
+    local store = LrPrefs.prefsForPlugin()
+    local state = AutoSendPlan.load(store, catalogPath)
     local lines = {}
     local function add(line)
         lines[#lines + 1] = line
@@ -40,48 +42,33 @@ local function run()
         add(string.format('The automatic send has dealt with every photo up to catalog id %d (the largest id it has '
             .. 'seen: %d).', state.mark, state.seen))
     else
-        add('The automatic send is not watching this catalog yet (it is off, or has not had its first round).')
+        add('The automatic send is not watching this catalog yet (it is off, or has not had its first look).')
     end
-
-    local started = clock()
-    local all, maxId, count = AutoSend.scanAll(catalog, 0, function()
-        return false
-    end)
-    local scanTime = clock() - started
-    if not all then
-        add('catalog:getAllPhotos and the scan failed: ' .. tostring(maxId))
+    local tool, toolProblem = AutoSend.tool(Settings.read(store))
+    if not tool then
+        add('sqlite3: ' .. toolProblem)
     else
-        add(string.format('Photos in the catalog: %d; largest catalog id: %d; reading them and their ids took %.2f s '
-            .. '(processor time).', count, maxId, scanTime))
-        add('The photos with the largest catalog ids (after an import, these should be the new photos):')
-        for i = #all, math.max(1, #all - SHOWN + 1), -1 do
-            add(describeLine(all[i]))
-        end
-        if mark then
-            local above = 0
-            for _, entry in ipairs(all) do
-                if entry.id > mark then
-                    above = above + 1
+        local started = AutoSend.clock()
+        local marks = AutoSend.read(tool, catalogPath, CatalogRead.markSql())
+        local mark = state and state.mark or (marks and marks.mark and math.max(0, marks.mark - SHOWN)) or 0
+        local parsed, err = AutoSend.read(tool, catalogPath, CatalogRead.newSql(mark))
+        local took = AutoSend.clock() - started
+        if not parsed then
+            add('Reading the catalog failed: ' .. tostring(err))
+        else
+            if marks and marks.mark then
+                add(string.format('The largest catalog id of photos and imports: %d.', marks.mark))
+            end
+            add(string.format('Photos above catalog id %d: %d (both reads took %.2f s).', mark, #parsed.photos, took))
+            for i = #parsed.photos, math.max(1, #parsed.photos - SHOWN + 1), -1 do
+                add(photoLine(parsed.photos[i]))
+            end
+            if #parsed.imports > 0 then
+                add('Import records above that id:')
+                for _, import in ipairs(parsed.imports) do
+                    add(string.format('    %d  %s', import.id, import.date))
                 end
             end
-            add(string.format('Photos above the automatic send\'s mark: %d.', above))
-        end
-    end
-
-    started = clock()
-    local recent, recentProblem = AutoSend.findRecentlyEdited(catalog, 0, WINDOW_HOURS, function()
-        return false
-    end)
-    local findTime = clock() - started
-    if not recent then
-        add('catalog:findPhotos (touchTime in the last ' .. WINDOW_HOURS .. ' hours) failed: '
-            .. tostring(recentProblem))
-    else
-        add(string.format('The fallback, catalog:findPhotos with touchTime (Edit Date) in the last %d hours, found %d '
-            .. 'photo(s) in %.2f s. Freshly imported photos should be among them for the fallback to work:',
-            WINDOW_HOURS, #recent, findTime))
-        for i = #recent, math.max(1, #recent - SHOWN + 1), -1 do
-            add(describeLine(recent[i]))
         end
     end
     local text = table.concat(lines, '\n')

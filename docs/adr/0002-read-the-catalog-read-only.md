@@ -4,7 +4,13 @@ Status: accepted (2026-11-13). Amended by [0007](0007-photos-added-through-light
 (2026-11-14, plug-in 0.6.0): «It reads nothing else» no longer holds. For «Import a folder without the dialog...» the
 plug-in also reads, in the same read-only way, the settings of the previous import (`Adobe_variablesTable`, names
 starting with `AgImportDialog_`) and the largest photo and import ids (`Adobe_images`, `AgLibraryImport`); 0.6.0 also
-read the photos and imports added since that mark, which 0.7.0 no longer does. It still writes nothing.
+read the photos and imports added since that mark, which 0.7.0 no longer does. Since plug-in 0.8.0 the automatic send
+and fetch find new photos this way too, instead of through the SDK (whose calls into the catalog are very slow while
+Lightroom imports): one plain `SELECT` per look gives the photos above a mark, or with given ids, with their folder
+(`AgLibraryFolder`, `AgLibraryRootFolder`), file name and file UUID (`AgLibraryFile`), import
+(`AgLibraryImportImage`), pixel size, video and virtual copy flags (`Adobe_images`) and whether Lightroom knows a smart
+preview for them (`AgDNGProxyInfo`, any status but `D`), plus the import records above the mark (`AgLibraryImport`);
+see `CatalogRead.lua`. It still writes nothing.
 
 ## Context
 

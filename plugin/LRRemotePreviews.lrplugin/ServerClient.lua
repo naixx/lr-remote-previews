@@ -32,7 +32,7 @@ local function hasToken(settings)
 end
 
 -- One HTTP exchange. method 'GET' uses LrHttp.get; anything else LrHttp.post with that method.
--- Returns body, status, transportError (text or nil).
+-- Returns body, status, transportError (text or nil), errorCode (LrHttp's error code, e.g. 'timedOut', or nil).
 local function exchange(method, url, token, jsonBody, timeout)
     local headers = HttpJson.headers(token, jsonBody ~= nil)
     local ok, body, response = LrTasks.pcall(function()
@@ -47,7 +47,8 @@ local function exchange(method, url, token, jsonBody, timeout)
     if type(response) ~= 'table' then
         response = {}
     end
-    return body, response.status, transportErrorText(response)
+    local errorCode = type(response.error) == 'table' and response.error.errorCode or nil
+    return body, response.status, transportErrorText(response), errorCode
 end
 
 local function base(settings)
@@ -129,6 +130,52 @@ function ServerClient.fetchItems(settings, jobId, since)
         if failure.status == 404 then
             failure.message = 'The server no longer knows job ' .. tostring(jobId) .. '. ' .. failure.message
         end
+        return nil, failure
+    end
+    local page, err = Jobs.parseItemsPage(decoded)
+    if not page then
+        return nil, { kind = 'badJson', message = 'The list of items is not as expected: ' .. err .. '.' }
+    end
+    return page
+end
+
+-- POST /api/v1/jobs/{id}/items with a body from Jobs.appendBody (servers with capabilities.appendItems). Returns
+-- { job, items } or nil plus a problem { kind, message, status, code } (404: the job is gone; 409 job_cancelled;
+-- 413 too_many_items; 422 duplicate_ref).
+function ServerClient.appendItems(settings, jobId, body)
+    local root, problem = base(settings)
+    if not root then
+        return nil, problem
+    end
+    local url = Jobs.appendUrl(root, jobId)
+    Log.info('POST %s (%d bytes)', url, #body)
+    local answer, status, transportError = exchange('POST', url, settings.token, body, JOB_TIMEOUT_SECONDS)
+    local decoded, failure = HttpJson.decode(answer, status, transportError, hasToken(settings))
+    if not decoded then
+        return nil, failure
+    end
+    local added, err = Jobs.parseCreated(decoded)
+    if not added then
+        return nil, { kind = 'badJson', message = 'The answer to adding items is not as expected: ' .. err .. '.' }
+    end
+    return added
+end
+
+-- One page of the ready items of a job with seq > since: GET /api/v1/jobs/{id}/items?since=&state=ready, with
+-- &wait= when wait is given (the server then holds the request until there is something to return; timeout must be
+-- longer, see WaitPlan). Returns { job, items, more } or nil plus a problem; problem.timedOut is set when LrHttp gave
+-- up waiting ('timedOut'). Logged at the trace level only: the automatic fetch asks all the time.
+function ServerClient.readReady(settings, jobId, since, wait, timeout)
+    local root, problem = base(settings)
+    if not root then
+        return nil, problem
+    end
+    local url = Jobs.itemsUrl(root, jobId, since, Jobs.READ_LIMIT, 'ready', wait)
+    Log.trace('GET %s', url)
+    local body, status, transportError, errorCode = exchange('GET', url, settings.token, nil, timeout)
+    local decoded, failure = HttpJson.decode(body, status, transportError, hasToken(settings))
+    if not decoded then
+        failure.timedOut = errorCode == 'timedOut'
         return nil, failure
     end
     local page, err = Jobs.parseItemsPage(decoded)

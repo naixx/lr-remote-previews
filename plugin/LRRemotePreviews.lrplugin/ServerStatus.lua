@@ -13,8 +13,10 @@ local LrView = import 'LrView'
 local CatalogState = require 'CatalogState'
 local FetchPlan = require 'FetchPlan'
 local Fetcher = require 'Fetcher'
+local Jobs = require 'Jobs'
 local Log = require 'Log'
 local PendingJobs = require 'PendingJobs'
+local RegisterQueue = require 'RegisterQueue'
 local Pipeline = require 'Pipeline'
 local ServerClient = require 'ServerClient'
 local ServerInfo = require 'ServerInfo'
@@ -38,7 +40,8 @@ local function retry(props, settings, catalogPath)
             props.retryResult = 'Retry failed: ' .. tostring(job)
         elseif job then
             props.retryResult = StatusReport.retryText(job)
-            PendingJobs.add(LrPrefs.prefsForPlugin(), catalogPath, { jobId }, os.time())
+            PendingJobs.add(LrPrefs.prefsForPlugin(), catalogPath, { jobId }, os.time(),
+                { byId = Jobs.refsAreCatalogIds(job) })
             Log.info('status: %s', props.retryResult)
         else
             props.retryResult = 'Retry failed: ' .. problem.message
@@ -64,7 +67,8 @@ local function run(context)
     local prefs = LrPrefs.prefsForPlugin()
     local clientId = CatalogState.clientId(prefs, catalogPath)
     local jobsContext = { clientId = clientId, jobs = {}, now = os.time(),
-        retentionDays = info.capabilities.jobRetentionDays }
+        retentionDays = info.capabilities.jobRetentionDays,
+        unregistered = #RegisterQueue.load(prefs, catalogPath) }
     local choices = {}
     if clientId then
         local jobs, listProblem = ServerClient.listJobs(settings, clientId)

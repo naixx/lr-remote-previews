@@ -35,6 +35,23 @@ describe('Jobs URLs', function()
         assert.are.equal('http://nas.local:8787/api/v1/jobs/7/retry', Jobs.retryUrl(base, 7))
         assert.are.equal('http://nas.local:8787/api/v1/lookup', Jobs.lookupUrl(base))
         assert.are.equal('http://nas.local:8787/api/v1/files/' .. KEY, Jobs.fileByKeyUrl(base, KEY))
+        assert.are.equal('http://nas.local:8787/api/v1/jobs/7/items?since=3&limit=1000&state=ready&wait=25',
+            Jobs.itemsUrl(base, 7, 3, 1000, 'ready', 25))
+        assert.are.equal('http://nas.local:8787/api/v1/jobs/7/items?since=3&limit=1000&state=ready',
+            Jobs.itemsUrl(base, 7, 3, 1000, 'ready', 0))
+        assert.are.equal('http://nas.local:8787/api/v1/jobs/7/items', Jobs.appendUrl(base, 7))
+    end)
+
+    it('builds the body for adding items, and knows whose refs are catalog ids', function()
+        assert.are.same({ items = { { ref = '18', root = 'archive', path = 'a/IMG_0002.ARW' } } },
+            Json.decode(Jobs.appendBody({ { ref = '18', rootId = 'archive', relativePath = 'a/IMG_0002.ARW' } })))
+        assert.is_nil(Jobs.appendBody({}))
+        assert.is_true(Jobs.refsAreCatalogIds({ client = 'lr-plugin/0.8.0' }))
+        assert.is_true(Jobs.refsAreCatalogIds({ client = 'lr-plugin/1.0.2' }))
+        assert.is_false(Jobs.refsAreCatalogIds({ client = 'lr-plugin/0.7.0' }))
+        assert.is_false(Jobs.refsAreCatalogIds({ client = 'dashboard' }))
+        assert.is_false(Jobs.refsAreCatalogIds({}))
+        assert.is_false(Jobs.refsAreCatalogIds(nil))
     end)
 
     it('lists the jobs of one clientId, encoding it', function()

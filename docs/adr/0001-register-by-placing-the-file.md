@@ -25,6 +25,11 @@ Tested with Lightroom Classic 15.6 on Windows (details in `docs/research/smart-p
 The plug-in places the DNG in the store under the file UUID and then calls `photo:buildSmartPreview()`. No part of
 the project writes to the catalog database or to any other Lightroom database, ever.
 
+Since plug-in 0.8.0 the automatic fetch makes that call later when an import is in progress (calls into the catalog are
+very slow then): it places the files at once and asks Lightroom to register them in batches when the import is over.
+A placed file that is not registered yet is the case tested above: Lightroom accepts it by itself, while it runs or
+when the catalog is opened.
+
 ## Consequences
 
 - The worst outcome of a Lightroom change is «smart previews are no longer picked up», not a damaged catalog.

@@ -76,8 +76,9 @@ end
 
 -- Runs the command line that build(scriptFile, outputFile, errorFile) returns, after writing script (if any)
 -- to scriptFile. Returns { status, stdout, stderr }, or nil plus a message when the command could not be built
--- or started. The three files are deleted afterwards.
-local function run(build, script)
+-- or started. The three files are deleted afterwards. quiet: the command line goes to the log at the trace level only
+-- (the automatic send reads every few seconds while an import comes in).
+local function run(build, script, quiet)
     local scriptFile, output, errors = tempFiles()
     local line, lineError = build(scriptFile, output, errors)
     if not line then
@@ -90,7 +91,11 @@ local function run(build, script)
             return nil, 'cannot write the temporary file ' .. scriptFile .. ': ' .. tostring(writeError)
         end
     end
-    Log.info('sqlite3 command: %s', line)
+    if quiet then
+        Log.trace('sqlite3 command: %s', line)
+    else
+        Log.info('sqlite3 command: %s', line)
+    end
     local ok, status = LrTasks.pcall(LrTasks.execute, line)
     local stdout, stderr = readFile(output), readFile(errors)
     removeFile(scriptFile)
@@ -156,9 +161,9 @@ function SqliteRunner.locate(configured, pluginPath)
     return nil, 'No working sqlite3 tool was found. Tried:\n' .. table.concat(tried, '\n') .. '\n\n' .. hint
 end
 
--- Runs one SELECT that SqliteCommand.readScript accepts (ImportQuery's) against the catalog, read-only. Returns the
--- output text, or nil plus a message.
-function SqliteRunner.query(tool, catalogPath, sql)
+-- Runs one SELECT that SqliteCommand.readScript accepts (ImportQuery's, CatalogRead's) against the catalog, read-only.
+-- Returns the output text, or nil plus a message. quiet: see run.
+function SqliteRunner.query(tool, catalogPath, sql, quiet)
     local script, scriptError = SqliteCommand.readScript(catalogPath, sql)
     if not script then
         return nil, scriptError
@@ -166,7 +171,7 @@ function SqliteRunner.query(tool, catalogPath, sql)
     local result, err = run(function(scriptFile, output, errors)
         return SqliteCommand.queryCommand({ tool = tool, script = scriptFile, output = output, errors = errors,
             windows = isWindows() })
-    end, script)
+    end, script, quiet)
     if not result then
         return nil, err
     end

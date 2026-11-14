@@ -66,6 +66,10 @@ describe('StatusReport texts', function()
         assert.matches('Up to 1 smart preview is ready', StatusReport.jobsText({ clientId = 'x', jobs = {},
             waiting = 1, now = NOW }))
         assert.matches('is not known', StatusReport.jobsText({ clientId = 'x', jobs = {}, now = NOW }))
+        assert.matches('600 smart previews are placed in the smart preview folder and not registered by Lightroom yet',
+            StatusReport.jobsText({ clientId = 'x', jobs = {}, waiting = 0, unregistered = 600, now = NOW }))
+        assert.is_nil(StatusReport.jobsText({ clientId = 'x', jobs = {}, waiting = 0, unregistered = 0, now = NOW })
+            :find('not registered', 1, true))
     end)
 
     it('shows at most MAX_JOBS jobs and counts the rest', function()

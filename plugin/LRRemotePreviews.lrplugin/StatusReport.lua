@@ -72,7 +72,8 @@ end
 -- The jobs part of the status dialog. context:
 --   clientId (nil when this catalog never sent a job), jobs (FetchPlan.interesting), listed (number of this
 --   catalog's jobs on the server), waiting (smart previews ready and not yet fetched by this catalog, or nil when
---   unknown), retentionDays (or nil), now (os.time()), problem (message when the jobs could not be read).
+--   unknown), retentionDays (or nil), now (os.time()), problem (message when the jobs could not be read),
+--   unregistered (smart previews the automatic fetch placed and Lightroom has not registered yet, or nil).
 function StatusReport.jobsText(context)
     local lines = {}
     local function add(line)
@@ -110,6 +111,11 @@ function StatusReport.jobsText(context)
     else
         add(string.format('Up to %d smart preview%s ready on the server and not fetched by this catalog yet.',
             context.waiting, context.waiting == 1 and ' is' or 's are'))
+    end
+    if (context.unregistered or 0) > 0 then
+        add(string.format('%d smart preview%s placed in the smart preview folder and not registered by Lightroom yet '
+            .. '(the automatic fetch registers them when no import is running; Lightroom also takes them by itself).',
+            context.unregistered, context.unregistered == 1 and ' is' or 's are'))
     end
     return table.concat(lines, '\n')
 end

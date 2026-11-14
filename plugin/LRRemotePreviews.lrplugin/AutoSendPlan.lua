@@ -1,27 +1,27 @@
--- The decisions of the automatic send (off by default): which photos are new, when they are sent, and what the
--- plug-in remembers so that no photo is sent twice. Pure Lua 5.1: the store (Lightroom's preferences for the plug-in)
--- and everything that comes from Lightroom are passed in.
+-- The decisions of the automatic send (off by default): which photos are new, and what the plug-in remembers so that
+-- no photo is sent twice. Pure Lua 5.1: the store (Lightroom's preferences for the plug-in) and everything that comes
+-- from the catalog are passed in.
 --
--- New photos are told by their catalog id, photo.localIdentifier. The SDK documents it as "the local identifier of
--- the photo, unique within this catalog" (SDK 4.0). That it grows with every photo added is NOT documented; the
--- catalog's id counter (Adobe_entityIDCounter) suggests it, and it has to be confirmed in Lightroom. Should it not
+-- New photos are told by their catalog id (Adobe_images.id_local, the SDK's photo.localIdentifier), read with sqlite3
+-- (CatalogRead). That ids grow with every photo added is NOT documented; the catalog's id counter
+-- (Adobe_entityIDCounter) suggests it, and it held in every import seen (Lightroom Classic 15.6). Should it not
 -- hold, photos would be missed, never sent twice.
 --
 -- What is remembered per catalog (one JSON text in the store under AutoSendPlan.KEY, keyed by the catalog path the way
 -- CatalogState does it):
 --   mark    every photo with an id up to here has been dealt with: sent, left out, or in the catalog before
---   seen    the largest id seen so far. A photo is taken only in a round after the one that first saw it, so that an
---           import in progress has settled and the catalog database has its file record
---   blocked, tries   a photo whose file record could not be read yet, and in how many rounds in a row
---   looked  the time (os.time) the state last changed; the fallback finder looks back from there
+--   seen    the largest id seen so far
+--   blocked, tries   a photo whose rows were not all in the catalog database yet, and in how many rounds in a row
+--   looked  the time (os.time) the state last changed
 -- The first round for a catalog only records the mark: what is in the catalog when the option is switched on is
 -- never sent. Switching the option off forgets everything (AutoSendPlan.forget), so switching it on again starts
 -- afresh. «Import a folder without the dialog...» (since version 0.7.0), when its checkbox switches the option on,
 -- records the mark itself before it starts Lightroom's import (AutoSendPlan.prime with the catalog's largest id), so
 -- that the photos of that import are sent however late the first round runs.
 --
--- An import that arrives in bursts over many minutes (seen in Lightroom Classic 15.6: about a hundred photos every
--- 22-26 seconds) needs nothing special: each round takes what an earlier round saw, at most LIMIT photos.
+-- Since version 0.8.0 a photo is sent in the round that finds it (no waiting for a second round, no limit per round
+-- but the server's maxItemsPerJob per job), so an import that arrives in bursts (seen: about a hundred photos every
+-- 22-26 seconds) is sent burst by burst.
 local Json = require 'Json'
 local PathMap = require 'PathMap'
 
@@ -29,13 +29,7 @@ local AutoSendPlan = {}
 
 AutoSendPlan.KEY = 'autoSendState'
 AutoSendPlan.EXTENSIONS_KEY = 'serverExtensions' -- the file types the server took when it was last asked (JSON)
-AutoSendPlan.LIMIT = 500 -- photos looked at per round, at most (and at most the server's maxItemsPerJob)
-AutoSendPlan.MAX_TRIES = 3 -- rounds a photo may wait for its file record before it is left out for good
-AutoSendPlan.YIELD_EVERY = 500 -- photos between two yields while scanning the catalog
-AutoSendPlan.MAX_WINDOW_HOURS = 24 * 31
-
--- Reasons from FileIds.assign that may go away by themselves (the catalog database had not written the photo yet).
-AutoSendPlan.TRANSIENT = { noFileId = true, noLocalId = true }
+AutoSendPlan.MAX_TRIES = 3 -- rounds a photo may wait for its rows before it is left out for good
 
 -- Short names of the reasons a photo is left out, for the one log line of a round, in the order listed.
 AutoSendPlan.LEFT_OUT = {
@@ -48,6 +42,7 @@ AutoSendPlan.LEFT_OUT = {
     { 'noPath', 'no file path' },
     { 'sameFile', 'same file as another photo' },
     { 'fileIdMismatch', 'the catalog database names another file' },
+    { 'noFileId', 'no valid file id in the catalog database' },
     { 'gaveUp', 'no file record in the catalog database after ' .. AutoSendPlan.MAX_TRIES .. ' rounds' },
 }
 
@@ -132,77 +127,10 @@ function AutoSendPlan.prime(maxId, now)
     return { mark = maxId, seen = maxId, looked = now }
 end
 
--- Goes through photos and keeps those with an id above mark. idOf(photo) -> the id (or nil when the photo has none);
--- it may raise, the caller protects the call. env (optional): yield() called every YIELD_EVERY photos, then
--- shouldStop() -> true to give up. Returns the photos found as { id, photo } in ascending id order, the largest id
--- (0 for none) and the number of photos looked at; or nil plus 'stopped'.
-function AutoSendPlan.scan(photos, idOf, mark, env)
-    env = env or {}
-    local found, maxId = {}, 0
-    for i, photo in ipairs(photos) do
-        local id = idOf(photo)
-        if isId(id) and id > 0 then
-            if id > maxId then
-                maxId = id
-            end
-            if mark == nil or id > mark then
-                found[#found + 1] = { id = id, photo = photo }
-            end
-        end
-        if i % AutoSendPlan.YIELD_EVERY == 0 then
-            if env.yield then
-                env.yield()
-            end
-            if env.shouldStop and env.shouldStop() then
-                return nil, 'stopped'
-            end
-        end
-    end
-    table.sort(found, function(a, b)
-        return a.id < b.id
-    end)
-    return found, maxId, #photos
-end
-
--- Which of the photos found (above the mark, ascending) are taken this round: those already seen in an earlier
--- round, at most limit of them. Returns { photos = { { id, photo }, ... }, seen = the new largest id seen,
--- waiting = the number seen for the first time now, more = true when the limit left some for the next round }.
-function AutoSendPlan.pick(state, found, limit)
-    local picked = { photos = {}, seen = state.seen, waiting = 0, more = false }
-    for _, entry in ipairs(found) do
-        if entry.id > state.mark then
-            if entry.id <= state.seen then
-                if #picked.photos < limit then
-                    picked.photos[#picked.photos + 1] = entry
-                else
-                    picked.more = true
-                end
-            else
-                picked.waiting = picked.waiting + 1
-            end
-            if entry.id > picked.seen then
-                picked.seen = entry.id
-            end
-        end
-    end
-    return picked
-end
-
--- Keeps the first limit photos of a pick (the server takes fewer per job than AutoSendPlan.LIMIT).
-function AutoSendPlan.limit(picked, limit)
-    if not limit or #picked.photos <= limit then
-        return picked
-    end
-    local photos = {}
-    for i = 1, limit do
-        photos[i] = picked.photos[i]
-    end
-    return { photos = photos, seen = picked.seen, waiting = picked.waiting, more = true }
-end
-
--- The state after a round. ids: the ids taken this round, ascending; transient: { [id] = true } for photos whose
--- file record could not be read yet; seen: picked.seen. Photos up to the first transient one are dealt with; that one
--- and the ones after it wait for the next round, unless it has waited MAX_TRIES rounds, then it is left out.
+-- The state after a round. ids: the ids found this round, ascending; transient: { [id] = true } for photos whose
+-- rows were not all in the catalog database yet; seen: the largest id seen. Photos up to the first transient one are
+-- dealt with; that one and the ones after it wait for the next round, unless it has waited MAX_TRIES rounds, then it
+-- is left out.
 -- Returns the new state, the cut-off (ids from here on must not be sent this round; nil = send all) and the list of
 -- ids left out for good.
 function AutoSendPlan.settle(state, ids, transient, seen, now)
@@ -224,15 +152,6 @@ function AutoSendPlan.settle(state, ids, transient, seen, now)
         end
     end
     return new, cutoff, gaveUp
-end
-
--- Hours the fallback finder looks back: from the last change of the state, plus one, within 1 .. MAX_WINDOW_HOURS.
-function AutoSendPlan.windowHours(state, now)
-    if not state or not isId(state.looked) or not now then
-        return 24
-    end
-    local hours = math.ceil((now - state.looked) / 3600) + 1
-    return math.max(1, math.min(AutoSendPlan.MAX_WINDOW_HOURS, hours))
 end
 
 local function plural(n, one, many)
@@ -264,15 +183,23 @@ local function countsText(counts, order)
     return table.concat(parts, ', ')
 end
 
--- The one log line of a round that did something. outcome: { sent = n, jobId = n, ready = n (built already),
--- rejected = { [code] = n }, leftOut = { [reason] = n }, later = n (wait for the next round), more = bool,
--- waiting = n (seen for the first time) }.
+-- The jobs of a round: 'job 12 (added 100), job 13 (new, 25)'. jobs: { { id, count, added = bool }, ... }.
+local function jobsText(jobs)
+    local parts = {}
+    for _, job in ipairs(jobs or {}) do
+        parts[#parts + 1] = string.format('job %d (%s %d)', job.id, job.added and 'added' or 'new,', job.count)
+    end
+    return table.concat(parts, ', ')
+end
+
+-- The one log line of a round that did something. outcome: { sent = n, jobs = { { id, count, added } },
+-- ready = n (built already), rejected = { [code] = n }, leftOut = { [reason] = n }, later = n (wait for their rows),
+-- unsent = n (not sent this round: the server could not be reached or refused; a later round sends them) }.
 function AutoSendPlan.roundText(outcome)
     local parts = {}
     local sent = outcome.sent or 0
     if sent > 0 then
-        local text = string.format('sent %s as job %s', plural(sent, 'new photo', 'new photos'),
-            tostring(outcome.jobId))
+        local text = string.format('sent %s: %s', plural(sent, 'new photo', 'new photos'), jobsText(outcome.jobs))
         local details = {}
         if (outcome.ready or 0) > 0 then
             details[#details + 1] = outcome.ready .. ' built already'
@@ -311,11 +238,8 @@ function AutoSendPlan.roundText(outcome)
         parts[#parts + 1] = string.format('%d %s for a file record in the catalog database', outcome.later,
             outcome.later == 1 and 'photo waits' or 'photos wait')
     end
-    if outcome.more then
-        parts[#parts + 1] = 'more next round'
-    end
-    if (outcome.waiting or 0) > 0 then
-        parts[#parts + 1] = plural(outcome.waiting, 'photo', 'photos') .. ' just added, taken next round'
+    if (outcome.unsent or 0) > 0 then
+        parts[#parts + 1] = string.format('%d not sent yet: %s', outcome.unsent, tostring(outcome.problem))
     end
     return table.concat(parts, '; ')
 end

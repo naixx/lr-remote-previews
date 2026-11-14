@@ -208,6 +208,19 @@ describe('Delivery.deliver', function()
         assert.are.same({}, fs.calls)
     end)
 
+    it('only places the file when there is nothing to register it with (the automatic fetch registers it later)',
+        function()
+            local fs = fakeFs()
+            fs.buildSmartPreview = nil
+            local outcome, detail = Delivery.deliver(target, { size = #body }, body, fs, 't')
+            assert.are.equal('placed', outcome)
+            assert.are.equal('DNG 1.7.0.0', detail)
+            assert.are.equal(body, fs.files[DEST])
+            for _, call in ipairs(fs.calls) do
+                assert.is_nil(call:find('buildSmartPreview', 1, true))
+            end
+        end)
+
     it('does not call Lightroom when the destination exists', function()
         local fs = fakeFs({ files = { [DEST] = 'x' } })
         assert.are.equal('destinationExists', (Delivery.deliver(target, { size = #body }, body, fs, 't')))

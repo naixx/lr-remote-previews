@@ -201,14 +201,16 @@ function provider.sectionsForTopOfDialog(f, propertyTable)
         f:popup_menu { items = intervalItems, value = bind 'autoFetchInterval' },
     }
     rows[#rows + 1] = note('Quietly: no dialogs, a line in the log. On by default. It asks the server only while this')
-    rows[#rows + 1] = note('catalog waits for smart previews it sent; otherwise it makes no request at all.')
+    rows[#rows + 1] = note('catalog waits for smart previews it sent; otherwise it makes no request at all. A server')
+    rows[#rows + 1] = note('of version 0.6.0 or newer tells it when each one is ready; older ones are asked at the')
+    rows[#rows + 1] = note('interval.')
     rows[#rows + 1] = f:row {
         label 'Automatic send:',
-        f:checkbox { title = 'Send new photos to the server by themselves, at the same interval',
-            value = bind 'autoSend' },
+        f:checkbox { title = 'Send new photos to the server by themselves', value = bind 'autoSend' },
     }
     rows[#rows + 1] = note('Raw photos added to the catalog after this is switched on, without a smart preview,')
     rows[#rows + 1] = note('under a path mapping. Photos already in the catalog are left alone. Off by default.')
+    rows[#rows + 1] = note('It looks every few seconds while an import comes in, otherwise at the interval above.')
     rows[#rows + 1] = note('The automatic fetch (or «Fetch ready smart previews») brings the smart previews in.')
     return { rows }
 end

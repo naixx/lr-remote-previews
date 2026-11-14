@@ -13,6 +13,7 @@ local CatalogState = require 'CatalogState'
 local ClientId = require 'ClientId'
 local Delivery = require 'Delivery'
 local DownloadQueue = require 'DownloadQueue'
+local FastState = require 'FastState'
 local FileIds = require 'FileIds'
 local Jobs = require 'Jobs'
 local Lease = require 'Lease'
@@ -166,8 +167,10 @@ end
 
 -- The last step of «Build smart previews on the server»: one job per maxItemsPerJob photos of prepared
 -- (Pipeline.prepareSend's result), each with this catalog's clientId and marked pending (PendingJobs), so that the
--- background fetch asks for it until its files are in. Records every photo in summary and the log, and stops at the
--- first job the server does not create. label: the jobs' label (nil: Jobs.LABEL); several jobs add '(part i of n)'.
+-- background fetch asks for it until its files are in. Since version 0.8.0 the ref of each item is the photo's catalog
+-- id, and what is needed to place its smart preview is remembered (FastState), so the automatic fetch places the files
+-- without asking Lightroom for the photos. Records every photo in summary and the log, and stops at the first job the
+-- server does not create. label: the jobs' label (nil: Jobs.LABEL); several jobs add '(part i of n)'.
 -- Returns { jobIds = { id, ... }, ready = n (built already), rejected = n, failedParts = message | nil }.
 function Pipeline.sendJobs(settings, catalogPath, prepared, summary, ui, label)
     local entries = prepared.entries
@@ -181,7 +184,12 @@ function Pipeline.sendJobs(settings, catalogPath, prepared, summary, ui, label)
         if #parts > 1 then
             partLabel = string.format('%s (part %d of %d)', label or Jobs.LABEL, i, #parts)
         end
-        local body, bodyError = Jobs.createBody(part, { clientId = clientId, label = partLabel })
+        local request = {}
+        for j, entry in ipairs(part) do
+            request[j] = { ref = string.format('%d', entry.localId), rootId = entry.rootId,
+                relativePath = entry.relativePath }
+        end
+        local body, bodyError = Jobs.createBody(request, { clientId = clientId, label = partLabel })
         local created, createProblem
         if body then
             created, createProblem = ServerClient.createJob(settings, body)
@@ -190,7 +198,7 @@ function Pipeline.sendJobs(settings, catalogPath, prepared, summary, ui, label)
         end
         local refsOk, refsProblem = true, nil
         if created then
-            refsOk, refsProblem = Jobs.checkRefs(created.items, part)
+            refsOk, refsProblem = Jobs.checkRefs(created.items, request)
             if not refsOk then
                 ServerClient.cancelJob(settings, created.job.id)
             end
@@ -205,11 +213,14 @@ function Pipeline.sendJobs(settings, catalogPath, prepared, summary, ui, label)
         end
         local jobId = created.job.id
         result.jobIds[#result.jobIds + 1] = jobId
-        PendingJobs.add(LrPrefs.prefsForPlugin(), catalogPath, { jobId }, os.time())
+        PendingJobs.add(LrPrefs.prefsForPlugin(), catalogPath, { jobId }, os.time(), { byId = true })
+        FastState.setLabel(jobId, partLabel or Jobs.LABEL)
         summary.sent = summary.sent + #part
         local byRef = {}
-        for _, entry in ipairs(part) do
-            byRef[entry.ref] = entry
+        for j, entry in ipairs(part) do
+            byRef[request[j].ref] = entry
+            FastState.remember(jobId, request[j].ref, { id = entry.localId, fileUuid = entry.fileUuid,
+                fileName = entry.fileName, width = entry.width, height = entry.height, path = entry.path })
         end
         for _, item in ipairs(created.items) do
             local entry = byRef[item.ref]
@@ -277,7 +288,7 @@ function Pipeline.lookup(settings, info, photos, ui)
 end
 
 -- The environment of a DownloadQueue in Lightroom: download tasks are LrTasks, waiting is LrTasks.sleep.
-local function queueEnv(download, deliver)
+function Pipeline.queueEnv(download, deliver)
     return {
         download = download,
         deliver = deliver,
@@ -316,7 +327,7 @@ end
 -- the calling task. onPlaced(entry) (optional) is called after each one.
 function Pipeline.newQueue(settings, summary, onPlaced)
     local runTag = Pipeline.runTag()
-    local queue = DownloadQueue.new(queueEnv(
+    local queue = DownloadQueue.new(Pipeline.queueEnv(
         function(entry)
             if entry.key then
                 return ServerClient.downloadByKey(settings, entry.key)
@@ -358,13 +369,16 @@ function Pipeline.deliverAll(settings, entries, summary, ui)
 end
 
 -- Takes the fetch lock (Lease) for a task described by label ('the automatic fetch'). Returns a lease
--- { refresh() -> still held, release() }, or nil plus the message for the user.
-function Pipeline.acquireLease(label)
+-- { refresh() -> still held, release() }, or nil plus the message for the user. quiet: no log line when the lock is
+-- taken (the automatic fetch tries every second).
+function Pipeline.acquireLease(label, quiet)
     local prefs = LrPrefs.prefsForPlugin()
     local owner = Pipeline.runTag()
     local ok, holder = Lease.acquire(prefs, owner, label, os.time())
     if not ok then
-        Log.info('fetch lock held by %s; %s not started', tostring(holder.label), label)
+        if not quiet then
+            Log.info('fetch lock held by %s; %s not started', tostring(holder.label), label)
+        end
         return nil, Lease.busyText(holder, os.time())
     end
     local lease = { lost = false }

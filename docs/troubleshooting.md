@@ -367,6 +367,12 @@ Also:
 - **The automatic fetch brings nothing**: it asks the server only for jobs it waits for (sent by plug-in 0.7.0 or
   newer from this catalog, at most 7 days ago, not yet done). The log says `automatic fetch: nothing pending for this
   catalog; the server is not asked` when there is none. Older jobs: **Fetch ready smart previews**.
+- **Smart previews are placed but Lightroom does not show them yet** (plug-in 0.8.0): while an import is in progress
+  the automatic fetch only places the files (log: `placed (...; not registered yet)`) and asks Lightroom to register
+  them when no new photo has come for 2 minutes (log: `registered (...)`). **Server status...** says how many wait.
+  Lightroom also takes such files by itself; nothing needs to be done.
+- **The log says `a waiting request for job 12 ran out of time on this side`**: LrHttp gave up before the server
+  answered (`timedOut`). The plug-in then asks the server to wait half as long, down to 5 seconds; it is not an error.
 
 ## Builds are slow
 
@@ -400,19 +406,21 @@ After you change `LRRP_WORKERS` or `LRRP_BATCH_SIZE` in `compose.yaml`, run `doc
 - **Nothing is lost by a restart.** Jobs and items are kept in the server's database; after a restart, the items that
   were being built go back into the queue and are built again (tested). What happens to a converter run during a
   sleep of the machine has not been tested.
-- **The automatic fetch** logs `automatic fetch: not done: … (next try at 14:05)` and waits 1, 2, 5, 10, 30 minutes,
-  then an hour between tries; it shows no dialog. With nothing pending it makes no request at all, so it neither
-  wakes a sleeping NAS nor keeps it awake.
+- **The automatic fetch** logs `… (next try at 14:05)` and waits 1, 2, 5, 10, 30 minutes, then an hour between tries;
+  it shows no dialog. With nothing pending it makes no request at all, so it neither wakes a sleeping NAS nor keeps
+  it awake. While a job is pending (since plug-in 0.8.0 with server 0.6.0) one request per job stays open on the
+  server, which keeps a NAS awake that sleeps only when no connection is open.
 - **Keeping the NAS awake.** Server 0.3.0 has no signal for that. Stage 3 adds `"busy": true` to `GET /healthz` while
   the queue runs. Until then the dashboard's Queue card says «Working» or «Idle», and `GET /api/v1/status` (with the
   token) has the counts `queue.queued` and `queue.building`; keep the NAS awake by its own means while they are not 0.
 
 ## Import a folder without the dialog
 
-Plug-in 0.6.0's version ran once in Lightroom; 0.7.0's shorter one has not. Its log lines start with
-`import folder:`; they record the settings of the previous import, the automatic send's setting, when Lightroom's
-import was started and when the call returned. The command does not wait for the import: Lightroom imports with its
-own progress bars, and the automatic send sends the new photos, if it is on.
+The command ran in Lightroom with plug-ins 0.6.0 and 0.7.0. Its log lines start with `import folder:`; they record
+the settings of the previous import, the automatic send's setting, when Lightroom's import was started and when the
+call returned. The command does not wait for the import: Lightroom imports with its own progress bars, and the
+automatic send, if it is on, reads the catalog every 3 seconds and sends each burst of new photos as it comes, all
+into one job for the import (log: `automatic send: looking every 3 s while photos come in`).
 
 - **It refuses to start: «The previous import in this catalog was not «Add»»** (or «… made a second copy», «… no
   record of a previous import», «… incomplete»). The command starts Lightroom's import with the settings of the

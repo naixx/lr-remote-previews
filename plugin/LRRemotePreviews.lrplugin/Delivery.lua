@@ -116,10 +116,12 @@ function Delivery.place(dest, body, fs, tempTag)
 end
 
 -- The whole delivery of one photo. target: { fileName, width, height, dest }; fs as for Delivery.place plus
--- buildSmartPreview() -> ok, answer (ok false when it raised an error; answer is then the error).
+-- buildSmartPreview() -> ok, answer (ok false when it raised an error; answer is then the error). Without
+-- fs.buildSmartPreview the file is only placed: Lightroom is asked to register it later (RegisterQueue).
 -- Returns an outcome and a detail text:
 --   'delivered'          placed, and Lightroom answered 'existed'
 --   'deliveredOther'     placed, and Lightroom answered something else (the detail says what)
+--   'placed'             placed, not registered yet (no fs.buildSmartPreview)
 --   'destinationExists'  a file was already there; nothing written
 --   'checkFailed'        the file failed a check and was discarded (never written)
 --   'writeFailed'        it could not be written or renamed
@@ -133,6 +135,9 @@ function Delivery.deliver(target, result, body, fs, tempTag)
         return placed, placeError or target.dest
     end
     local sizeNote = facts.dimensionsChecked and '' or ', original size not checked'
+    if not fs.buildSmartPreview then
+        return 'placed', 'DNG ' .. facts.dngVersion .. sizeNote
+    end
     local ok, answer = fs.buildSmartPreview()
     if ok and answer == 'existed' then
         return 'delivered', 'DNG ' .. facts.dngVersion .. sizeNote

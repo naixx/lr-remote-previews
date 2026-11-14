@@ -5,7 +5,7 @@ local Json = require 'Json'
 
 local Jobs = {}
 
-Jobs.CLIENT = 'lr-plugin/0.7.0' -- kept equal to VERSION in Info.lua (a spec checks it)
+Jobs.CLIENT = 'lr-plugin/0.8.0' -- kept equal to VERSION in Info.lua (a spec checks it)
 Jobs.LABEL = 'Lightroom selection'
 Jobs.PAGE_LIMIT = 500 -- items per page while polling one job
 Jobs.READ_LIMIT = 1000 -- items per page when reading the ready items of a job (the protocol's maximum)
@@ -44,14 +44,23 @@ function Jobs.jobUrl(base, jobId)
     return base .. '/api/v1/jobs/' .. integer(jobId)
 end
 
--- GET /api/v1/jobs/{id}/items; state (optional) asks for items in that one state only.
-function Jobs.itemsUrl(base, jobId, since, limit, state)
+-- GET /api/v1/jobs/{id}/items; state (optional) asks for items in that one state only; wait (optional, seconds)
+-- asks the server to hold the request until there is something to return (docs/protocol.md, "Waiting for a change").
+function Jobs.itemsUrl(base, jobId, since, limit, state, wait)
     local url = Jobs.jobUrl(base, jobId) .. '/items?since=' .. integer(since or 0) .. '&limit='
         .. integer(limit or Jobs.PAGE_LIMIT)
     if state then
         url = url .. '&state=' .. Jobs.urlEncode(state)
     end
+    if wait and wait > 0 then
+        url = url .. '&wait=' .. integer(wait)
+    end
     return url
+end
+
+-- POST /api/v1/jobs/{id}/items: adds items to a job that exists (servers with capabilities.appendItems).
+function Jobs.appendUrl(base, jobId)
+    return Jobs.jobUrl(base, jobId) .. '/items'
 end
 
 function Jobs.retryUrl(base, jobId)
@@ -117,6 +126,24 @@ function Jobs.createBody(entries, options)
     end
     return Json.encode({ client = options.client or Jobs.CLIENT, label = options.label or Jobs.LABEL,
         clientId = clientId, items = items })
+end
+
+-- The JSON body of POST /api/v1/jobs/{id}/items; entries as for Jobs.createBody. Returns the body, or nil plus a
+-- message.
+function Jobs.appendBody(entries)
+    local items, err = requestItems(entries)
+    if not items then
+        return nil, err
+    end
+    return Json.encode({ items = items })
+end
+
+-- True when the refs of a job are the photos' catalog ids: jobs sent by this plug-in from version 0.8.0 on (its client
+-- text says so).
+function Jobs.refsAreCatalogIds(job)
+    local major, minor = tostring(type(job) == 'table' and job.client or ''):match('^lr%-plugin/(%d+)%.(%d+)')
+    major, minor = tonumber(major), tonumber(minor)
+    return major ~= nil and (major > 0 or minor >= 8)
 end
 
 -- The JSON body of POST /api/v1/lookup; entries as for Jobs.createBody. Returns the body, or nil plus a message.

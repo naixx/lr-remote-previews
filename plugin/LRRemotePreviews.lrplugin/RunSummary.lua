@@ -23,6 +23,7 @@ RunSummary.SKIPS = {
 RunSummary.OUTCOMES = {
     { 'delivered', 'Smart previews placed and registered by Lightroom' },
     { 'deliveredOther', 'Placed, but Lightroom did not answer "existed"' },
+    { 'placed', 'Placed, to be registered by Lightroom when no import is running' },
     { 'destinationExists', 'A smart preview file was already there (left alone)' },
     { 'checkFailed', 'Discarded: the file did not pass the check' },
     { 'downloadFailed', 'Download failed' },
@@ -65,9 +66,9 @@ function RunSummary:count(key)
     return self.outcomes[key] or self.skips[key] or 0
 end
 
--- Placed smart previews (Lightroom answered 'existed' or something else).
+-- Placed smart previews (Lightroom answered 'existed' or something else, or registration still to come).
 function RunSummary:placed()
-    return self:count('delivered') + self:count('deliveredOther')
+    return self:count('delivered') + self:count('deliveredOther') + self:count('placed')
 end
 
 -- True when something went wrong that the user should look at.

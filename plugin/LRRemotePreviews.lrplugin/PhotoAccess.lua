@@ -151,9 +151,10 @@ local function writeFile(path, data)
     return true
 end
 
--- The file operations Delivery needs, for one photo.
+-- The file operations Delivery needs, for one photo. Without a photo there is no buildSmartPreview: the file is only
+-- placed (the automatic fetch registers it later).
 function PhotoAccess.fileSystem(photo)
-    return {
+    local fs = {
         exists = exists,
         makeFolder = function(path)
             return LrTasks.pcall(LrFileUtils.createAllDirectories, path)
@@ -165,12 +166,15 @@ function PhotoAccess.fileSystem(photo)
         delete = function(path)
             return LrTasks.pcall(LrFileUtils.delete, path)
         end,
-        buildSmartPreview = function()
+    }
+    if photo ~= nil then
+        fs.buildSmartPreview = function()
             return LrTasks.pcall(function()
                 return photo:buildSmartPreview()
             end)
-        end,
-    }
+        end
+    end
+    return fs
 end
 
 return PhotoAccess

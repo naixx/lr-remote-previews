@@ -6,6 +6,10 @@
 -- waits 1, 2, 5, 10, 30, then 60 minutes before the next one. The loop itself is AutoFetchLoop (pure, tested); this
 -- file connects it to the SDK.
 --
+-- Since version 0.8.0 the jobs whose refs are catalog ids are fetched by FastFetch (a waiting request per job, files
+-- placed without calls into the catalog, registration after the import); the others, sent by older versions, still by
+-- fetchOnce below at the interval of the settings (not while an import is in progress).
+--
 -- Started by InitPlugin.lua (when the plug-in loads), EnablePlugin.lua, and the Plug-in Manager when the setting is
 -- switched on; it only starts a task when the setting is on, and the loop ends by itself when it is switched off.
 -- Stopped by ShutdownPlugin.lua and DisablePlugin.lua. Two things stop a running loop:
@@ -14,12 +18,13 @@
 --   * the run token in the plug-in's preferences (prefs.autoFetchRun): every start writes a new one and the loop
 --     ends as soon as the stored token is not its own. So a reloaded plug-in stops the old loop, and two starts
 --     never leave two loops running.
--- A fetch takes the fetch lock (Pipeline.withLease), so it never runs together with a manual fetch or another
--- automatic fetch; when the lock is taken, the round is skipped.
+-- Placing takes the fetch lock (Pipeline.withLease, Pipeline.acquireLease), so it never runs together with a manual
+-- fetch; when the lock is taken, placing waits for a later step.
 --
 -- Since version 0.4.0 the same loop has a second duty, the automatic send (AutoSend.lua, its own setting, off by
--- default): when it is on, each round first sends new photos, then fetches (when the automatic fetch is on). The
--- loop runs while either setting is on. The send takes the fetch lock too, while it talks to the server.
+-- default): when it is on, it looks for new photos (every few seconds while an import comes in: WatchMode) and sends
+-- them at once. The loop runs while either setting is on. Since 0.8.0 the send no longer takes the fetch lock (nothing
+-- else sends what it sends), so a long manual fetch does not hold it up.
 local LrApplication = import 'LrApplication'
 local LrDialogs = import 'LrDialogs'
 local LrPrefs = import 'LrPrefs'
@@ -27,6 +32,7 @@ local LrTasks = import 'LrTasks'
 
 local AutoFetchLoop = require 'AutoFetchLoop'
 local AutoSend = require 'AutoSend'
+local FastFetch = require 'FastFetch'
 local Fetcher = require 'Fetcher'
 local Log = require 'Log'
 local PendingJobs = require 'PendingJobs'
@@ -42,6 +48,7 @@ local AutoFetch = {
 
 AutoFetch.RUN_KEY = 'autoFetchRun'
 AutoFetch.LABEL = 'the automatic fetch'
+AutoFetch.TRIGGER_KEY = 'importTriggered' -- os.time() when «Import a folder without the dialog...» last started one
 
 local function prefs()
     return LrPrefs.prefsForPlugin()
@@ -110,6 +117,21 @@ function AutoFetch.fetchOnce(shouldStop)
     return outcome
 end
 
+-- One step of the automatic fetch: FastFetch for the jobs with catalog ids as refs; when the slow interval has passed
+-- and no import is in progress, fetchOnce for jobs sent by older versions (only when there are such).
+local function fetchStep(importing, sweepDue, shouldStop)
+    local text, nextStep = FastFetch.step(importing, shouldStop)
+    if sweepDue and not importing then
+        local catalogPath = LrApplication.activeCatalog():getPath()
+        for _, job in ipairs(PendingJobs.list(prefs(), catalogPath, os.time())) do
+            if not job.byId then
+                return AutoFetch.fetchOnce(shouldStop), nextStep
+            end
+        end
+    end
+    return text, nextStep
+end
+
 -- Starts the loop when the automatic fetch or the automatic send is on. reason: for the log.
 function AutoFetch.startIfEnabled(reason)
     local upgraded = Settings.upgrade(prefs())
@@ -139,19 +161,22 @@ function AutoFetch.startIfEnabled(reason)
                 local current = Settings.read(prefs())
                 return current.autoFetch, current.autoFetchInterval, current.autoSend
             end,
-            fetch = function()
-                local fetched, text = LrTasks.pcall(AutoFetch.fetchOnce, shouldStop)
+            triggered = function()
+                return tonumber(prefs()[AutoFetch.TRIGGER_KEY])
+            end,
+            fetch = function(importing, sweepDue)
+                local fetched, text, nextStep = LrTasks.pcall(fetchStep, importing, sweepDue, shouldStop)
                 if not fetched then
                     return 'failed: ' .. tostring(text)
                 end
-                return text
+                return text, nextStep
             end,
             send = function()
-                local sent, text = LrTasks.pcall(AutoSend.sendOnce, shouldStop)
+                local sent, text, found, imports = LrTasks.pcall(AutoSend.sendOnce)
                 if not sent then
-                    return 'failed: ' .. tostring(text)
+                    return 'failed: ' .. tostring(text), 0, {}
                 end
-                return text
+                return text, found, imports
             end,
             sleep = function(seconds)
                 LrTasks.sleep(seconds)
@@ -161,6 +186,7 @@ function AutoFetch.startIfEnabled(reason)
                 Log.info(...)
             end,
         })
+        FastFetch.stopAll()
         if AutoFetch.token == token then
             AutoFetch.running = false
         end

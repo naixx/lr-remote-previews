@@ -73,6 +73,20 @@ describe('PendingJobs', function()
         assert.are.equal('contact', PendingJobs.decide(store, CATALOG, t + 1))
     end)
 
+    it('knows which jobs have catalog ids as refs, lists them and takes single jobs off', function()
+        local store = {}
+        PendingJobs.add(store, CATALOG, { 21 }, 1000, { byId = true })
+        PendingJobs.add(store, CATALOG, { 7 }, 1000)
+        PendingJobs.add(store, CATALOG, { 21 }, 1010) -- items added: stays byId, later time
+        assert.are.same({ { id = 7, byId = false, sent = 1000 }, { id = 21, byId = true, sent = 1010 } },
+            PendingJobs.list(store, CATALOG, 1010))
+        assert.is_true(PendingJobs.has(store, CATALOG, 21, 1010))
+        assert.are.equal(1, PendingJobs.finish(store, CATALOG, { 21 }, 1020))
+        assert.is_false(PendingJobs.has(store, CATALOG, 21, 1020))
+        assert.are.equal(0, PendingJobs.finish(store, CATALOG, { 7 }, 1020))
+        assert.are.equal('idle', PendingJobs.decide(store, CATALOG, 1020))
+    end)
+
     it('survives a restart and ignores what it cannot read', function()
         local store = {}
         PendingJobs.add(store, CATALOG, { 17 }, 1000)

@@ -14,7 +14,7 @@ local FetchPlan = {}
 -- Outcomes after which a photo needs nothing more from this job. Anything else (a download or write that failed, a
 -- file that is still being built, a run that stopped first) is tried again by the next fetch.
 FetchPlan.FINAL = {
-    delivered = true, deliveredOther = true, destinationExists = true, checkFailed = true,
+    delivered = true, deliveredOther = true, placed = true, destinationExists = true, checkFailed = true,
     absent = true, rejected = true,
     video = true, noPath = true, hasSmartPreview = true, unsupportedFormat = true, noMapping = true,
     noLocalId = true, noFileId = true, fileIdMismatch = true,

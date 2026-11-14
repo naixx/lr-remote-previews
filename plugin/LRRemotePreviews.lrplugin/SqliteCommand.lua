@@ -2,7 +2,7 @@
 -- Pure Lua 5.1: no Lightroom imports, so it runs in unit tests. Running the command is SqliteRunner's job.
 --
 -- The catalog is opened read-only (.open --readonly), and the only SQL ever passed is the SELECT built by
--- lookupSql or ImportQuery's SELECT. Nothing here writes to the catalog (decision record 0002).
+-- lookupSql, ImportQuery's or CatalogRead's. Nothing here writes to the catalog (decision record 0002).
 --
 -- The catalog path is not put on the command line: it goes into a small script (lookupScript) that sqlite3
 -- reads from standard input. Some Windows builds of sqlite3 (seen: 3.50.6 from Android's platform-tools) read
@@ -138,10 +138,10 @@ function SqliteCommand.lookupScript(database, sql)
     return script(database, sql, '[%w%s_.,=()]')
 end
 
--- The same for the SELECT of «Import a folder without the dialog...» (ImportQuery): one statement on one line, which
--- may also hold quoted names (no ';' inside, no line break, so no dot-command can follow).
+-- The same for the SELECTs of ImportQuery and CatalogRead: one statement on one line, which may also hold quoted names
+-- and '>' (no ';' inside, no line break, so no dot-command can follow).
 function SqliteCommand.readScript(database, sql)
-    return script(database, sql, "[%w _.,=()']")
+    return script(database, sql, "[%w _.,=()'>]")
 end
 
 -- The command line that runs a lookup script. spec: { tool, script, output, errors, windows }.

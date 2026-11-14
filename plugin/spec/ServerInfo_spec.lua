@@ -32,7 +32,7 @@ describe('ServerInfo.normalize', function()
                 path = 'C:\\Program Files\\Adobe\\Adobe DNG Converter\\Adobe DNG Converter.exe',
             },
             roots = { { id = 'archive', label = 'Archive', available = true } },
-            capabilities = { extensions = { '.arw', '.cr2' }, previewLongEdge = 2560 },
+            capabilities = { extensions = { '.arw', '.cr2' }, previewLongEdge = 2560, appendItems = false },
         }, ServerInfo.normalize(decoded(CONTRACT)))
     end)
 
@@ -41,7 +41,7 @@ describe('ServerInfo.normalize', function()
         assert.are.equal('unknown', info.auth)
         assert.are.same({ installed = false }, info.converter)
         assert.are.same({}, info.roots)
-        assert.are.same({ extensions = {} }, info.capabilities)
+        assert.are.same({ extensions = {}, appendItems = false }, info.capabilities)
     end)
 
     it('defaults a root label to its id and availability to false', function()
