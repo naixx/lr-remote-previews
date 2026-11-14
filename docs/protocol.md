@@ -35,7 +35,7 @@ Never needs a token.
 ```json
 {
   "name": "LR Remote Previews",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "api": 1,
   "auth": "token",
   "converter": {
@@ -222,7 +222,13 @@ follows (`null` while active). The job keeps its priority, label and `clientId`.
 `404` for an unknown job. `409` with `"code": "job_cancelled"` for a cancelled job (start a new one). `409`
 `converter_not_installed` and `422` `duplicate_ref` as for a new job; a `ref` the job already has is a
 `duplicate_ref` too. `413` with `"code": "too_many_items"` when the job would then hold more than
-`capabilities.maxItemsPerJob` items: start another job for the rest.
+`capabilities.maxItemsPerJob` items (items in every state count): start another job for the rest. When several
+refusals apply, the first of these is given: `404`, `job_cancelled`, `too_many_items` for a request that is too
+large by itself, `duplicate_ref`, `too_many_items` for the job's total, `converter_not_installed`.
+
+Added items that need no build (already in the cache, or rejected) leave a `done` job `done` with its old
+`finished`, so they do not postpone its deletion after `jobRetentionDays`: for new work, prefer a new job over
+an old finished one.
 
 ### `GET /api/v1/jobs`
 
@@ -262,6 +268,12 @@ after the time has passed that is an answer with no items. A client that waits f
 without asking again and again. Each waiting request holds one connection, so a client keeps at most one per
 job. A server without `capabilities.maxWaitSeconds` ignores `wait` and answers at once: against such a server a
 client must fall back to asking at intervals, not loop.
+
+`wait` may be a fraction; a value outside the range is `422`. The answer carries every item the request would
+return (up to `limit`), not only the one that ended the wait. A wait with `state` is ended only by an item in
+that state: when the job finishes without one (its last items failed, or it was cancelled), the client learns it
+from `job.state` when the time has passed. When the server shuts down, waiting requests are answered at once as
+if their time had passed; a client that then finds the server gone backs off.
 
 ### `GET /api/v1/items/{id}/file`
 
