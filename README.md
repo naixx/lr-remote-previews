@@ -63,5 +63,8 @@ GNU Affero General Public License, version 3 or later (AGPL-3.0-or-later): see [
 Copyright (C) 2026 the LR Remote Previews contributors. Third-party code keeps its own licence and is
 listed next to where it is used.
 
+The plug-in runs inside Lightroom Classic, which is not free software; an additional permission makes that
+combination explicit: [plugin/LICENSE-EXCEPTION.md](plugin/LICENSE-EXCEPTION.md).
+
 Adobe, Lightroom and DNG are trademarks of Adobe. This project is independent: it is not affiliated with, endorsed
 by or supported by Adobe. It relies on behaviour of Lightroom Classic that Adobe does not document and may change.
