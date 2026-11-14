@@ -61,7 +61,7 @@ describe('Jobs.createBody', function()
             { ref = '2', rootId = 'archive', relativePath = 'Caf\195\169/IMG_0002.ARW' },
         })
         assert.are.same({
-            client = 'lr-plugin/0.3.0',
+            client = Jobs.CLIENT,
             label = 'Lightroom selection',
             items = {
                 { ref = '1', root = 'archive', path = '2026/2026.06.20 - shoot/IMG_0001.ARW' },
@@ -75,7 +75,7 @@ describe('Jobs.createBody', function()
         local decoded = Json.decode(Jobs.createBody(entries, { clientId = 'c1f0a6e2', label = 'part 1 of 2' }))
         assert.are.equal('c1f0a6e2', decoded.clientId)
         assert.are.equal('part 1 of 2', decoded.label)
-        assert.are.equal('lr-plugin/0.3.0', decoded.client)
+        assert.are.equal(Jobs.CLIENT, decoded.client)
         assert.is_nil(Json.decode(Jobs.createBody(entries)).clientId)
         for _, bad in ipairs({ '', string.rep('a', 65), 12 }) do
             local body, message = Jobs.createBody(entries, { clientId = bad })

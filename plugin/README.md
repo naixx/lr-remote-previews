@@ -1,21 +1,24 @@
 # LR Remote Previews: Lightroom Classic plug-in
 
 The plug-in asks an LR Remote Previews server, which runs next to the photo originals (for example on a NAS), to
-build smart previews, and brings them into the catalog. This is **stage 2** of [the plan](../docs/plan.md):
-Lightroom does not have to stay open while the server works. Three commands send and fetch (**Send to the server**,
-**Fetch ready smart previews**, **Build smart previews on the server**), an optional automatic fetch runs while
-Lightroom is open, and **Server status...** shows this catalog's jobs and can retry failed ones.
+build smart previews, and brings them into the catalog. It covers **stage 2** of [the plan](../docs/plan.md)
+(Lightroom does not have to stay open while the server works) and, since version 0.4.0, parts of stages 4 and 5.
+Three commands send and fetch (**Send to the server**, **Fetch ready smart previews**, **Build smart previews on the
+server**), an optional automatic fetch runs while Lightroom is open, **Server status...** shows this catalog's jobs and
+can retry failed ones, **Check the server against Lightroom** compares the server's DNG with a smart preview Lightroom
+built itself (stage 5), and an optional automatic send sends photos added to the catalog (stage 4).
 
-Status: **version 0.3.0 has not been run in Lightroom.** Version 0.2.0 (the build command) was run in Lightroom
-Classic 15.6 on Windows on 157 photos (see the table at the end). Everything new in 0.3.0 is checked only by the unit
-tests and by runs with stand-in Lightroom functions (cooperative tasks, a virtual clock) against a fake server that
-follows the protocol, and the plug-in's server calls also against the real server without a converter (no Lightroom
-involved in either).
+Status: **versions 0.3.0 and 0.4.0 have not been run in Lightroom.** Version 0.2.0 (the build command) was run in
+Lightroom Classic 15.6 on Windows on 157 photos (see the table at the end). Everything new in 0.3.0 and 0.4.0 is
+checked only by the unit tests and by runs with stand-in Lightroom functions (cooperative tasks, a virtual clock)
+against a fake server that follows the protocol, and the plug-in's server calls also against the real server without
+a converter (no Lightroom involved in either).
 
 ## Install
 
-1. Get the plug-in folder `LRRemotePreviews.lrplugin`: unzip `LRRemotePreviews-<version>.zip`, or use
-   `plugin/LRRemotePreviews.lrplugin` from a clone of this repository.
+1. Get the plug-in folder `LRRemotePreviews.lrplugin`. Nothing is published yet: add
+   `plugin/LRRemotePreviews.lrplugin` from a checkout of this repository directly, or make
+   `dist/LRRemotePreviews-<version>.zip` with `python tools/package_plugin.py` and unzip it.
 2. In Lightroom Classic: **File > Plug-in Manager > Add**, pick the `LRRemotePreviews.lrplugin` folder.
 3. Select **LR Remote Previews** in the Plug-in Manager's list and fill in the settings.
 4. Make sure a `sqlite3` command-line tool is available (next section) and press **Check sqlite3**.
@@ -67,6 +70,7 @@ The plug-in's section in the Plug-in Manager. The values are stored in Lightroom
 | sqlite3 tool | `C:\Tools\sqlite3.exe` | Optional; see above |
 | Downloads at once | `4` | 1 to 8. How many smart previews are downloaded at the same time while fetching. They are still checked, written and registered one at a time. 1 downloads one file after the other in the command's own task, as version 0.2.0 did |
 | Automatic fetch | off, every 1 minute | Fetch ready smart previews in the background while Lightroom runs (see below). Intervals from 30 seconds to 30 minutes |
+| Automatic send | off | Send raw photos added to the catalog after it was switched on, at the same interval, in the same background task (see below) |
 
 Version 0.1.0 had a single mapping; its values appear as mapping 1, and mapping 1 is also saved under the old keys,
 so going back to 0.1.0 keeps it.
@@ -84,9 +88,9 @@ slashes, never a local path ([protocol](../docs/protocol.md#paths)). Fetching «
 server's root id and relative path back with the same mappings (`PathMap.localPaths`): one candidate per mapping with
 that root id, in the order of the mappings.
 
-Besides the settings, the plug-in keeps two things per catalog in its preferences, keyed by the catalog's path: the
-catalog's `clientId` and how far fetching got for each of the catalog's jobs (both as JSON text). Neither is shown in
-the Plug-in Manager.
+Besides the settings, the plug-in keeps three things per catalog in its preferences, keyed by the catalog's path: the
+catalog's `clientId`, how far fetching got for each of the catalog's jobs, and how far the automatic send got (all as
+JSON text). None is shown in the Plug-in Manager.
 
 ## Commands
 
@@ -99,9 +103,10 @@ All under **Library > Plug-in Extras**.
 | **Send to the server** | You want smart previews for many photos and do not want to wait: send, close Lightroom, fetch later | No |
 | **Fetch ready smart previews** | The server has finished (or partly finished) what was sent, from this catalog or from anywhere else | Only while it fetches |
 | **Build smart previews on the server** | A smaller selection that you want right away: it sends, waits and fetches in one go, as version 0.2.0 did | Yes, until it is done |
+| **Check the server against Lightroom** | After an update of Lightroom or of the server's Adobe DNG Converter: is the server's DNG still the file Lightroom builds? | Yes, until it is done |
 
-All three leave out photos that already have a smart preview and never replace a file, so running one of them again,
-or another one after it, is harmless.
+The first three leave out photos that already have a smart preview and never replace a file, so running one of them
+again, or another one after it, is harmless. The check writes nothing at all.
 
 ### The clientId
 
@@ -215,6 +220,43 @@ catalog yet (an upper bound: some may have been placed in another way). The dial
 A server URL that is not set or malformed, a server that cannot be reached, a rejected token (401) and an answer that
 is not the expected JSON each get their own message.
 
+### Check the server against Lightroom
+
+The whole project rests on the server's DNG being the file Lightroom would build itself; that was shown by hand
+([the research](../docs/research/smart-previews.md)). This command repeats the comparison for one photo, for example
+after an update of Lightroom or of the converter on the server.
+
+1. Select **one** raw photo that already has a smart preview **built by Lightroom itself** (select it and choose
+   **Library > Previews > Build Smart Previews** first). A photo without a smart preview is refused with that advice;
+   the command never builds, changes or deletes a smart preview, and never calls `buildSmartPreview()`.
+2. It reads that smart preview file (`smartPreviewInfo.smartPreviewPath`), maps the photo's path to the server
+   (`POST /api/v1/lookup`) and, when the server does not have the DNG, has it built by a one-item job labelled
+   «Compatibility check» (without the catalog's `clientId`, so the fetch commands never look at it) and waits for it,
+   in a progress bar that can be cancelled (a cancel also cancels the job). It downloads the server's DNG into memory
+   only; nothing is written anywhere, and no fetch lock is taken because nothing is placed.
+3. It compares the two files (`DngCompare.lua`). The raw image is the first SubIFD of IFD0. Compared: its
+   NewSubFileType, width, height, bits per sample, compression, photometric interpretation, samples per pixel, planar
+   configuration, tile size and number of tiles, then **every tile byte for byte**; and in IFD0 `DNGVersion`,
+   `OriginalRawFileName` and `OriginalDefaultFinalSize`. Reported without counting against the result, because two
+   programs are expected to write them differently: `Software`, `PreviewApplicationName` and `...Version`,
+   `DateTime`, `PreviewDateTime`, the XMP packet (compared without the tool, dates, document ids and `crs:Version`),
+   the small thumbnail in IFD0, `RawDataUniqueID` and `NewRawImageDigest`. Every other tag of IFD0 and of the raw
+   image directory is compared too (file offsets and byte counts left out); one that differs is listed as not
+   expected.
+4. The verdict, in a dialog and in the log, with Lightroom's version (`LrApplication.versionString()`), the
+   `Software` tag of each file and the server's version and converter version:
+   - **identical image data**: all tiles byte-identical (an information dialog; a warning when another tag differs
+     unexpectedly);
+   - **N of M tiles identical**: same structure, some tiles differ (a warning: during development 6 of 7 photos were
+     fully identical and one had 27 of 28 identical tiles);
+   - **different structure**: another compression, size, tile layout or identity (an error).
+   A file that cannot be read (for example a truncated download) is reported as not compared. When the catalog's
+   smart preview names Adobe DNG Converter as its software, it was most likely delivered from the server, and the
+   dialog says that the check then says nothing about Lightroom.
+
+The plan's «refuse to deliver when the check fails» is not part of this version: the check is a command to run by
+hand.
+
 ### Automatic fetch
 
 Off by default. When it is switched on in the Plug-in Manager, a background task fetches everything this catalog sent
@@ -223,9 +265,9 @@ the log per result (the same result twice in a row is logged once), errors only 
 costs one request (the job list); the server's info is asked for only when there is something to fetch.
 
 - It starts when the plug-in loads (`LrInitPlugin`; `Info.lua` sets `LrForceInitPlugin` so that this happens when
-  Lightroom starts), when the plug-in is enabled, and when the setting is switched on in the Plug-in Manager. With the
-  setting off, no task is started.
-- It stops within about a second (or after the file it is placing) when the setting is switched off, when the plug-in
+  Lightroom starts), when the plug-in is enabled, and when the setting (or the automatic send, below) is switched on in
+  the Plug-in Manager. With both settings off, no task is started.
+- It stops within about a second (or after the file it is placing) when both settings are switched off, when the plug-in
   is disabled (`LrDisablePlugin`) or unloaded, reloaded or Lightroom quits (`LrShutdownPlugin`), or when Lightroom
   reports the plug-in as disabled. Two signals reach it: a stop flag in the module `AutoFetch` and a run token in the
   plug-in's preferences (every start writes a new one; a loop whose token is no longer the stored one ends, so a
@@ -235,6 +277,51 @@ costs one request (the job list); the server's info is asked for only when there
   fetch skips a round when the lock is taken; a manual command says so in a dialog. A lock left behind when Lightroom
   closed in the middle of a fetch frees itself within 3 minutes (a lock claiming a longer life, after the computer's
   clock was set back, is ignored).
+
+### Automatic send
+
+Off by default. When **Automatic send** is switched on in the Plug-in Manager, the same background task as the
+automatic fetch (one loop, two duties; it runs while either setting is on, at the same interval) first sends new
+photos, then fetches. It sends raw photos **added to the catalog after the option was switched on** that have no smart
+preview and whose path maps to an available server root, as one job labelled «Lightroom import (automatic)» with this
+catalog's `clientId`, so the automatic fetch (or **Fetch ready smart previews**) brings their smart previews in. It
+shows no dialog and logs one line per round that did something; a round with nothing to do logs nothing, and the same
+line twice in a row (for example the same error) is logged once.
+
+How new photos are found. The SDK has no import event; `catalog:findPhotos` has no criterion for the import date or
+for smart previews (its documented date criteria are `captureTime` and `touchTime`, «Edit Date»); and the «Previous
+Import» collection (`catalog.kPreviousImport`) can only be reached by making it the user's active source with
+`catalog:setActiveSources`, which a background task must not do. So:
+
+- Each round reads `catalog:getAllPhotos()` and every photo's catalog id, `photo.localIdentifier`, and compares it with
+  a mark remembered per catalog; only photos above the mark are read further (`PhotoAccess.describe`). The task yields
+  every 500 photos. The SDK documents `localIdentifier` as «unique within this catalog»; **that new photos get larger
+  ids than every photo before them is not documented** (the catalog's id counter suggests it) and has not been
+  checked in Lightroom. If it did not hold, photos would be missed, never sent twice.
+- Fallback, used only when `getAllPhotos` fails: `catalog:findPhotos` with `touchTime` «in the last N hours» (N from
+  the last change of the remembered state). **That an import gives a photo an Edit Date is not documented and not
+  checked**; if it does not, the fallback finds nothing.
+- **Diagnostics: new photos for the automatic send** shows what both ways see now, so this can be checked in Lightroom.
+
+The rules (`AutoSendPlan.lua`):
+
+- The first round for a catalog only records the mark: what is in the catalog when the option is switched on is never
+  sent. Switching the option off forgets the marks of all catalogs, so switching it on again starts from that moment.
+- A photo is taken in the round **after** the one that first saw it, so that an import in progress has settled.
+- Left out for good: virtual copies, videos, photos that already have a smart preview, file types the server does not
+  take, photos under no path mapping or whose server root is not available, photos whose catalog record names another
+  file.
+- A photo whose file record cannot be read from the catalog database yet (sqlite3) waits, together with the photos
+  after it, for the next round; after 3 rounds it is left out and the others go ahead.
+- At most 500 photos per round (and at most the server's `maxItemsPerJob`); the rest follow in the next rounds.
+- The mark moves only after the job was created; a round that fails (the server cannot be reached, the job is
+  refused, sqlite3 is missing, an SDK call fails) leaves it where it was and the next round tries again. No photo is
+  sent twice by the automatic send, also across restarts; anything sent earlier in another way costs the server
+  nothing, because its cache answers at once.
+- The send takes the fetch lock while it talks to the server; when another task holds it, the round is skipped.
+
+If **Build Smart Previews** is ticked in Lightroom's import dialog, Lightroom builds the smart previews of an import
+itself; photos it has not finished within a round may be sent too. Nothing is overwritten either way.
 
 The plug-in logs to `LRRemotePreviews.log` in Lightroom's log folder. With Lightroom Classic 15.6 on Windows that is
 `%LOCALAPPDATA%\Adobe\Lightroom\Logs\LrClassicLogs`; older versions used an `LrClassicLogs` folder in your Documents
@@ -249,11 +336,16 @@ folder. The access token is never logged.
   photos and writes `smart-preview-trybuild-<time>.txt` next to the catalog with the result (`created`, `existed` or
   `failed`) and the smart preview before and after. It does what **Library > Previews > Build Smart Previews** does
   for those photos, so try it on a test catalog.
+- **Diagnostics: new photos for the automatic send** shows the number of photos and the largest catalog id, how long
+  reading them took, the 10 photos with the largest catalog ids, the automatic send's mark and how many photos lie
+  above it, and what `catalog:findPhotos` with `touchTime` in the last 24 hours finds (the fallback). It sends and
+  writes nothing and does not move the mark; the result goes to a dialog and to the log.
 
 ## Safety rules
 
 From [decision record 0005](../docs/adr/0005-nothing-of-the-users-is-put-at-risk.md) and the last section of the
-[protocol](../docs/protocol.md), unchanged in 0.3.0 and the same for every command and for the automatic fetch:
+[protocol](../docs/protocol.md), unchanged in 0.4.0 and the same for every command, the automatic fetch and the
+automatic send (which places nothing itself; its photos are placed by a fetch):
 
 - The catalog is only read, with sqlite3 in read-only mode; nothing writes to it. Lightroom registers a placed file
   itself when `buildSmartPreview()` is called ([decision record 0001](../docs/adr/0001-register-by-placing-the-file.md)).
@@ -264,6 +356,8 @@ From [decision record 0005](../docs/adr/0005-nothing-of-the-users-is-put-at-risk
   that Lightroom itself creates in the moment between that check and the rename is not detected.
 - Placing happens one file at a time, in one task only (concurrent downloads only download), and the fetch lock keeps
   two fetches from placing at the same time.
+- **Check the server against Lightroom** only reads: the smart preview from the store, and the server's DNG into
+  memory. It writes no file and never calls `buildSmartPreview()`.
 
 ## Layout
 
@@ -291,9 +385,12 @@ Lua 5.1:
 | `CatalogState.lua` | yes | The `clientId` and the job records of each catalog, in a key-value store |
 | `FetchPlan.lua` | yes | Which of the catalog's jobs to read, and what to remember about each afterwards |
 | `Lease.lua` | yes | The fetch lock in a key-value store: take, refresh, release, expiry |
-| `AutoFetchLoop.lua` | yes | The loop of the automatic fetch, with Lightroom passed in |
+| `AutoFetchLoop.lua` | yes | The loop of the automatic fetch and send, with Lightroom passed in |
+| `AutoSendPlan.lua` | yes | The automatic send: which photos are new, when they are taken, the mark per catalog, the log line |
 | `StatusReport.lua` | yes | The texts of the status dialog |
-| `DngReader.lua` | yes | `DNGVersion`, `OriginalRawFileName`, `OriginalDefaultFinalSize` from a DNG's first IFD, both byte orders |
+| `DngReader.lua` | yes | `DNGVersion`, `OriginalRawFileName`, `OriginalDefaultFinalSize` from a DNG's first IFD, both byte orders; the directories, entries and tiles a comparison needs |
+| `DngCompare.lua` | yes | Comparing two DNGs: raw image structure, every tile, identity tags, expected and unexpected differences, the texts |
+| `CompatCheck.lua` | yes | «Check the server against Lightroom»: which photo can be checked, what to do with the server's answers, the result text |
 | `Delivery.lua` | yes | Checking a downloaded DNG, placing it (temporary name, rename, no overwrite), `buildSmartPreview()` |
 | `RunSummary.lua` | yes | Counts per outcome and reason, the dialog texts, the per-photo log lines |
 | `Json.lua` | yes | JSON, [rxi/json.lua](https://github.com/rxi/json.lua) unmodified (see [THIRD-PARTY.md](THIRD-PARTY.md)) |
@@ -303,10 +400,11 @@ Lua 5.1:
 | `PhotoAccess.lua` | no | Reading photos, finding them by path, the selection, the file operations for `Delivery` |
 | `Pipeline.lua` | no | The steps the commands share: preparing a send, lookups, the download queue, the fetch lock, the `clientId` |
 | `Fetcher.lua` | no | Fetching for a selection or for everything this catalog sent |
-| `AutoFetch.lua` | no | Starting and stopping the automatic fetch |
+| `AutoFetch.lua` | no | Starting and stopping the automatic loop (fetch and send) |
+| `AutoSend.lua` | no | One round of the automatic send: finding new photos (scan, fallback), sending them |
 | `PluginInfoProvider.lua` | no | The Plug-in Manager section |
-| `SendToServer.lua`, `FetchSmartPreviews.lua`, `BuildSmartPreviews.lua`, `ServerStatus.lua`, `Diagnostics*.lua` | no | The menu commands |
-| `InitPlugin.lua`, `EnablePlugin.lua`, `DisablePlugin.lua`, `ShutdownPlugin.lua` | no | Start and stop the automatic fetch |
+| `SendToServer.lua`, `FetchSmartPreviews.lua`, `BuildSmartPreviews.lua`, `ServerStatus.lua`, `CheckServer.lua`, `Diagnostics*.lua` | no | The menu commands |
+| `InitPlugin.lua`, `EnablePlugin.lua`, `DisablePlugin.lua`, `ShutdownPlugin.lua` | no | Start and stop the automatic loop |
 
 A smart preview lives at `<catalog folder>\<catalog name> Smart Previews.lrdata\<U[0]>\<U[0..3]>\<U>.dng`, where `U`
 is the file UUID (`AgLibraryFile.id_global`), upper case with dashes (found with Lightroom Classic 15.6 on Windows,
@@ -334,7 +432,8 @@ python tools/package_plugin.py                # builds dist/LRRemotePreviews-<ve
 luacheck looks for `.luacheckrc` only in the current folder and its parents, so from the repository root it needs
 `--config plugin/.luacheckrc`; inside `plugin/` a plain `luacheck .` finds it. The spec files find the plug-in's
 modules relative to their own location, so `busted spec` from inside `plugin/` works too. `spec/TestDng.lua` builds
-the synthetic TIFF/DNG files the specs read; it is a helper, not a spec. `spec/DownloadQueue_spec.lua` stands in for
+the synthetic TIFF/DNG files the specs read (`TestDng.full` a smart-preview-like DNG with a thumbnail, a raw image
+directory and tiles, in either byte order); it is a helper, not a spec. `spec/DownloadQueue_spec.lua` stands in for
 Lightroom's tasks with coroutines and for `LrTasks.pcall` with a pcall that can be yielded across.
 
 Nothing in CI can run Lightroom. A change that touches the SDK has to be tried by hand on a **test catalog**; say in the
@@ -345,6 +444,9 @@ pull request on which Lightroom version and platform.
 - Checking the SHA-256 of a download.
 - More than 200 jobs per catalog on the server for «everything this catalog sent» (the protocol's largest list).
 - Finding the jobs of a catalog that was moved or renamed (it gets a new `clientId`); fetch by selection instead.
+- Refusing to deliver when the compatibility check fails (the plan's stage 5); the check is a command run by hand.
+- Detecting an import as it happens: the SDK has no import event; the automatic send looks for new photos every
+  interval.
 
 ## What has been tried in Lightroom
 
@@ -393,3 +495,15 @@ Version 0.3.0: nothing has been tried in Lightroom yet.
 | «Server status...»: the dialog (`LrDialogs.presentModalDialog`, `LrBinding.makePropertyTable`, `LrView.osFactory`), «Retry», «Fetch now», «Open the dashboard» (`LrHttp.openUrlInBrowser`) | not tried |
 | The automatic fetch: `LrInitPlugin` with `LrForceInitPlugin`, `LrEnablePlugin`, `LrDisablePlugin`, `LrShutdownPlugin`, the background task, a quiet fetch, the fetch lock against a manual fetch, stopping | not tried |
 | Lightroom quitting while the automatic fetch runs | not tried |
+
+Version 0.4.0: nothing has been tried in Lightroom yet.
+
+| What | Result |
+|---|---|
+| The new menu items «Check the server against Lightroom» and «Diagnostics: new photos for the automatic send»; the new setting «Automatic send» (`checkbox`) | not tried |
+| The check: reading a smart preview with `io.open(path, 'rb')`; `LrApplication.versionString()`; a one-item job without `clientId`, its cancel | not tried |
+| The check on a smart preview Lightroom built, against the server's DNG for the same raw file: the verdict | not tried (the comparison itself only on synthetic files; the hand comparison in [the research](../docs/research/smart-previews.md) used `tools/dng_compare.py`) |
+| The automatic send: `catalog:getAllPhotos()` and `photo.localIdentifier` in a background task, `LrTasks.yield` during the scan, the time the scan takes on a large catalog | not tried |
+| New photos of an import getting larger `localIdentifier` values than every photo before them | not checked (undocumented) |
+| The fallback `catalog:findPhotos` with `touchTime` «inLast» N hours; whether an import sets the Edit Date | not tried (undocumented) |
+| The automatic send and fetch in one loop; switching the send off and on; a restart of Lightroom in between | not tried |

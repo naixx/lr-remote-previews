@@ -243,7 +243,8 @@ function RunSummary:sendText(context)
     return table.concat(lines, '\n')
 end
 
--- One log line for a photo: 'IMG_0001.ARW: delivered (DNG 1.7.0.0) -> <path>'.
+-- One log line for a photo: 'IMG_0001.ARW: delivered (DNG 1.7.0.0, <path>)' (Pipeline.place puts the path into the
+-- detail).
 function RunSummary.photoLine(fileName, key, detail)
     local line = tostring(fileName) .. ': ' .. key
     local text = SKIP_TEXT[key] or OUTCOME_TEXT[key]

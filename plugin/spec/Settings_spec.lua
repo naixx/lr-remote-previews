@@ -6,7 +6,7 @@ local Settings = require 'Settings'
 
 local EMPTY = { serverUrl = '', token = '', localPrefix1 = '', rootId1 = '', localPrefix2 = '', rootId2 = '',
     localPrefix3 = '', rootId3 = '', sqlitePath = '', downloadConcurrency = 4, autoFetch = false,
-    autoFetchInterval = 60 }
+    autoFetchInterval = 60, autoSend = false }
 
 local function with(values)
     local settings = {}
@@ -53,6 +53,9 @@ describe('Settings', function()
         read = Settings.read({ downloadConcurrency = 99, autoFetchInterval = 'often' })
         assert.are.equal(8, read.downloadConcurrency)
         assert.are.equal(60, read.autoFetchInterval)
+        assert.is_false(read.autoSend)
+        assert.is_true(Settings.read({ autoSend = true }).autoSend)
+        assert.is_false(Settings.read({ autoSend = 'on' }).autoSend)
         assert.are.equal(1, Settings.option('downloadConcurrency', 0))
         assert.are.equal(3, Settings.option('downloadConcurrency', 3.7))
         assert.are.equal(4, Settings.option('downloadConcurrency', 0 / 0))
@@ -71,6 +74,15 @@ describe('Settings', function()
         within(Settings.INTERVAL_CHOICES, 'autoFetchInterval')
     end)
 
+    it('bounds the interval to the choices offered: 30 seconds to 30 minutes', function()
+        local option = Settings.OPTIONS.autoFetchInterval
+        assert.are.equal(Settings.INTERVAL_CHOICES[1], option.min)
+        assert.are.equal(Settings.INTERVAL_CHOICES[#Settings.INTERVAL_CHOICES], option.max)
+        assert.are.equal(30, option.min)
+        assert.are.equal(1800, option.max)
+        assert.are.equal(1800, Settings.read({ autoFetchInterval = 3600 }).autoFetchInterval)
+    end)
+
     it('writes every key, trimmed, and mapping 1 also under the 0.1.0 keys', function()
         local store = { unrelated = 'kept' }
         Settings.write(store, { serverUrl = 'http://nas:8787 ', token = ' t ', localPrefix1 = 'Z:\\', rootId1 = 'a',
@@ -78,7 +90,7 @@ describe('Settings', function()
         assert.are.same({ unrelated = 'kept', serverUrl = 'http://nas:8787', token = 't', localPrefix1 = 'Z:\\',
             rootId1 = 'a', localPrefix2 = '', rootId2 = '', localPrefix3 = '/Volumes/Photos', rootId3 = 'b',
             sqlitePath = '', localPrefix = 'Z:\\', rootId = 'a', downloadConcurrency = 2, autoFetch = true,
-            autoFetchInterval = 60 }, store)
+            autoFetchInterval = 60, autoSend = false }, store)
         assert.are.same(Settings.read(store), Settings.read(store))
     end)
 

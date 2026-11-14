@@ -28,8 +28,21 @@ local function fakeEnv(options)
     end
     function env.fetch()
         env.fetches[#env.fetches + 1] = env.clock
+        env.order[#env.order + 1] = 'fetch'
         env.clock = env.clock + (options.fetchTakes or 0)
         return options.text and options.text(#env.fetches) or 'nothing new to fetch'
+    end
+    env.sends, env.order = {}, {}
+    function env.send()
+        env.sends[#env.sends + 1] = env.clock
+        env.order[#env.order + 1] = 'send'
+        if options.onSend then
+            options.onSend(env)
+        end
+        if options.sendText then
+            return options.sendText(#env.sends)
+        end
+        return nil
     end
     function env.log(...)
         env.logs[#env.logs + 1] = string.format(...)
@@ -65,7 +78,7 @@ describe('AutoFetchLoop', function()
         AutoFetchLoop.run(env, { firstDelay = 0 })
         assert.are.equal(2, count(env.logs, 'automatic fetch: nothing new to fetch'))
         assert.are.equal(1, count(env.logs, 'automatic fetch: 3 placed'))
-        assert.matches('loop ended %(stopped%) after 5 fetch', env.logs[#env.logs])
+        assert.matches('loop ended %(stopped%) after 5 round', env.logs[#env.logs])
     end)
 
     it('ends at once when the setting is off, without fetching', function()
@@ -101,5 +114,61 @@ describe('AutoFetchLoop', function()
         assert.are.equal('stopped', reason)
         assert.are.equal(0, rounds)
         assert.are.equal(5, env.clock)
+    end)
+
+    it('never sends while the send setting is off', function()
+        local env = fakeEnv({ stopAt = 200 })
+        AutoFetchLoop.run(env, { firstDelay = 0 })
+        assert.are.same({}, env.sends)
+        assert.are.equal(0, count(env.logs, 'automatic send'))
+    end)
+
+    it('sends first and then fetches in each round when both are on', function()
+        local env = fakeEnv({ stopAt = 130, settings = function()
+            return true, 60, true
+        end })
+        local reason, rounds = AutoFetchLoop.run(env, { firstDelay = 0 })
+        assert.are.equal('stopped', reason)
+        assert.are.equal(3, rounds)
+        assert.are.same({ 'send', 'fetch', 'send', 'fetch', 'send', 'fetch' }, env.order)
+    end)
+
+    it('runs with only the send setting on, logs nothing for a quiet round, and a text once in a row', function()
+        local texts = { 'watching', nil, 'not done: no server', 'not done: no server', nil, 'not done: no server',
+            'sent 3 new photos as job 7' }
+        local env = fakeEnv({ stopAt = 400, sendText = function(n)
+            return texts[n]
+        end, settings = function()
+            return false, 60, true
+        end })
+        local reason, rounds = AutoFetchLoop.run(env, { firstDelay = 0 })
+        assert.are.equal('stopped', reason)
+        assert.are.equal(7, rounds)
+        assert.are.same({}, env.fetches)
+        assert.are.equal(3, count(env.logs, 'automatic send: '))
+        assert.are.equal(1, count(env.logs, 'automatic send: watching'))
+        assert.are.equal(1, count(env.logs, 'automatic send: not done: no server'))
+        assert.are.equal(1, count(env.logs, 'automatic send: sent 3 new photos as job 7'))
+    end)
+
+    it('ends when both settings are off, and skips the fetch when asked to stop during the send', function()
+        local env = fakeEnv({ settings = function()
+            return false, 60, false
+        end })
+        assert.are.equal('switched off', AutoFetchLoop.run(env))
+        local stopped = false
+        env = fakeEnv({ onSend = function()
+            stopped = true
+        end, settings = function()
+            return true, 60, true
+        end })
+        local oldStop = env.shouldStop
+        env.shouldStop = function()
+            return stopped or oldStop()
+        end
+        local reason, rounds = AutoFetchLoop.run(env, { firstDelay = 0 })
+        assert.are.equal('stopped', reason)
+        assert.are.equal(1, rounds)
+        assert.are.same({ 'send' }, env.order)
     end)
 end)

@@ -24,13 +24,16 @@ Settings.TEXT_KEYS[#Settings.TEXT_KEYS + 1] = 'sqlitePath'
 -- Settings that are not text (version 0.3.0):
 -- downloadConcurrency: how many smart previews are downloaded at the same time (placing stays one at a time)
 -- autoFetch:           fetch ready smart previews in the background while Lightroom runs
--- autoFetchInterval:   seconds between two automatic fetches
+-- autoFetchInterval:   seconds between two rounds of the automatic loop (30 seconds to 30 minutes)
+-- and version 0.4.0:
+-- autoSend:            send raw photos added to the catalog that have no smart preview, in the same loop
 Settings.OPTIONS = {
     downloadConcurrency = { kind = 'integer', default = 4, min = 1, max = 8 },
     autoFetch = { kind = 'boolean', default = false },
-    autoFetchInterval = { kind = 'integer', default = 60, min = 30, max = 3600 },
+    autoFetchInterval = { kind = 'integer', default = 60, min = 30, max = 1800 },
+    autoSend = { kind = 'boolean', default = false },
 }
-Settings.OPTION_KEYS = { 'downloadConcurrency', 'autoFetch', 'autoFetchInterval' }
+Settings.OPTION_KEYS = { 'downloadConcurrency', 'autoFetch', 'autoFetchInterval', 'autoSend' }
 
 -- The choices the Plug-in Manager offers.
 Settings.CONCURRENCY_CHOICES = { 1, 2, 3, 4, 5, 6, 7, 8 }

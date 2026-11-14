@@ -28,6 +28,8 @@ return {
         { title = 'Server status...', file = 'ServerStatus.lua' },
         { title = 'Diagnostics: smart preview report (all photos)', file = 'DiagnosticsReport.lua' },
         { title = 'Diagnostics: try buildSmartPreview on selected photos', file = 'DiagnosticsTryBuild.lua' },
+        { title = 'Check the server against Lightroom', file = 'CheckServer.lua' },
+        { title = 'Diagnostics: new photos for the automatic send', file = 'DiagnosticsNewPhotos.lua' },
     },
-    VERSION = { major = 0, minor = 3, revision = 0, build = 0 },
+    VERSION = { major = 0, minor = 4, revision = 0, build = 0 },
 }

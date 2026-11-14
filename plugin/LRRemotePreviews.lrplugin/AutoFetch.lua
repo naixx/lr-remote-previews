@@ -12,11 +12,16 @@
 --     never leave two loops running.
 -- A fetch takes the fetch lock (Pipeline.withLease), so it never runs together with a manual fetch, the build
 -- command, or another automatic fetch; when the lock is taken, the round is skipped.
+--
+-- Since version 0.4.0 the same loop has a second duty, the automatic send (AutoSend.lua, its own setting, off by
+-- default): when it is on, each round first sends new photos, then fetches (when the automatic fetch is on). The
+-- loop runs while either setting is on. The send takes the fetch lock too, while it talks to the server.
 local LrApplication = import 'LrApplication'
 local LrPrefs = import 'LrPrefs'
 local LrTasks = import 'LrTasks'
 
 local AutoFetchLoop = require 'AutoFetchLoop'
+local AutoSend = require 'AutoSend'
 local CatalogState = require 'CatalogState'
 local Fetcher = require 'Fetcher'
 local Log = require 'Log'
@@ -81,10 +86,10 @@ function AutoFetch.fetchOnce(shouldStop)
     return outcome
 end
 
--- Starts the loop when the setting is on. reason: for the log.
+-- Starts the loop when the automatic fetch or the automatic send is on. reason: for the log.
 function AutoFetch.startIfEnabled(reason)
     local settings = Settings.read(prefs())
-    if not settings.autoFetch then
+    if not settings.autoFetch and not settings.autoSend then
         Log.info('automatic fetch: off (%s)', reason)
         return false
     end
@@ -92,7 +97,8 @@ function AutoFetch.startIfEnabled(reason)
     AutoFetch.token = token
     AutoFetch.stopRequested = false
     prefs()[AutoFetch.RUN_KEY] = token
-    Log.info('automatic fetch: starting (%s), every %d s', reason, settings.autoFetchInterval)
+    Log.info('automatic fetch: starting (%s), every %d s (fetch %s, send %s)', reason, settings.autoFetchInterval,
+        settings.autoFetch and 'on' or 'off', settings.autoSend and 'on' or 'off')
     local function shouldStop()
         return (AutoFetch.stopRequested and AutoFetch.token == token) or prefs()[AutoFetch.RUN_KEY] ~= token
             or pluginDisabled()
@@ -103,11 +109,18 @@ function AutoFetch.startIfEnabled(reason)
             shouldStop = shouldStop,
             settings = function()
                 local current = Settings.read(prefs())
-                return current.autoFetch, current.autoFetchInterval
+                return current.autoFetch, current.autoFetchInterval, current.autoSend
             end,
             fetch = function()
                 local fetched, text = LrTasks.pcall(AutoFetch.fetchOnce, shouldStop)
                 if not fetched then
+                    return 'failed: ' .. tostring(text)
+                end
+                return text
+            end,
+            send = function()
+                local sent, text = LrTasks.pcall(AutoSend.sendOnce, shouldStop)
+                if not sent then
                     return 'failed: ' .. tostring(text)
                 end
                 return text

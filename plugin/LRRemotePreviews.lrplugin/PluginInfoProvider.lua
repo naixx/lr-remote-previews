@@ -1,12 +1,13 @@
 -- The plug-in's section in File > Plug-in Manager: server URL, access token, up to three path mappings, the
--- sqlite3 tool, the "Test connection" and "Check sqlite3" buttons, the number of downloads at once and the
--- automatic fetch. Values are copied from LrPrefs into the dialog's property table when the section opens and
--- written back when the dialog closes (or another plug-in is selected).
+-- sqlite3 tool, the "Test connection" and "Check sqlite3" buttons, the number of downloads at once, the automatic
+-- fetch and the automatic send. Values are copied from LrPrefs into the dialog's property table when the section
+-- opens and written back when the dialog closes (or another plug-in is selected).
 local LrDialogs = import 'LrDialogs'
 local LrPrefs = import 'LrPrefs'
 local LrTasks = import 'LrTasks'
 local LrView = import 'LrView'
 
+local AutoSendPlan = require 'AutoSendPlan'
 local Log = require 'Log'
 local ServerClient = require 'ServerClient'
 local ServerInfo = require 'ServerInfo'
@@ -85,9 +86,15 @@ function provider.endDialog(propertyTable)
     Settings.write(prefs, propertyTable)
     local saved = Settings.read(prefs)
     Log.info('settings saved (server URL: "%s", %d path mapping(s), sqlite3 path: "%s", %d download(s) at once, '
-        .. 'automatic fetch: %s every %d s)', saved.serverUrl, #Settings.mappings(saved), saved.sqlitePath,
-        saved.downloadConcurrency, saved.autoFetch and 'on' or 'off', saved.autoFetchInterval)
-    -- Switching the automatic fetch on starts it now; switched off, the running loop ends by itself.
+        .. 'automatic fetch: %s every %d s, automatic send: %s)', saved.serverUrl, #Settings.mappings(saved),
+        saved.sqlitePath, saved.downloadConcurrency, saved.autoFetch and 'on' or 'off', saved.autoFetchInterval,
+        saved.autoSend and 'on' or 'off')
+    -- With the automatic send off, forget where it got to: switched on again, it starts from that moment and does not
+    -- send what was imported meanwhile.
+    if not saved.autoSend then
+        AutoSendPlan.forget(prefs)
+    end
+    -- Switching the automatic fetch or send on starts the loop now; with both off, the running loop ends by itself.
     local ok, err = pcall(function()
         require('AutoFetch').ensureRunning('settings saved')
     end)
@@ -194,6 +201,14 @@ function provider.sectionsForTopOfDialog(f, propertyTable)
         f:popup_menu { items = intervalItems, value = bind 'autoFetchInterval' },
     }
     rows[#rows + 1] = note('Quietly, for everything this catalog sent: no dialogs, a line in the log. Off by default.')
+    rows[#rows + 1] = f:row {
+        label 'Automatic send:',
+        f:checkbox { title = 'Send new photos to the server by themselves, at the same interval',
+            value = bind 'autoSend' },
+    }
+    rows[#rows + 1] = note('Raw photos added to the catalog after this is switched on, without a smart preview,')
+    rows[#rows + 1] = note('under a path mapping. Photos already in the catalog are left alone. Off by default.')
+    rows[#rows + 1] = note('The automatic fetch (or «Fetch ready smart previews») brings the smart previews in.')
     return { rows }
 end
 
