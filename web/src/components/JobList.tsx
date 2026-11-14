@@ -1,4 +1,4 @@
-import { finishedCount, jobTitle, type Job, type JobCounts } from '../api/jobs';
+import { clientName, finishedCount, jobTitle, type Job, type JobCounts } from '../api/jobs';
 import { links } from '../app/router';
 import { formatCount, formatFullTime, formatLocalTime, formatRelative } from '../lib/format';
 import { StatusBadge } from './StatusBadge';
@@ -57,7 +57,7 @@ interface JobRowProps {
 function JobRow({ job, now, fractionWidth }: JobRowProps) {
   const title = jobTitle(job);
   const hasLabel = Boolean(job.label?.trim());
-  const meta = [hasLabel ? `Job ${job.id}` : null, job.client?.trim() || null].filter(Boolean);
+  const meta = [hasLabel ? `Job ${job.id}` : null, clientName(job.client)].filter(Boolean);
   const { counts } = job;
 
   return (
@@ -69,6 +69,7 @@ function JobRow({ job, now, fractionWidth }: JobRowProps) {
           </a>
         </h3>
         <JobStateBadge job={job} />
+        <PriorityBadge job={job} />
         <span className="job__time">
           <time dateTime={job.created} title={formatFullTime(job.created)}>
             {formatLocalTime(job.created, now)}
@@ -119,6 +120,11 @@ export function JobStateBadge({ job }: { job: Job }) {
     case 'cancelled':
       return <StatusBadge tone="neutral">Cancelled</StatusBadge>;
   }
+}
+
+/** Marks a background job; a normal one, or one from a server without priorities, gets none. */
+export function PriorityBadge({ job }: { job: Job }) {
+  return job.priority === 'background' ? <StatusBadge tone="neutral">Background</StatusBadge> : null;
 }
 
 /** Finished items as a bar, with failed, rejected and cancelled drawn apart from ready ones. */

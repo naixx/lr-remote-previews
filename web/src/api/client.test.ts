@@ -8,6 +8,7 @@ import {
   mockFetch,
   passedSelfTest,
   sampleBrowse,
+  sampleCacheClean,
   sampleFolderQueued,
   sampleInfo,
   sampleItemPage,
@@ -346,6 +347,22 @@ describe('createApiClient().getSettings and updateSettings', () => {
     expect(requestOf(fetchMock)).toMatchObject({ url: 'api/v1/settings', method: 'GET' });
   });
 
+  it('sends the automatic scan and the cache limits as whole objects', async () => {
+    const fetchMock = answering(sampleSettings());
+    const change = {
+      autoScan: {
+        enabled: true,
+        roots: ['archive'],
+        intervalMinutes: 30,
+        settleMinutes: 15,
+        maxFilesPerRun: 2000,
+      },
+      cache: { maxBytes: 50_000_000_000, maxAgeDays: null },
+    };
+    await createApiClient({ fetch: fetchMock }).updateSettings(change);
+    expect(requestOf(fetchMock)).toMatchObject({ method: 'PATCH', body: change });
+  });
+
   it('sends a change with PATCH as JSON and returns the new settings', async () => {
     const fetchMock = answering(sampleSettings({ batchSize: 16 }));
     const change = {
@@ -402,6 +419,22 @@ describe('createApiClient().browse and queueFolder', () => {
     const fetchMock = answering({ ...sampleBrowse(), rawFiles: -1 });
     const error = await captureError(createApiClient({ fetch: fetchMock }).browse('archive', ''));
     expect((error as ApiError).detail).toContain('rawFiles');
+  });
+
+  it('queues a folder at background priority when asked', async () => {
+    const fetchMock = answering(sampleFolderQueued(), 201);
+    await createApiClient({ fetch: fetchMock }).queueFolder({
+      root: 'archive',
+      path: '2026',
+      recursive: true,
+      priority: 'background',
+    });
+    expect(requestOf(fetchMock).body).toEqual({
+      root: 'archive',
+      path: '2026',
+      recursive: true,
+      priority: 'background',
+    });
   });
 
   it('queues a folder with POST and returns the jobs', async () => {
@@ -485,6 +518,107 @@ describe('createApiClient().getLog', () => {
   it('reports a missing endpoint on an older server', async () => {
     const fetchMock = answering({ detail: 'Not Found' }, 404);
     const error = await captureError(createApiClient({ fetch: fetchMock }).getLog());
+    expect(isMissingEndpoint(error as ApiError)).toBe(true);
+  });
+});
+
+describe('createApiClient().runAutoScan', () => {
+  it('starts a scan of the configured roots with POST and no body', async () => {
+    const fetchMock = answering({ started: true }, 202);
+    const result = await createApiClient({ token: 't', fetch: fetchMock }).runAutoScan(null);
+    expect(result).toEqual({ started: true });
+    expect(requestOf(fetchMock)).toEqual({
+      url: 'api/v1/autoscan/run',
+      method: 'POST',
+      body: undefined,
+      contentType: null,
+    });
+    expect(authHeaderOf(fetchMock)).toBe('Bearer t');
+  });
+
+  it('names the roots to scan when given', async () => {
+    const fetchMock = answering({ started: true }, 202);
+    await createApiClient({ fetch: fetchMock }).runAutoScan(['archive']);
+    expect(requestOf(fetchMock)).toMatchObject({
+      body: { roots: ['archive'] },
+      contentType: 'application/json',
+    });
+  });
+
+  it('reports busy, a missing converter and no roots with their codes', async () => {
+    const busy = await captureError(
+      createApiClient({
+        fetch: answering({ detail: 'A scan is running.', code: 'busy' }, 409),
+      }).runAutoScan(null),
+    );
+    expect(busy).toMatchObject({ kind: 'http', status: 409, code: 'busy' });
+
+    const converter = await captureError(
+      createApiClient({
+        fetch: answering({ detail: 'Not installed.', code: 'converter_not_installed' }, 409),
+      }).runAutoScan(null),
+    );
+    expect(converter).toMatchObject({ status: 409, code: 'converter_not_installed' });
+
+    const noRoots = await captureError(
+      createApiClient({ fetch: answering({ detail: 'No roots to scan.' }, 422) }).runAutoScan(null),
+    );
+    expect(noRoots).toMatchObject({ status: 422, code: null, detail: 'No roots to scan.' });
+  });
+
+  it('reports a missing endpoint on an older server, and a wrong answer naming the field', async () => {
+    const missing = await captureError(
+      createApiClient({ fetch: answering({ detail: 'Not Found' }, 404) }).runAutoScan(null),
+    );
+    expect(isMissingEndpoint(missing as ApiError)).toBe(true);
+
+    const wrong = await captureError(
+      createApiClient({ fetch: answering({ started: 'yes' }, 202) }).runAutoScan(null),
+    );
+    expect((wrong as ApiError).detail).toContain('started');
+  });
+});
+
+describe('createApiClient().cleanCache', () => {
+  it('asks for a dry run with POST and returns what would be removed', async () => {
+    const fetchMock = answering(sampleCacheClean());
+    const result = await createApiClient({ fetch: fetchMock }).cleanCache(true);
+    expect(result).toEqual(sampleCacheClean());
+    expect(requestOf(fetchMock)).toEqual({
+      url: 'api/v1/cache/clean',
+      method: 'POST',
+      body: { dryRun: true },
+      contentType: 'application/json',
+    });
+  });
+
+  it('cleans up for real when asked', async () => {
+    const fetchMock = answering(sampleCacheClean({ dryRun: false }));
+    const result = await createApiClient({ fetch: fetchMock }).cleanCache(false);
+    expect(result.dryRun).toBe(false);
+    expect(requestOf(fetchMock).body).toEqual({ dryRun: false });
+  });
+
+  it('reports busy with its code, and a wrong answer naming the field', async () => {
+    const busy = await captureError(
+      createApiClient({
+        fetch: answering({ detail: 'A clean-up is running.', code: 'busy' }, 409),
+      }).cleanCache(true),
+    );
+    expect(busy).toMatchObject({ kind: 'http', status: 409, code: 'busy' });
+
+    const wrong = await captureError(
+      createApiClient({
+        fetch: answering(sampleCacheClean({ removed: { overLimit: -3 } })),
+      }).cleanCache(true),
+    );
+    expect((wrong as ApiError).detail).toContain('removed.overLimit');
+  });
+
+  it('reports a missing endpoint on an older server', async () => {
+    const error = await captureError(
+      createApiClient({ fetch: answering({ detail: 'Not Found' }, 404) }).cleanCache(true),
+    );
     expect(isMissingEndpoint(error as ApiError)).toBe(true);
   });
 });

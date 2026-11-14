@@ -35,10 +35,10 @@ export function formValuesOf(settings: ServerSettings): FormValues {
   };
 }
 
-/** A whole number written in decimal digits only, or null. */
-function wholeNumber(text: string): number | null {
+/** A whole number written in at most `maxDigits` decimal digits and nothing else, or null. */
+export function wholeNumber(text: string, maxDigits = 4): number | null {
   const trimmed = text.trim();
-  return /^\d{1,4}$/.test(trimmed) ? Number(trimmed) : null;
+  return trimmed.length <= maxDigits && /^\d+$/.test(trimmed) ? Number(trimmed) : null;
 }
 
 const CLOCK_TIME = /^(?:[01]\d|2[0-3]):[0-5]\d$/;

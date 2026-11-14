@@ -1,5 +1,6 @@
 import { useCallback, useState } from 'react';
 import {
+  clientName,
   finishedCount,
   ITEM_STATES,
   jobTitle,
@@ -16,7 +17,7 @@ import { ConfirmPanel } from '../../components/ConfirmPanel';
 import { ConnectionNote } from '../../components/ConnectionNote';
 import { ErrorPanel } from '../../components/ErrorPanel';
 import { Fact } from '../../components/Fact';
-import { JobProgressBar, JobStateBadge } from '../../components/JobList';
+import { JobProgressBar, JobStateBadge, PriorityBadge } from '../../components/JobList';
 import { PageHeader } from '../../components/PageHeader';
 import { StatePanel } from '../../components/StatePanel';
 import { StatusBadge, type Tone } from '../../components/StatusBadge';
@@ -172,7 +173,16 @@ function JobCard({ job, now, onChanged }: JobCardProps) {
   }
 
   return (
-    <Card title="Job" wide aside={<JobStateBadge job={job} />}>
+    <Card
+      title="Job"
+      wide
+      aside={
+        <span className="job-badges">
+          <JobStateBadge job={job} />
+          <PriorityBadge job={job} />
+        </span>
+      }
+    >
       <dl className="facts facts--small">
         <Fact label="Number">{job.id}</Fact>
         <Fact label="Created">
@@ -190,7 +200,17 @@ function JobCard({ job, now, onChanged }: JobCardProps) {
             'Not yet'
           )}
         </Fact>
-        <Fact label="Sent by">{job.client ?? 'Not named'}</Fact>
+        <Fact label="Sent by">{clientName(job.client) ?? 'Not named'}</Fact>
+        {job.priority !== null && (
+          <Fact label="Priority">
+            {job.priority === 'background' ? 'Background' : 'Normal'}
+            <span className="facts__note">
+              {job.priority === 'background'
+                ? 'Built when no normal job is waiting'
+                : 'Built in turn, oldest job first'}
+            </span>
+          </Fact>
+        )}
         {job.clientId && (
           <Fact label="Client id">
             <code className="client-id">{job.clientId}</code>

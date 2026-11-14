@@ -1,13 +1,15 @@
 import { fireEvent, screen, within } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import {
+  autoScanJob,
   failedItem,
   itemRun,
   rejectedItem,
   sampleItem,
   sampleItemPage,
   sampleJob,
-  stage3Server,
+  fullServer,
+  stage3Job,
 } from '../../test/fixtures';
 import { advance, renderPage, settle, installFakeClock } from '../../test/render';
 import { JobPage } from './JobPage';
@@ -35,7 +37,7 @@ const doneJob = sampleJob({
 
 describe('JobPage', () => {
   it('shows the facts, the progress and the items with their errors', async () => {
-    const server = stage3Server();
+    const server = fullServer();
     await renderPage(<JobPage id={7} itemState={null} />, server);
 
     expect(server.urlOf('jobItems')).toBe(`api/v1/jobs/7/items?since=0&limit=${ITEMS_PAGE}`);
@@ -70,8 +72,36 @@ describe('JobPage', () => {
     expect(itemsCard().textContent).toContain('Items 1–3 of 500');
   });
 
+  it('shows the priority: a background job is marked, a normal one only says so', async () => {
+    const server = fullServer({ jobItems: sampleItemPage([], false, autoScanJob()) });
+    await renderPage(<JobPage id={8} itemState={null} />, server);
+
+    const header = jobCard().querySelector('.card__header');
+    expect(Array.from(header?.querySelectorAll('.badge') ?? [], (b) => b.textContent)).toEqual([
+      'Active',
+      'Background',
+    ]);
+    const priority = within(jobCard()).getByText('Priority', { selector: 'dt' }).parentElement;
+    expect(priority?.textContent).toBe('PriorityBackgroundBuilt when no normal job is waiting');
+    expect(jobCard().textContent).toContain('Sent byAutomatic scan');
+
+    server.reply('jobItems', sampleItemPage([], false, sampleJob()));
+    await advance(ACTIVE_REFRESH_MS);
+    expect(within(jobCard()).queryByText('Background')).toBeNull();
+    expect(within(jobCard()).getByText('Priority', { selector: 'dt' }).parentElement?.textContent).toBe(
+      'PriorityNormalBuilt in turn, oldest job first',
+    );
+  });
+
+  it('shows no priority for a job from a server without priorities', async () => {
+    const server = fullServer({ jobItems: sampleItemPage([], false, stage3Job()) });
+    await renderPage(<JobPage id={7} itemState={null} />, server);
+    expect(within(jobCard()).queryByText('Priority', { selector: 'dt' })).toBeNull();
+    expect(within(jobCard()).getByText('Active')).toBeTruthy();
+  });
+
   it('filters the items by state through links that show the counts', async () => {
-    const server = stage3Server({ jobItems: sampleItemPage([failedItem()]) });
+    const server = fullServer({ jobItems: sampleItemPage([failedItem()]) });
     await renderPage(<JobPage id={7} itemState="failed" />, server);
 
     expect(server.queryOf('jobItems').get('state')).toBe('failed');
@@ -86,13 +116,13 @@ describe('JobPage', () => {
   });
 
   it('says so when no item has the chosen state', async () => {
-    const server = stage3Server({ jobItems: sampleItemPage([]) });
+    const server = fullServer({ jobItems: sampleItemPage([]) });
     await renderPage(<JobPage id={7} itemState="rejected" />, server);
     expect(itemsCard().textContent).toContain('No rejected items.');
   });
 
   it('pages through the items with since and limit, one page in the table at a time', async () => {
-    const server = stage3Server();
+    const server = fullServer();
     const job = sampleJob({ counts: { total: 150, queued: 150, building: 0, ready: 0, failed: 0 } });
     server.handle('jobItems', ({ query }) => {
       const since = Number(query.get('since'));
@@ -126,7 +156,7 @@ describe('JobPage', () => {
   });
 
   it('cancels only after a confirmation, and shows the job as cancelled', async () => {
-    const server = stage3Server();
+    const server = fullServer();
     await renderPage(<JobPage id={7} itemState={null} />, server);
 
     fireEvent.click(within(jobCard()).getByRole('button', { name: 'Cancel job…' }));
@@ -160,7 +190,7 @@ describe('JobPage', () => {
   });
 
   it('shows the server error when cancelling fails', async () => {
-    const server = stage3Server();
+    const server = fullServer();
     server.reply('cancelJob', { detail: 'The store is locked.' }, 500);
     await renderPage(<JobPage id={7} itemState={null} />, server);
 
@@ -178,7 +208,7 @@ describe('JobPage', () => {
   });
 
   it('retries the failed items', async () => {
-    const server = stage3Server({ jobItems: sampleItemPage(undefined, false, doneJob) });
+    const server = fullServer({ jobItems: sampleItemPage(undefined, false, doneJob) });
     await renderPage(<JobPage id={7} itemState={null} />, server);
     // A finished job cannot be cancelled.
     expect(within(jobCard()).queryByRole('button', { name: 'Cancel job…' })).toBeNull();
@@ -201,7 +231,7 @@ describe('JobPage', () => {
   });
 
   it('explains a refused retry', async () => {
-    const server = stage3Server({ jobItems: sampleItemPage(undefined, false, doneJob) });
+    const server = fullServer({ jobItems: sampleItemPage(undefined, false, doneJob) });
     server.reply('retryJob', { detail: 'Job 7 is cancelled.', code: 'job_cancelled' }, 409);
     await renderPage(<JobPage id={7} itemState={null} />, server);
 
@@ -214,13 +244,13 @@ describe('JobPage', () => {
 
   it('offers neither action for a cancelled job', async () => {
     const cancelled = sampleJob({ state: 'cancelled', counts: { queued: 0, building: 0 } });
-    const server = stage3Server({ jobItems: sampleItemPage([rejectedItem()], false, cancelled) });
+    const server = fullServer({ jobItems: sampleItemPage([rejectedItem()], false, cancelled) });
     await renderPage(<JobPage id={7} itemState={null} />, server);
     expect(within(jobCard()).queryByRole('button')).toBeNull();
   });
 
   it('says so for a job the server does not have', async () => {
-    const server = stage3Server();
+    const server = fullServer();
     server.reply('jobItems', { detail: 'No such job' }, 404);
     await renderPage(<JobPage id={99} itemState={null} />, server);
 
@@ -231,7 +261,7 @@ describe('JobPage', () => {
   });
 
   it('refreshes every 2 s while the job is active and every 15 s once it is done', async () => {
-    const server = stage3Server();
+    const server = fullServer();
     await renderPage(<JobPage id={7} itemState={null} />, server);
     await advance(ACTIVE_REFRESH_MS);
     expect(server.calls('jobItems')).toBe(2);

@@ -1,4 +1,4 @@
-import { parseJob, type Job } from './jobs';
+import { parseJob, type Job, type JobPriority } from './jobs';
 import {
   asArray,
   asBoolean,
@@ -42,6 +42,8 @@ export interface FolderRequest {
   recursive: boolean;
   /** Without it the jobs are labelled with the folder's path. */
   label?: string | null;
+  /** `normal` when left out. A server older than 0.5 ignores it and builds at normal priority. */
+  priority?: JobPriority;
 }
 
 /** Response of `POST /api/v1/folders`. */

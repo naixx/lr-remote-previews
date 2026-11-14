@@ -1,6 +1,6 @@
 import { fireEvent, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { sampleLog, stage3Server } from '../../test/fixtures';
+import { sampleLog, fullServer } from '../../test/fixtures';
 import { advance, renderPage, settle, installFakeClock } from '../../test/render';
 import { LOG_LIMIT, LOG_REFRESH_MS } from './levels';
 import { LogPage } from './LogPage';
@@ -24,7 +24,7 @@ function logWith(n: number) {
 
 describe('LogPage', () => {
   it('shows the newest lines with the level written out on each', async () => {
-    const server = stage3Server();
+    const server = fullServer();
     await renderPage(<LogPage />, server);
 
     expect(server.urlOf('log')).toBe(`api/v1/log?limit=${LOG_LIMIT}`);
@@ -44,7 +44,7 @@ describe('LogPage', () => {
   });
 
   it('refreshes every 3 s until paused, and at once when resumed', async () => {
-    const server = stage3Server();
+    const server = fullServer();
     await renderPage(<LogPage />, server);
     await advance(LOG_REFRESH_MS);
     expect(server.calls('log')).toBe(2);
@@ -69,14 +69,14 @@ describe('LogPage', () => {
   });
 
   it('says that an older server has no log for the dashboard', async () => {
-    const server = stage3Server();
+    const server = fullServer();
     server.reply('log', { detail: 'Not Found' }, 404);
     await renderPage(<LogPage />, server);
     expect(screen.getByText('This server is older than the dashboard')).toBeTruthy();
   });
 
   it('says so when the server has logged nothing', async () => {
-    const server = stage3Server({ log: { lines: [] } });
+    const server = fullServer({ log: { lines: [] } });
     await renderPage(<LogPage />, server);
     expect(
       within(screen.getByRole('region', { name: 'Server log' })).getByText(
@@ -97,7 +97,7 @@ describe('LogPage', () => {
     });
 
     it('follows the newest line unless the person scrolled up', async () => {
-      const server = stage3Server({ log: sampleLog() });
+      const server = fullServer({ log: sampleLog() });
       await renderPage(<LogPage />, server);
       const box = screen.getByRole('region', { name: 'Server log' });
       expect(box.scrollTop).toBe(1000);

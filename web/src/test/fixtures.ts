@@ -31,6 +31,30 @@ export function installedInfo() {
   return { ...info, converter: { ...info.converter, installed: true, version: '17.5' } };
 }
 
+/** The `autoScan` of a status body. */
+export interface AutoScanStatusBody {
+  running: boolean;
+  lastRun: string | null;
+  lastQueued: number;
+  nextRun: string | null;
+}
+
+/** The contract example: the last scan at 09:00 queued 120 files, the next one is due at 10:00. */
+export function scheduledScan(overrides: Partial<AutoScanStatusBody> = {}): AutoScanStatusBody {
+  return {
+    running: false,
+    lastRun: '2026-11-14T09:00:00Z',
+    lastQueued: 120,
+    nextRun: '2026-11-14T10:00:00Z',
+    ...overrides,
+  };
+}
+
+/** The automatic scan is off and never ran. */
+export function scanOff(): AutoScanStatusBody {
+  return { running: false, lastRun: null, lastQueued: 0, nextRun: null };
+}
+
 /** A valid `GET /api/v1/status` body while a job is being built (the contract example). */
 export function busyStatus() {
   return {
@@ -43,10 +67,11 @@ export function busyStatus() {
     cache: { entries: 5321, bytes: 2890000000 },
     jobs: { active: 1 },
     cpuTemperature: 67.5 as number | null,
+    autoScan: scheduledScan(),
   };
 }
 
-/** A valid status body with nothing to do. */
+/** A valid status body with nothing to do; the automatic scan is off. */
 export function idleStatus() {
   return {
     state: 'idle',
@@ -58,16 +83,25 @@ export function idleStatus() {
     cache: { entries: 5629, bytes: 3021000000 },
     jobs: { active: 0 },
     cpuTemperature: null as number | null,
+    autoScan: scanOff(),
   };
 }
 
-/** A status body as a server before 0.4 sends it: no state, time left or temperature. */
+/** A copy of `body` without the named fields, as an older server sends it. */
+export function without<T extends object, K extends keyof T>(body: T, ...keys: K[]): Omit<T, K> {
+  const copy: Partial<T> = { ...body };
+  for (const key of keys) delete copy[key];
+  return copy as Omit<T, K>;
+}
+
+/** A status body as a 0.4 server sends it: no automatic scan. */
+export function stage3Status() {
+  return without(busyStatus(), 'autoScan');
+}
+
+/** A status body as a server before 0.4 sends it: no state, time left, temperature or scan. */
 export function legacyStatus() {
-  const { state, etaSeconds, cpuTemperature, ...rest } = busyStatus();
-  void state;
-  void etaSeconds;
-  void cpuTemperature;
-  return rest;
+  return without(busyStatus(), 'state', 'etaSeconds', 'cpuTemperature', 'autoScan');
 }
 
 type JobOverrides = Partial<Omit<ReturnType<typeof baseJob>, 'counts'>> & {
@@ -80,6 +114,7 @@ function baseJob() {
     label: 'Lightroom selection' as string | null,
     client: 'lr-plugin/0.2.0' as string | null,
     clientId: 'c1f0a6e2-7d0b-4c55-9d0e-3f6a1b2c4d5e' as string | null,
+    priority: 'normal',
     state: 'active',
     created: '2026-11-14T09:30:00Z',
     finished: null as string | null,
@@ -122,6 +157,26 @@ export function sampleJobs() {
       }),
     ],
   };
+}
+
+/** A job the automatic scan made: background priority, no client id. */
+export function autoScanJob(overrides: JobOverrides = {}) {
+  return sampleJob({
+    id: 8,
+    label: 'Automatic scan: archive',
+    client: 'auto-scan',
+    clientId: null,
+    priority: 'background',
+    created: '2026-11-14T09:00:00Z',
+    seq: 120,
+    counts: { total: 120, queued: 120, building: 0, ready: 0, failed: 0 },
+    ...overrides,
+  });
+}
+
+/** A job object as a server before 0.5 sends it: no priority. */
+export function stage3Job(overrides: JobOverrides = {}) {
+  return without(sampleJob(overrides), 'priority');
 }
 
 interface ResultBody {
@@ -219,6 +274,21 @@ export function sampleItemPage(
 
 type SettingsOverrides = Partial<ReturnType<typeof baseSettings>>;
 
+/** The `autoScan` of a settings body. */
+export interface AutoScanSettingsBody {
+  enabled: boolean;
+  roots: string[];
+  intervalMinutes: number;
+  settleMinutes: number;
+  maxFilesPerRun: number;
+}
+
+/** The `cache` of a settings body. */
+export interface CacheSettingsBody {
+  maxBytes: number | null;
+  maxAgeDays: number | null;
+}
+
 function baseSettings() {
   return {
     workers: 'auto' as 'auto' | number,
@@ -226,12 +296,25 @@ function baseSettings() {
     batchSize: 8,
     paused: false,
     workingHours: { enabled: false, from: '22:00', to: '07:00' },
+    autoScan: {
+      enabled: false,
+      roots: [],
+      intervalMinutes: 60,
+      settleMinutes: 15,
+      maxFilesPerRun: 2000,
+    } as AutoScanSettingsBody,
+    cache: { maxBytes: null, maxAgeDays: null } as CacheSettingsBody,
   };
 }
 
 /** A valid `GET /api/v1/settings` body (the contract example). */
 export function sampleSettings(overrides: SettingsOverrides = {}) {
   return { ...baseSettings(), ...overrides };
+}
+
+/** A settings body as a 0.4 server sends it: no automatic scan and no cache limits. */
+export function stage3Settings(overrides: SettingsOverrides = {}) {
+  return without(sampleSettings(overrides), 'autoScan', 'cache');
 }
 
 type BrowseOverrides = Partial<ReturnType<typeof baseBrowse>>;
@@ -326,6 +409,23 @@ export function failedSelfTest() {
   };
 }
 
+interface CacheRemovedBody {
+  originalGone: number;
+  expired: number;
+  overLimit: number;
+}
+
+/** A valid answer to `POST /api/v1/cache/clean`: the contract example, as a dry run. */
+export function sampleCacheClean(
+  overrides: { dryRun?: boolean; removed?: Partial<CacheRemovedBody>; bytesFreed?: number } = {},
+) {
+  return {
+    dryRun: overrides.dryRun ?? true,
+    removed: { originalGone: 12, expired: 0, overLimit: 0, ...overrides.removed },
+    bytesFreed: overrides.bytesFreed ?? 6291456,
+  };
+}
+
 /** A valid `GET /api/v1/log` body. */
 export function sampleLog() {
   return {
@@ -384,6 +484,8 @@ const ROUTES = [
   { endpoint: 'queueFolder', method: 'POST', path: /^api\/v1\/folders$/ },
   { endpoint: 'selfTest', method: 'POST', path: /^api\/v1\/converter\/selftest$/ },
   { endpoint: 'log', method: 'GET', path: /^api\/v1\/log$/ },
+  { endpoint: 'runAutoScan', method: 'POST', path: /^api\/v1\/autoscan\/run$/ },
+  { endpoint: 'cleanCache', method: 'POST', path: /^api\/v1\/cache\/clean$/ },
 ] as const;
 
 export type Endpoint = (typeof ROUTES)[number]['endpoint'];
@@ -545,8 +647,11 @@ export function fakeServer(bodies: Partial<Record<Endpoint, unknown>>) {
 
 export type FakeServer = ReturnType<typeof fakeServer>;
 
-/** A fake 0.4 server with an answer for every endpoint; override any of them. */
-export function stage3Server(bodies: Partial<Record<Endpoint, unknown>> = {}) {
+/**
+ * A fake server of the protocol this dashboard is written against (0.5), with an answer for
+ * every endpoint; override any of them.
+ */
+export function fullServer(bodies: Partial<Record<Endpoint, unknown>> = {}) {
   return fakeServer({
     info: installedInfo(),
     status: busyStatus(),
@@ -561,6 +666,8 @@ export function stage3Server(bodies: Partial<Record<Endpoint, unknown>> = {}) {
     queueFolder: sampleFolderQueued(),
     selfTest: passedSelfTest(),
     log: sampleLog(),
+    runAutoScan: { started: true },
+    cleanCache: sampleCacheClean(),
     ...bodies,
   });
 }

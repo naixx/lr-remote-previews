@@ -12,29 +12,37 @@ Each page sets the document title; after a navigation, focus moves to the page h
 
 | Route | Page |
 | --- | --- |
-| `#/` | **Overview**: what the server does now (Running, Idle, Paused, Waiting for working hours), the time left, the CPU temperature when the server can read it, a **Pause / Resume** button, the queue figures, the ten newest jobs (each links to its page) and what `GET /api/v1/info` reports. |
-| `#/jobs`, `#/jobs?state=active` | **Jobs**: every job, newest first, with a state filter and **Load more** (50 more each time, up to the 200 the server lists). |
-| `#/jobs/7`, `#/jobs/7?state=failed` | **Job**: its facts, progress, **Cancel** (active jobs, after a confirmation) and **Retry failed items**; its items, 100 to a page, paged with `since`/`limit` and filtered by state through links that show the counts. Failed and rejected items show their error code, the server's message and an explanation. |
-| `#/folders`, `#/folders/<root>/<path>` | **Folders**: the roots, then one folder at a time with a breadcrumb, its raw, built and other files, its sub-folders (filter by name, 200 shown at a time), and **Queue this folder** with «Include sub-folders», a confirmation that says what will happen and a result that links the jobs made. |
-| `#/settings` | **Settings**: converter processes (automatic or a number, never 2), files per process, working hours, pause; the access token (**Forget token**); the server's facts (versions, roots, raw formats, limits, retention). |
+| `#/` | **Overview**: what the server does now (Running, Idle, Paused, Waiting for working hours), the time left, the CPU temperature when the server can read it, a **Pause / Resume** button, the queue figures, one line on the automatic scan (running, off, or when the next scan is due, and what the last one queued), the ten newest jobs (each links to its page) and what `GET /api/v1/info` reports. |
+| `#/jobs`, `#/jobs?state=active` | **Jobs**: every job, newest first, with a state filter and **Load more** (50 more each time, up to the 200 the server lists). A background job carries a «Background» badge; the sender is named, with the automatic scan's jobs as «Automatic scan». |
+| `#/jobs/7`, `#/jobs/7?state=failed` | **Job**: its facts (with the priority), progress, **Cancel** (active jobs, after a confirmation) and **Retry failed items**; its items, 100 to a page, paged with `since`/`limit` and filtered by state through links that show the counts. Failed and rejected items show their error code, the server's message and an explanation. |
+| `#/folders`, `#/folders/<root>/<path>` | **Folders**: the roots, then one folder at a time with a breadcrumb, its raw, built and other files, its sub-folders (filter by name, 200 shown at a time), and **Queue this folder** with «Include sub-folders» and a choice of normal or background priority, a confirmation that says what will happen and a result that links the jobs made. |
+| `#/settings` | **Settings**: converter processes (automatic or a number, never 2), files per process, working hours, pause; the **automatic scan** (on or off, the roots to scan, interval, settle time, files per scan; the last and the next scan; **Scan now**); the **cache** (its size and files, the size and age limits, and **Clean up now**: a count of what would be removed, then a confirmation); the access token (**Forget token**); the server's facts (versions, roots, raw formats, limits, retention). Each form saves on its own: the automatic scan and the cache limits as whole objects. |
 | `#/converter` | **Converter**: whether Adobe DNG Converter is installed, the path the server expects, its version, and a **self-test**, optionally converting one raw file, shown as a checklist. |
 | `#/log` | **Log**: the server's recent log lines, refreshed every 3 s with a pause switch; it stays at the newest line unless you scrolled up. |
 
 Live data refreshes by itself: the overview every 2 s while anything is queued or building and
 every 10 s when idle (status, jobs and settings together), the job list and a job page every 2 s
-while a job is active and every 15 s otherwise, an open folder every 30 s, the log every 3 s.
+while a job is active and every 15 s otherwise, an open folder every 30 s, the log every 3 s, and
+the status on the Settings page (the scan's state, the cache's size) every 30 s, every 2 s while a
+scan runs and for 10 s after **Scan now**.
 A refresh starts only after the previous one has finished; polling pauses while the tab is hidden
 and resumes at once when it is shown again. If a refresh fails, the last data stays on screen with
 a "Connection lost, retrying" note.
 
 Buttons that change something on the server are disabled while their request runs and show the
-server's own error text when it fails. Cancelling a job and queueing a folder ask first.
+server's own error text when it fails. Cancelling a job and queueing a folder ask first; **Clean up
+now** first asks the server what it would remove (a dry run) and removes only after a
+confirmation. **Scan now** does not ask: it queues at most the files-per-scan limit, at background
+priority, as the automatic scan does.
 
 A 401 from any request replaces the page with the token form until a token is entered (entering
 the same one again retries). A server older than the dashboard that lacks an endpoint (a 404
 without a `code`) gets a «this server is older than the dashboard» note on the page that needs it;
 the overview then works without the pause button and without the server state, time left and
-temperature.
+temperature. A 0.4 server, whose settings have no `autoScan` and `cache` and whose status has no
+`autoScan`, gets that note in the automatic scan and cache sections of the Settings page only
+(the cache's size still shows); its jobs show no priority, and a folder queued at background
+priority there is built at normal priority, which the result says.
 
 ## Requirements
 
@@ -92,8 +100,9 @@ src/
     client.ts              createApiClient(): typed requests; throws ApiError on failure.
     errors.ts              ApiError (kind, status, detail, code), isMissingEndpoint(),
                            describeError().
-    info.ts, status.ts, jobs.ts, settings.ts, browse.ts, converter.ts, log.ts
-                           Response types and their parse…() runtime shape checks.
+    info.ts, status.ts, jobs.ts, settings.ts, browse.ts, converter.ts, log.ts,
+    autoscan.ts, cache.ts  Response types and their parse…() runtime shape checks.
+                           autoscan.ts: Scan now; cache.ts: the clean-up.
     validate.ts            Small validators that name the failing field (roots[0].available).
     token.ts               Token storage in localStorage, every access guarded.
   hooks/
@@ -104,7 +113,8 @@ src/
     useAction.ts           One request a button starts: pending, error, never two at once.
     usePageTitle.ts        The document title per page.
   lib/
-    format.ts              Numbers, rates, sizes (decimal units), times, time left, temperature.
+    format.ts              Numbers, rates, sizes (decimal units), times, time left or until,
+                           temperature.
     codes.ts               Plain-language explanations of the protocol's error codes.
   components/              Shared UI: Card, StatusBadge, StatePanel, PageHeader, ErrorPanel
                            (with the older-server note), ActionError, ConfirmPanel,
@@ -114,13 +124,19 @@ src/
     overview/ jobs/ folders/ settings/ converter/ log/
                            One folder per page: its components, what it polls and how often,
                            its styles and its tests. NotFoundPage.tsx for unknown routes.
+    settings/              SettingsPage.tsx with AutoScanCard.tsx and CacheCard.tsx; the form
+                           rules in form.ts, scanForm.ts and cacheForm.ts (sizes in GB with one
+                           decimal, a saved limit sent back to the byte while its text is
+                           unchanged).
   styles/
     index.css              Design tokens (light and dark), base styles, shared primitives.
   test/
     fixtures.ts            Sample responses for every endpoint; fakeServer(): a fetch mock that
                            tells endpoints apart by method and path and answers each with what
                            the test last set (a body, a handler, a network failure, a hang, or
-                           a hold until released); stage3Server(): one with every endpoint.
+                           a hold until released); fullServer(): one with every endpoint of
+                           the current protocol; stage3Settings(), stage3Status(), stage3Job():
+                           bodies as a 0.4 server sends them.
     render.tsx             installFakeClock(), advance(), settle(), renderPage().
     setup.ts               Testing Library cleanup and storage reset.
 ```

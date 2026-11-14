@@ -3,6 +3,8 @@
  * `message` is shown next to them, so a code missing here still reaches the person.
  */
 
+import type { ApiError } from '../api/errors';
+
 const ITEM_ERRORS: Record<string, string> = {
   // Rejected: nothing was tried.
   unknown_root: 'The root is not configured on the server.',
@@ -58,4 +60,25 @@ const FOLDER_ERRORS: Record<string, { title: string; text: string }> = {
 /** Title and explanation for an error of browsing or queueing a folder; null if unknown. */
 export function explainFolderError(code: string | null): { title: string; text: string } | null {
   return code === null ? null : (FOLDER_ERRORS[code] ?? null);
+}
+
+/** Why a scan did not start, for the answers `POST /api/v1/autoscan/run` defines; null otherwise. */
+export function explainAutoScanError(error: ApiError): string | null {
+  if (error.kind !== 'http') return null;
+  if (error.code === 'busy') {
+    return 'A scan is already running. What it queued shows here when it has finished.';
+  }
+  if (error.code === 'converter_not_installed') return FOLDER_ERRORS.converter_not_installed?.text ?? null;
+  if (error.status === 422) {
+    return 'There is no root to scan, or a saved root is no longer configured on the server. Tick the roots to scan, save, and try again.';
+  }
+  return null;
+}
+
+/** Why a clean-up did not run, for the answers `POST /api/v1/cache/clean` defines; null otherwise. */
+export function explainCacheCleanError(error: ApiError): string | null {
+  if (error.kind === 'http' && error.code === 'busy') {
+    return 'A clean-up is already running on the server: the daily one, or one started elsewhere. Try again when it has finished.';
+  }
+  return null;
 }

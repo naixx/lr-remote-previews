@@ -5,7 +5,7 @@ import {
   installedInfo,
   passedSelfTest,
   sampleInfo,
-  stage3Server,
+  fullServer,
 } from '../../test/fixtures';
 import { renderPage, settle, installFakeClock } from '../../test/render';
 import { ConverterPage } from './ConverterPage';
@@ -32,7 +32,7 @@ function steps(): string[] {
 
 describe('ConverterPage', () => {
   it('shows an installed converter with its path and version', async () => {
-    const server = stage3Server({ info: installedInfo() });
+    const server = fullServer({ info: installedInfo() });
     await renderPage(<ConverterPage />, server);
 
     expect(document.title).toBe('Converter · LR Remote Previews');
@@ -45,7 +45,7 @@ describe('ConverterPage', () => {
   });
 
   it('shows a missing converter with the path the server expects', async () => {
-    const server = stage3Server({ info: sampleInfo() });
+    const server = fullServer({ info: sampleInfo() });
     await renderPage(<ConverterPage />, server);
 
     const card = converterCard();
@@ -56,13 +56,13 @@ describe('ConverterPage', () => {
 
   it('says when the version cannot be read', async () => {
     const info = installedInfo();
-    const server = stage3Server({ info: { ...info, converter: { ...info.converter, version: null } } });
+    const server = fullServer({ info: { ...info, converter: { ...info.converter, version: null } } });
     await renderPage(<ConverterPage />, server);
     expect(converterCard().textContent).toContain('Unknown: the server could not read it');
   });
 
   it('runs the self-test without a file and shows the steps as a checklist', async () => {
-    const server = stage3Server({ selfTest: { ok: true, steps: passedSelfTest().steps.slice(0, 3) } });
+    const server = fullServer({ selfTest: { ok: true, steps: passedSelfTest().steps.slice(0, 3) } });
     await renderPage(<ConverterPage />, server);
 
     const gate = server.hold('selfTest');
@@ -83,7 +83,7 @@ describe('ConverterPage', () => {
   });
 
   it('converts a named file as the last step', async () => {
-    const server = stage3Server({ selfTest: passedSelfTest() });
+    const server = fullServer({ selfTest: passedSelfTest() });
     await renderPage(<ConverterPage />, server);
 
     fireEvent.change(within(selfTestCard()).getByLabelText('Root'), { target: { value: 'archive' } });
@@ -102,7 +102,7 @@ describe('ConverterPage', () => {
   });
 
   it('shows where it failed and which steps did not run', async () => {
-    const server = stage3Server({ selfTest: failedSelfTest() });
+    const server = fullServer({ selfTest: failedSelfTest() });
     await renderPage(<ConverterPage />, server);
     fireEvent.change(within(selfTestCard()).getByLabelText('Path inside the root'), {
       target: { value: '2026/IMG_0001.ARW' },
@@ -122,7 +122,7 @@ describe('ConverterPage', () => {
   });
 
   it('says another self-test is running when the server is busy', async () => {
-    const server = stage3Server();
+    const server = fullServer();
     server.reply('selfTest', { detail: 'A self-test is already running.', code: 'busy' }, 409);
     await renderPage(<ConverterPage />, server);
     fireEvent.click(runButton());
@@ -134,7 +134,7 @@ describe('ConverterPage', () => {
   });
 
   it('explains a file the server will not use', async () => {
-    const server = stage3Server();
+    const server = fullServer();
     server.reply('selfTest', { detail: 'No such file: 2026/x.ARW', code: 'not_found' }, 422);
     await renderPage(<ConverterPage />, server);
     fireEvent.change(within(selfTestCard()).getByLabelText('Path inside the root'), {
@@ -149,7 +149,7 @@ describe('ConverterPage', () => {
   });
 
   it('says that an older server has no self-test', async () => {
-    const server = stage3Server();
+    const server = fullServer();
     server.reply('selfTest', { detail: 'Not Found' }, 404);
     await renderPage(<ConverterPage />, server);
     fireEvent.click(runButton());

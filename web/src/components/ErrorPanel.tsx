@@ -72,3 +72,13 @@ export function OlderServerNote({ feature }: { feature: string }) {
     </StatePanel>
   );
 }
+
+/** In place of one section of a page, when the server does not have what that section offers. */
+export function OlderServerCallout({ feature }: { feature: string }) {
+  return (
+    <p className="callout">
+      This server is older than the dashboard and does not offer {feature}. Update the server to
+      version {__APP_VERSION__} or later to use it.
+    </p>
+  );
+}

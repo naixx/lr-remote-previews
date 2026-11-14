@@ -121,6 +121,20 @@ export function formatRelative(iso: string, now: number): string {
 }
 
 /**
+ * How long until a time in the future, in the largest whole unit: `in 27 min`, `in 3 h`,
+ * `in 2 days`; `in less than a minute`, and `due now` for a time that has passed.
+ */
+export function formatUntil(iso: string, now: number): string {
+  const left = Date.parse(iso) - now;
+  if (left <= 0) return 'due now';
+  if (left < MINUTE) return 'in less than a minute';
+  if (left < HOUR) return `in ${Math.floor(left / MINUTE)} min`;
+  if (left < DAY) return `in ${Math.floor(left / HOUR)} h`;
+  const days = Math.floor(left / DAY);
+  return days === 1 ? 'in 1 day' : `in ${days} days`;
+}
+
+/**
  * An estimate of time left, deliberately rough: `less than a minute left`, `about 4 min left`,
  * `about 2 h 15 min left`, `about 3 days left`.
  */

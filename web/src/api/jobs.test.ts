@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  autoScanJob,
   failedItem,
   rejectedItem,
   sampleItem,
@@ -7,8 +8,9 @@ import {
   sampleJob,
   sampleJobs,
   sampleResult,
+  stage3Job,
 } from '../test/fixtures';
-import { jobTitle, parseItemPage, parseJobList } from './jobs';
+import { clientName, jobTitle, parseItemPage, parseJobList } from './jobs';
 import { ShapeError } from './validate';
 
 describe('parseItemPage', () => {
@@ -56,6 +58,16 @@ describe('jobTitle', () => {
   });
 });
 
+describe('clientName', () => {
+  it('names the automatic scan and the dashboard, and keeps any other client as sent', () => {
+    expect(clientName('auto-scan')).toBe('Automatic scan');
+    expect(clientName('dashboard')).toBe('Dashboard');
+    expect(clientName('lr-plugin/0.3.0')).toBe('lr-plugin/0.3.0');
+    expect(clientName(' ')).toBeNull();
+    expect(clientName(null)).toBeNull();
+  });
+});
+
 function shapeErrorOf(data: unknown): ShapeError {
   try {
     parseJobList(data);
@@ -72,7 +84,7 @@ function listOf(job: unknown) {
 
 describe('parseJobList', () => {
   it('accepts the contract example and keeps only known fields', () => {
-    const job = { ...sampleJob(), priority: 3, counts: { ...sampleJob().counts, skipped: 0 } };
+    const job = { ...sampleJob(), weight: 3, counts: { ...sampleJob().counts, skipped: 0 } };
     expect(parseJobList({ jobs: [job], more: false })).toEqual(listOf(sampleJob()));
   });
 
@@ -100,6 +112,16 @@ describe('parseJobList', () => {
     });
   });
 
+  it('reads the priority, and none from a server before 0.5 that does not send it', () => {
+    expect(parseJobList(listOf(sampleJob())).jobs[0]?.priority).toBe('normal');
+    expect(parseJobList(listOf(autoScanJob())).jobs[0]).toMatchObject({
+      priority: 'background',
+      client: 'auto-scan',
+      clientId: null,
+    });
+    expect(parseJobList(listOf(stage3Job())).jobs[0]?.priority).toBeNull();
+  });
+
   it('accepts times with an offset or fractions of a second', () => {
     const job = sampleJob({ created: '2026-11-14T09:30:00.123+00:00', finished: null });
     expect(parseJobList(listOf(job)).jobs[0]?.created).toBe('2026-11-14T09:30:00.123+00:00');
@@ -107,6 +129,10 @@ describe('parseJobList', () => {
 
   it('names the field that is wrong', () => {
     expect(shapeErrorOf(listOf(sampleJob({ state: 'paused' }))).path).toBe('jobs[0].state');
+    expect(shapeErrorOf(listOf(sampleJob({ priority: 'urgent' }))).path).toBe('jobs[0].priority');
+    expect(shapeErrorOf(listOf(sampleJob({ priority: null as never }))).path).toBe(
+      'jobs[0].priority',
+    );
     expect(shapeErrorOf(listOf(sampleJob({ label: 7 as unknown as string }))).path).toBe(
       'jobs[0].label',
     );

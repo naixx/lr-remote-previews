@@ -80,6 +80,7 @@ function OverviewGrid({ info, live }: { info: ServerInfo; live: Polled<LiveOverv
         paused={paused}
         error={error}
         converterInstalled={info.converter.installed}
+        now={live.checkedAt ?? 0}
         onRetry={refresh}
         onSettingsChanged={onSettingsChanged}
       />

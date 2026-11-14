@@ -1,11 +1,13 @@
-import { useCallback, useId, useState, type FormEvent } from 'react';
+import { useCallback, useId, useRef, useState, type FormEvent } from 'react';
 import { isMissingEndpoint } from '../../api/errors';
 import { CLIENT_API_VERSION, type ServerInfo } from '../../api/info';
 import type { ServerSettings } from '../../api/settings';
+import type { ServerStatus } from '../../api/status';
 import { useApi } from '../../app/ApiContext';
 import { links } from '../../app/router';
 import { ActionError } from '../../components/ActionError';
 import { Card } from '../../components/Card';
+import { ConnectionNote } from '../../components/ConnectionNote';
 import { ErrorPanel, OlderServerNote } from '../../components/ErrorPanel';
 import { Fact } from '../../components/Fact';
 import { PageHeader } from '../../components/PageHeader';
@@ -14,7 +16,10 @@ import { StatePanel } from '../../components/StatePanel';
 import { StatusBadge } from '../../components/StatusBadge';
 import { useAction } from '../../hooks/useAction';
 import { useApiResource } from '../../hooks/useApiResource';
+import { usePolling } from '../../hooks/usePolling';
 import { formatCount, plural } from '../../lib/format';
+import { AutoScanCard } from './AutoScanCard';
+import { CacheCard } from './CacheCard';
 import {
   changesOf,
   formValuesOf,
@@ -22,62 +27,108 @@ import {
   type FormErrors,
   type FormValues,
 } from './form';
+import { SCAN_WATCH_MS, statusInterval } from './live';
 import './settings.css';
+
+/** The forms of the page, each saved on its own. */
+type FormName = 'building' | 'autoScan' | 'cache';
 
 interface Latest {
   /** The settings as the server last answered a change. */
   settings: ServerSettings;
-  /** Grows with every saved form, so the form starts again from the saved values. */
-  formVersion: number;
-  message: string | null;
+  /** Per form: grows with every save of it, so that form starts again from the saved values. */
+  versions: Record<FormName, number>;
+  /** The form saved last, which shows «Saved»; null after any other change, such as Pause. */
+  saved: FormName | null;
 }
+
+const FIRST_VERSIONS: Record<FormName, number> = { building: 0, autoScan: 0, cache: 0 };
 
 export function SettingsPage() {
   const { client } = useApi();
   const loadInfo = useCallback((signal: AbortSignal) => client.getInfo(signal), [client]);
   const loadSettings = useCallback((signal: AbortSignal) => client.getSettings(signal), [client]);
+  const loadStatus = useCallback((signal: AbortSignal) => client.getStatus(signal), [client]);
   const info = useApiResource(loadInfo);
   const settings = useApiResource(loadSettings);
   const [latest, setLatest] = useState<Latest | null>(null);
   const current = latest?.settings ?? (settings.status === 'ready' ? settings.data : null);
 
+  // The status gives the state of the scan and the size of the cache. After Scan now it is read
+  // as often as during a scan for a while, so a short scan is not missed.
+  const watchUntil = useRef(0);
+  const interval = useCallback(
+    (data: ServerStatus | null) => statusInterval(data, watchUntil.current),
+    [],
+  );
+  const status = usePolling(loadStatus, { enabled: current !== null, interval });
+  const refreshStatus = status.refresh;
+
+  const changed = useCallback((next: ServerSettings, form: FormName | null) => {
+    setLatest((previous) => {
+      const versions = previous?.versions ?? FIRST_VERSIONS;
+      return {
+        settings: next,
+        versions: form ? { ...versions, [form]: versions[form] + 1 } : versions,
+        saved: form,
+      };
+    });
+  }, []);
+
+  const versions = latest?.versions ?? FIRST_VERSIONS;
+  const roots = info.status === 'ready' ? info.data.roots : null;
+
   return (
     <div className="page">
       <PageHeader
         title="Settings"
-        lead="How the server builds, and what it reports about itself."
+        lead="How the server builds, scans and keeps its cache, and what it reports about itself."
       />
       <div className="page-stack">
         {current ? (
           <>
-            <BuildingCard
-              settings={current}
-              onChanged={(next) =>
-                setLatest((previous) => ({
-                  settings: next,
-                  formVersion: previous?.formVersion ?? 0,
-                  message: null,
-                }))
-              }
-            />
+            {status.data && status.error && (
+              <ConnectionNote error={status.error} updatedAt={status.updatedAt} />
+            )}
+            <BuildingCard settings={current} onChanged={(next) => changed(next, null)} />
             <Card title="Converter processes and working hours" wide>
               <SettingsForm
-                key={latest?.formVersion ?? 0}
+                key={versions.building}
                 initial={current}
-                onSaved={(next) =>
-                  setLatest((previous) => ({
-                    settings: next,
-                    formVersion: (previous?.formVersion ?? 0) + 1,
-                    message: 'Saved. The change takes effect with the next wave of conversions.',
-                  }))
-                }
+                onSaved={(next) => changed(next, 'building')}
               />
-              {latest?.message && (
+              {latest?.saved === 'building' && (
                 <p className="callout callout--ok" role="status">
-                  {latest.message}
+                  Saved. The change takes effect with the next wave of conversions.
                 </p>
               )}
             </Card>
+            <AutoScanCard
+              settings={current.autoScan}
+              roots={roots}
+              scan={status.data ? status.data.autoScan : undefined}
+              statusError={status.error}
+              now={status.checkedAt ?? 0}
+              formKey={versions.autoScan}
+              saved={latest?.saved === 'autoScan'}
+              onSaved={(next) => {
+                changed(next, 'autoScan');
+                refreshStatus();
+              }}
+              onScanStarted={() => {
+                watchUntil.current = Date.now() + SCAN_WATCH_MS;
+                refreshStatus();
+              }}
+            />
+            <CacheCard
+              limits={current.cache}
+              cache={status.data?.cache ?? null}
+              statusError={status.error}
+              formKey={versions.cache}
+              saved={latest?.saved === 'cache'}
+              onSaved={(next) => changed(next, 'cache')}
+              onCleaned={refreshStatus}
+            />
           </>
         ) : settings.status === 'error' ? (
           isMissingEndpoint(settings.error) ? (

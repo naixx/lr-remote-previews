@@ -7,6 +7,7 @@ import {
   formatRelative,
   formatTemperature,
   formatTimeLeft,
+  formatUntil,
   plural,
   rateParts,
 } from './format';
@@ -88,6 +89,23 @@ describe('formatRelative', () => {
 
   it('treats a time ahead of the clock as just now', () => {
     expect(formatRelative('2026-11-14T09:40:00Z', now)).toBe('just now');
+  });
+});
+
+describe('formatUntil', () => {
+  const now = Date.parse('2026-11-14T09:33:00Z');
+
+  it('says how long until a time ahead, in the largest whole unit', () => {
+    expect(formatUntil('2026-11-14T09:33:40Z', now)).toBe('in less than a minute');
+    expect(formatUntil('2026-11-14T10:00:00Z', now)).toBe('in 27 min');
+    expect(formatUntil('2026-11-14T12:40:00Z', now)).toBe('in 3 h');
+    expect(formatUntil('2026-11-15T09:33:00Z', now)).toBe('in 1 day');
+    expect(formatUntil('2026-11-17T10:00:00Z', now)).toBe('in 3 days');
+  });
+
+  it('says due now for a time that has passed', () => {
+    expect(formatUntil('2026-11-14T09:33:00Z', now)).toBe('due now');
+    expect(formatUntil('2026-11-14T09:20:00Z', now)).toBe('due now');
   });
 });
 

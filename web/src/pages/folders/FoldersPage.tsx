@@ -7,6 +7,7 @@ import {
 } from '../../api/browse';
 import { isMissingEndpoint, type ApiError } from '../../api/errors';
 import type { ServerInfo } from '../../api/info';
+import type { JobPriority } from '../../api/jobs';
 import { useApi } from '../../app/ApiContext';
 import { links } from '../../app/router';
 import { ActionError } from '../../components/ActionError';
@@ -283,16 +284,37 @@ function FolderCard({ folder, name, maxItemsPerJob, onQueued }: FolderCardProps)
   );
 }
 
+interface QueuedResult {
+  queued: FolderQueued;
+  recursive: boolean;
+  priority: JobPriority;
+}
+
+const PRIORITY_CHOICES: { value: JobPriority; label: string }[] = [
+  { value: 'normal', label: 'Normal' },
+  { value: 'background', label: 'Background' },
+];
+
 function QueueFolder({ folder, name, maxItemsPerJob, onQueued }: FolderCardProps) {
   const { client } = useApi();
   const checkboxId = useId();
+  const priorityName = useId();
+  const priorityLabelId = useId();
+  const priorityHintId = useId();
   const [recursive, setRecursive] = useState(false);
+  const [priority, setPriority] = useState<JobPriority>('normal');
   const [confirming, setConfirming] = useState(false);
-  const [result, setResult] = useState<{ queued: FolderQueued; recursive: boolean } | null>(null);
+  const [result, setResult] = useState<QueuedResult | null>(null);
   const queue = useAction(
     useCallback(
-      (withSubfolders: boolean) =>
-        client.queueFolder({ root: folder.root, path: folder.path, recursive: withSubfolders }),
+      (withSubfolders: boolean, chosen: JobPriority) =>
+        client.queueFolder({
+          root: folder.root,
+          path: folder.path,
+          recursive: withSubfolders,
+          // Normal is the default; leaving it out keeps the request what older servers know.
+          ...(chosen === 'background' ? { priority: chosen } : {}),
+        }),
       [client, folder.root, folder.path],
     ),
   );
@@ -301,10 +323,10 @@ function QueueFolder({ folder, name, maxItemsPerJob, onQueued }: FolderCardProps
   const hasSubfolders = folder.dirs.length > 0;
 
   async function confirm() {
-    const queued = await queue.run(recursive);
+    const queued = await queue.run(recursive, priority);
     if (!queued) return;
     setConfirming(false);
-    setResult({ queued, recursive });
+    setResult({ queued, recursive, priority });
     onQueued();
   }
 
@@ -324,6 +346,32 @@ function QueueFolder({ folder, name, maxItemsPerJob, onQueued }: FolderCardProps
           />
           <span>Include sub-folders</span>
         </label>
+        <div
+          className="queue-priority"
+          role="radiogroup"
+          aria-labelledby={priorityLabelId}
+          aria-describedby={priorityHintId}
+        >
+          <span className="queue-priority__label" id={priorityLabelId}>
+            Priority
+          </span>
+          {PRIORITY_CHOICES.map((choice) => (
+            <label className="check" key={choice.value}>
+              <input
+                type="radio"
+                name={priorityName}
+                value={choice.value}
+                checked={priority === choice.value}
+                disabled={confirming}
+                onChange={() => {
+                  setPriority(choice.value);
+                  queue.reset();
+                }}
+              />
+              <span>{choice.label}</span>
+            </label>
+          ))}
+        </div>
         {!confirming && (
           <button
             type="button"
@@ -339,6 +387,10 @@ function QueueFolder({ folder, name, maxItemsPerJob, onQueued }: FolderCardProps
           </button>
         )}
       </div>
+      <p className="hint" id={priorityHintId}>
+        Background jobs are built only when no normal job is waiting, so photos sent from
+        Lightroom go first.
+      </p>
       {nothingHere && (
         <p className="hint">
           No raw files directly in this folder.
@@ -358,6 +410,11 @@ function QueueFolder({ folder, name, maxItemsPerJob, onQueued }: FolderCardProps
           }}
         >
           <QueueSummary folder={folder} recursive={recursive} maxItemsPerJob={maxItemsPerJob} />
+          <p>
+            {priority === 'background'
+              ? 'At background priority: built only when no normal job is waiting.'
+              : 'At normal priority: built in turn with the other normal jobs, oldest first, so jobs sent later wait for it.'}
+          </p>
         </ConfirmPanel>
       )}
       <ActionError
@@ -365,7 +422,7 @@ function QueueFolder({ folder, name, maxItemsPerJob, onQueued }: FolderCardProps
         action="The folder was not queued"
         explain={(error) => explainFolderError(error.code)?.text ?? null}
       />
-      {result && <QueueResult result={result.queued} recursive={result.recursive} />}
+      {result && <QueueResult {...result} />}
     </div>
   );
 }
@@ -425,7 +482,12 @@ function QueueSummary({
   );
 }
 
-function QueueResult({ result, recursive }: { result: FolderQueued; recursive: boolean }) {
+function QueueResult({ queued: result, recursive, priority }: QueuedResult) {
+  // A server older than 0.5 ignores the priority and sends none back.
+  const priorityIgnored =
+    priority === 'background' &&
+    result.jobs.length > 0 &&
+    result.jobs.every((job) => job.priority === null);
   if (result.files === 0) {
     return (
       <p className="callout" role="status">
@@ -438,7 +500,8 @@ function QueueResult({ result, recursive }: { result: FolderQueued; recursive: b
     <div className="callout callout--ok" role="status">
       <p>
         Queued {plural(result.files, 'raw file', 'raw files')}
-        {result.alreadyBuilt > 0 && `, ${formatCount(result.alreadyBuilt)} of them already built`}.
+        {result.alreadyBuilt > 0 && `, ${formatCount(result.alreadyBuilt)} of them already built`}
+        {priority === 'background' && !priorityIgnored && ', at background priority'}.
       </p>
       {result.jobs.length > 0 && (
         <p>
@@ -450,6 +513,12 @@ function QueueResult({ result, recursive }: { result: FolderQueued; recursive: b
               {result.jobs.length > 1 && ` (${plural(job.counts.total, 'file', 'files')})`}
             </span>
           ))}
+        </p>
+      )}
+      {priorityIgnored && (
+        <p>
+          This server is older than the dashboard and has no priorities, so the files are queued
+          at normal priority.
         </p>
       )}
     </div>

@@ -89,3 +89,79 @@
   font-weight: 600;
   color: var(--color-text-muted);
 }
+
+/* A part of a card set apart from what is above it: a form under the state, the clean-up. */
+.settings-section {
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--color-border);
+}
+
+/* Number fields side by side, each with its label, hint and error; stacked on a phone. */
+.settings-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+  gap: var(--space-4) var(--space-5);
+}
+
+.settings-field {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.settings-field .field-label {
+  margin-top: 0;
+}
+
+.scan-roots {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.scan-roots__item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-3);
+}
+
+.scan-roots__name {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 var(--space-2);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.scan-roots__label {
+  font-weight: 600;
+}
+
+.scan-now {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.scan-now .hint,
+.cache-clean .actions .hint {
+  flex: 1 1 240px;
+}
+
+.cache-clean {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.cache-reasons {
+  margin: 0;
+  padding-left: var(--space-5);
+}

@@ -1,6 +1,6 @@
 {
   "name": "lr-remote-previews-web",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "description": "Web dashboard for the LR Remote Previews server.",
   "license": "AGPL-3.0-or-later",

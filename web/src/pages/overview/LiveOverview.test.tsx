@@ -11,6 +11,8 @@ import {
   sampleInfo,
   sampleJobs,
   sampleSettings,
+  scheduledScan,
+  stage3Status,
   type FakeServer,
 } from '../../test/fixtures';
 import { BUSY_REFRESH_MS, IDLE_REFRESH_MS } from './live';
@@ -128,6 +130,50 @@ describe('Queue card', () => {
     );
     // The figures are still shown.
     expect(stat('Cache')).toContain('3.0 GB');
+  });
+});
+
+describe('Automatic scan line', () => {
+  function scanLine(): string {
+    return queueCard().querySelector('.queue-autoscan')?.textContent ?? '';
+  }
+
+  it('says when the next scan is due and what the last one queued', async () => {
+    await renderOverview(busyServer());
+    expect(scanLine()).toMatch(
+      /^Automatic scan: next at .+ \(in 27 min\) · last at .+ \(33 min ago\), 120 files queued$/,
+    );
+    const link = within(queueCard()).getByRole('link', { name: 'Automatic scan' });
+    expect(link.getAttribute('href')).toBe('#/settings');
+    const times = queueCard().querySelectorAll('.queue-autoscan time');
+    expect(Array.from(times, (time) => time.getAttribute('dateTime'))).toEqual([
+      '2026-11-14T10:00:00Z',
+      '2026-11-14T09:00:00Z',
+    ]);
+  });
+
+  it('says when the scan is off or running', async () => {
+    const server = idleServer();
+    await renderOverview(server);
+    expect(scanLine()).toBe('Automatic scan: off');
+
+    server.reply('status', { ...idleStatus(), autoScan: scheduledScan({ nextRun: null }) });
+    await advance(IDLE_REFRESH_MS);
+    expect(scanLine()).toMatch(
+      /^Automatic scan: off · last at .+ \(33 min ago\), 120 files queued$/,
+    );
+
+    server.reply('status', { ...idleStatus(), autoScan: scheduledScan({ running: true }) });
+    await advance(IDLE_REFRESH_MS);
+    expect(scanLine()).toBe('Automatic scan: running now');
+  });
+
+  it('leaves the line out for a server without the automatic scan', async () => {
+    await renderOverview(
+      fakeServer({ info: installedInfo(), status: stage3Status(), jobs: sampleJobs() }),
+    );
+    expect(stat('Queued')).toContain('300');
+    expect(queueCard().querySelector('.queue-autoscan')).toBeNull();
   });
 });
 

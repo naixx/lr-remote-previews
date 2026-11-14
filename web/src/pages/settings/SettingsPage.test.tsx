@@ -1,7 +1,7 @@
 import { fireEvent, screen, within } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import { TOKEN_STORAGE_KEY } from '../../api/token';
-import { sampleInfo, sampleSettings, stage3Server } from '../../test/fixtures';
+import { sampleInfo, sampleSettings, fullServer } from '../../test/fixtures';
 import { renderPage, settle, installFakeClock } from '../../test/render';
 import { SettingsPage } from './SettingsPage';
 
@@ -21,7 +21,7 @@ function typeInto(label: string, value: string) {
 
 describe('SettingsPage', () => {
   it('shows the current settings in the form', async () => {
-    const server = stage3Server();
+    const server = fullServer();
     await renderPage(<SettingsPage />, server);
 
     expect(document.title).toBe('Settings · LR Remote Previews');
@@ -44,7 +44,7 @@ describe('SettingsPage', () => {
   });
 
   it('saves only what changed and shows the values the server answered', async () => {
-    const server = stage3Server();
+    const server = fullServer();
     await renderPage(<SettingsPage />, server);
 
     fireEvent.click(within(formCard()).getByRole('radio', { name: 'Fixed number' }));
@@ -85,7 +85,7 @@ describe('SettingsPage', () => {
   });
 
   it('refuses 2 processes and equal times before sending anything', async () => {
-    const server = stage3Server();
+    const server = fullServer();
     await renderPage(<SettingsPage />, server);
 
     fireEvent.click(within(formCard()).getByRole('radio', { name: 'Fixed number' }));
@@ -117,7 +117,7 @@ describe('SettingsPage', () => {
   });
 
   it('shows a value the server refuses next to the form and keeps the input', async () => {
-    const server = stage3Server();
+    const server = fullServer();
     server.reply('updateSettings', { detail: 'batchSize: must be at most 48 on this server' }, 422);
     await renderPage(<SettingsPage />, server);
 
@@ -136,7 +136,7 @@ describe('SettingsPage', () => {
   });
 
   it('pauses and resumes from the Building card', async () => {
-    const server = stage3Server({ updateSettings: sampleSettings({ paused: true }) });
+    const server = fullServer({ updateSettings: sampleSettings({ paused: true }) });
     await renderPage(<SettingsPage />, server);
     const building = screen.getByRole('region', { name: 'Building' });
 
@@ -149,7 +149,7 @@ describe('SettingsPage', () => {
 
   it('forgets the token on request, and the dashboard asks for it again', async () => {
     window.localStorage.setItem(TOKEN_STORAGE_KEY, 'secret-token');
-    const server = stage3Server();
+    const server = fullServer();
     await renderPage(<SettingsPage />, server);
 
     const card = screen.getByRole('region', { name: 'Access token' });
@@ -165,7 +165,7 @@ describe('SettingsPage', () => {
   });
 
   it('says that an open server needs no token', async () => {
-    const server = stage3Server({ info: { ...sampleInfo(), auth: 'none' } });
+    const server = fullServer({ info: { ...sampleInfo(), auth: 'none' } });
     await renderPage(<SettingsPage />, server);
     expect(screen.getByRole('region', { name: 'Access token' }).textContent).toContain(
       'This server does not ask for a token',
@@ -173,7 +173,7 @@ describe('SettingsPage', () => {
   });
 
   it('lists the server facts', async () => {
-    const server = stage3Server();
+    const server = fullServer();
     await renderPage(<SettingsPage />, server);
 
     const facts = screen.getByRole('region', { name: 'Server' });
@@ -195,7 +195,7 @@ describe('SettingsPage', () => {
   });
 
   it('keeps the token and the facts when the server is older and has no settings', async () => {
-    const server = stage3Server();
+    const server = fullServer();
     server.reply('settings', { detail: 'Not Found' }, 404);
     await renderPage(<SettingsPage />, server);
 

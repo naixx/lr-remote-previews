@@ -3,10 +3,12 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { CurrentPage } from '../../app/App';
 import {
   sampleBrowse,
+  sampleFolderQueued,
   sampleInfo,
   sampleJob,
   shootBrowse,
-  stage3Server,
+  fullServer,
+  stage3Job,
 } from '../../test/fixtures';
 import { renderPage, settle, installFakeClock } from '../../test/render';
 import { FoldersPage } from './FoldersPage';
@@ -34,7 +36,7 @@ async function openQueueConfirmation() {
 
 describe('FoldersPage: roots', () => {
   it('lists the roots; an unavailable one is named but not a link', async () => {
-    const server = stage3Server();
+    const server = fullServer();
     await renderPage(<FoldersPage root={null} path="" />, server);
 
     const roots = screen.getByRole('list', { name: 'Roots' });
@@ -50,7 +52,7 @@ describe('FoldersPage: roots', () => {
   });
 
   it('says so when the server has no roots', async () => {
-    const server = stage3Server({ info: { ...sampleInfo(), roots: [] } });
+    const server = fullServer({ info: { ...sampleInfo(), roots: [] } });
     await renderPage(<FoldersPage root={null} path="" />, server);
     expect(screen.getByText('No roots configured')).toBeTruthy();
   });
@@ -58,7 +60,7 @@ describe('FoldersPage: roots', () => {
 
 describe('FoldersPage: browsing', () => {
   it('shows a folder with its counts, its sub-folders and a breadcrumb', async () => {
-    const server = stage3Server();
+    const server = fullServer();
     await renderPage(<FoldersPage root="archive" path="2026" />, server);
 
     expect(server.urlOf('browse')).toBe('api/v1/browse?root=archive&path=2026');
@@ -92,7 +94,7 @@ describe('FoldersPage: browsing', () => {
 
   it('follows a link into a sub-folder, and back through the breadcrumb', async () => {
     window.location.hash = '#/folders/archive/2026';
-    const server = stage3Server();
+    const server = fullServer();
     server.handle('browse', ({ query }) =>
       query.get('path') === '2026/2026.06.20 - shoot'
         ? { body: shootBrowse() }
@@ -122,14 +124,14 @@ describe('FoldersPage: browsing', () => {
   });
 
   it('shows the root itself without an «up» link', async () => {
-    const server = stage3Server({ browse: sampleBrowse({ path: '', parent: null }) });
+    const server = fullServer({ browse: sampleBrowse({ path: '', parent: null }) });
     await renderPage(<FoldersPage root="archive" path="" />, server);
     expect(server.urlOf('browse')).toBe('api/v1/browse?root=archive');
     expect(screen.queryByRole('link', { name: 'Up one level' })).toBeNull();
   });
 
   it('says so for an empty folder and a cut list', async () => {
-    const server = stage3Server({
+    const server = fullServer({
       browse: sampleBrowse({ dirs: [], rawFiles: 0, builtFiles: 0, otherFiles: 0 }),
     });
     await renderPage(<FoldersPage root="archive" path="2026" />, server);
@@ -137,13 +139,13 @@ describe('FoldersPage: browsing', () => {
   });
 
   it('warns that a long list was cut', async () => {
-    const server = stage3Server({ browse: sampleBrowse({ truncated: true }) });
+    const server = fullServer({ browse: sampleBrowse({ truncated: true }) });
     await renderPage(<FoldersPage root="archive" path="2026" />, server);
     expect(screen.getByText(/more than 5,000 sub-folders/)).toBeTruthy();
   });
 
   it('explains an unavailable root', async () => {
-    const server = stage3Server();
+    const server = fullServer();
     server.reply('browse', { detail: 'Root offsite is not mounted.', code: 'root_unavailable' }, 404);
     await renderPage(<FoldersPage root="offsite" path="" />, server);
 
@@ -155,7 +157,7 @@ describe('FoldersPage: browsing', () => {
   });
 
   it('explains a folder that is gone', async () => {
-    const server = stage3Server();
+    const server = fullServer();
     server.reply('browse', { detail: 'No such folder', code: 'not_found' }, 404);
     await renderPage(<FoldersPage root="archive" path="2026/old" />, server);
     const panel = screen.getByRole('alert');
@@ -166,7 +168,7 @@ describe('FoldersPage: browsing', () => {
   });
 
   it('says that an older server has no folder browser', async () => {
-    const server = stage3Server();
+    const server = fullServer();
     server.reply('browse', { detail: 'Not Found' }, 404);
     await renderPage(<FoldersPage root="archive" path="2026" />, server);
     expect(screen.getByText('This server is older than the dashboard')).toBeTruthy();
@@ -176,7 +178,7 @@ describe('FoldersPage: browsing', () => {
 
 describe('FoldersPage: queueing a folder', () => {
   it('asks first, saying what will happen, then queues and links the job', async () => {
-    const server = stage3Server({ browse: shootBrowse() });
+    const server = fullServer({ browse: shootBrowse() });
     await renderPage(<FoldersPage root="archive" path="2026/2026.06.20 - shoot" />, server);
 
     const confirm = await openQueueConfirmation();
@@ -208,7 +210,7 @@ describe('FoldersPage: queueing a folder', () => {
   });
 
   it('queues the sub-folders too when asked, and lists every job made', async () => {
-    const server = stage3Server({ browse: shootBrowse({ dirs: sampleBrowse().dirs }) });
+    const server = fullServer({ browse: shootBrowse({ dirs: sampleBrowse().dirs }) });
     server.reply('queueFolder', {
       files: 6200,
       alreadyBuilt: 0,
@@ -233,8 +235,59 @@ describe('FoldersPage: queueing a folder', () => {
     expect(result.textContent).toContain('Job 20 (5,000 files), Job 21 (1,200 files)');
   });
 
+  it('queues at normal priority unless background is chosen', async () => {
+    const server = fullServer({ browse: shootBrowse() });
+    await renderPage(<FoldersPage root="archive" path="2026/2026.06.20 - shoot" />, server);
+
+    const group = within(folderCard()).getByRole('radiogroup', { name: 'Priority' });
+    expect(within(group).getByRole('radio', { name: 'Normal' })).toHaveProperty('checked', true);
+    expect(group.getAttribute('aria-describedby')).toBeTruthy();
+    expect(folderCard().textContent).toContain(
+      'Background jobs are built only when no normal job is waiting',
+    );
+
+    let confirm = await openQueueConfirmation();
+    expect(confirm.textContent).toContain('At normal priority: built in turn with the other normal jobs');
+    expect(within(group).getByRole('radio', { name: 'Background' })).toHaveProperty('disabled', true);
+    fireEvent.keyDown(confirm, { key: 'Escape' });
+
+    fireEvent.click(within(group).getByRole('radio', { name: 'Background' }));
+    confirm = await openQueueConfirmation();
+    expect(confirm.textContent).toContain(
+      'At background priority: built only when no normal job is waiting.',
+    );
+    fireEvent.click(within(confirm).getByRole('button', { name: 'Queue' }));
+    await settle();
+    expect(server.bodyOf('queueFolder')).toEqual({
+      root: 'archive',
+      path: '2026/2026.06.20 - shoot',
+      recursive: false,
+      priority: 'background',
+    });
+    const result = within(folderCard()).getByRole('status').textContent;
+    expect(result).toContain('Queued 384 raw files, 120 of them already built, at background priority.');
+    expect(result).not.toContain('older');
+  });
+
+  it('says so when an older server queued at normal priority what was asked for in the background', async () => {
+    const queued = sampleFolderQueued();
+    const server = fullServer({
+      browse: shootBrowse(),
+      queueFolder: { ...queued, jobs: queued.jobs.map((job) => stage3Job(job)) },
+    });
+    await renderPage(<FoldersPage root="archive" path="2026/2026.06.20 - shoot" />, server);
+
+    fireEvent.click(within(folderCard()).getByRole('radio', { name: 'Background' }));
+    const confirm = await openQueueConfirmation();
+    fireEvent.click(within(confirm).getByRole('button', { name: 'Queue' }));
+    await settle();
+    expect(within(folderCard()).getByRole('status').textContent).toContain(
+      'This server is older than the dashboard and has no priorities, so the files are queued at normal priority.',
+    );
+  });
+
   it('cannot queue a folder without raw files unless sub-folders are included', async () => {
-    const server = stage3Server();
+    const server = fullServer();
     await renderPage(<FoldersPage root="archive" path="2026" />, server);
 
     const button = within(folderCard()).getByRole('button', { name: 'Queue this folder…' });
@@ -245,7 +298,7 @@ describe('FoldersPage: queueing a folder', () => {
   });
 
   it('says so when nothing was found to queue', async () => {
-    const server = stage3Server({ queueFolder: { files: 0, alreadyBuilt: 0, jobs: [] } });
+    const server = fullServer({ queueFolder: { files: 0, alreadyBuilt: 0, jobs: [] } });
     await renderPage(<FoldersPage root="archive" path="2026" />, server);
     fireEvent.click(within(folderCard()).getByRole('checkbox', { name: 'Include sub-folders' }));
     const confirm = await openQueueConfirmation();
@@ -257,7 +310,7 @@ describe('FoldersPage: queueing a folder', () => {
   });
 
   it('explains too many files', async () => {
-    const server = stage3Server({ browse: shootBrowse() });
+    const server = fullServer({ browse: shootBrowse() });
     server.reply('queueFolder', { detail: '61,234 raw files found.', code: 'too_many_files' }, 422);
     await renderPage(<FoldersPage root="archive" path="2026/2026.06.20 - shoot" />, server);
 
@@ -273,7 +326,7 @@ describe('FoldersPage: queueing a folder', () => {
   });
 
   it('explains a missing converter', async () => {
-    const server = stage3Server({ info: sampleInfo(), browse: shootBrowse() });
+    const server = fullServer({ info: sampleInfo(), browse: shootBrowse() });
     server.reply(
       'queueFolder',
       { detail: 'Adobe DNG Converter is not installed.', code: 'converter_not_installed' },
@@ -290,7 +343,7 @@ describe('FoldersPage: queueing a folder', () => {
   });
 
   it('goes back without queueing', async () => {
-    const server = stage3Server({ browse: shootBrowse() });
+    const server = fullServer({ browse: shootBrowse() });
     await renderPage(<FoldersPage root="archive" path="2026/2026.06.20 - shoot" />, server);
     const confirm = await openQueueConfirmation();
     fireEvent.keyDown(confirm, { key: 'Escape' });

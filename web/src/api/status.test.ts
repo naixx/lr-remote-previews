@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { busyStatus, idleStatus, legacyStatus } from '../test/fixtures';
+import {
+  busyStatus,
+  idleStatus,
+  legacyStatus,
+  scheduledScan,
+  stage3Status,
+} from '../test/fixtures';
 import { isQueueBusy, parseServerStatus } from './status';
 import { ShapeError } from './validate';
 
@@ -45,7 +51,40 @@ describe('parseServerStatus', () => {
       state: null,
       etaSeconds: null,
       cpuTemperature: null,
+      autoScan: null,
     });
+  });
+
+  it('reads the automatic scan, and none from a server before 0.5', () => {
+    expect(parseServerStatus(busyStatus()).autoScan).toEqual({
+      running: false,
+      lastRun: '2026-11-14T09:00:00Z',
+      lastQueued: 120,
+      nextRun: '2026-11-14T10:00:00Z',
+    });
+    expect(parseServerStatus(idleStatus()).autoScan).toEqual({
+      running: false,
+      lastRun: null,
+      lastQueued: 0,
+      nextRun: null,
+    });
+    expect(parseServerStatus(stage3Status())).toMatchObject({ state: 'running', autoScan: null });
+  });
+
+  it('names a wrong field of the automatic scan', () => {
+    const body = busyStatus();
+    expect(shapeErrorOf({ ...body, autoScan: scheduledScan({ running: 'no' as never }) }).path).toBe(
+      'autoScan.running',
+    );
+    expect(shapeErrorOf({ ...body, autoScan: scheduledScan({ lastRun: '09:00' }) }).path).toBe(
+      'autoScan.lastRun',
+    );
+    expect(shapeErrorOf({ ...body, autoScan: scheduledScan({ lastQueued: -1 }) }).path).toBe(
+      'autoScan.lastQueued',
+    );
+    expect(shapeErrorOf({ ...body, autoScan: { running: false, lastRun: null, lastQueued: 0 } }).path).toBe(
+      'autoScan.nextRun',
+    );
   });
 
   it('rejects an unknown state, a negative time left and a temperature that is not a number', () => {

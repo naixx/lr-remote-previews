@@ -1,3 +1,4 @@
+import { parseAutoScanStarted, type AutoScanStarted } from './autoscan';
 import {
   parseBrowse,
   parseFolderQueued,
@@ -5,6 +6,7 @@ import {
   type FolderQueued,
   type FolderRequest,
 } from './browse';
+import { parseCacheClean, type CacheCleanResult } from './cache';
 import { parseSelfTest, type SelfTestFile, type SelfTestResult } from './converter';
 import { ApiError } from './errors';
 import { parseServerInfo, type ServerInfo } from './info';
@@ -39,6 +41,8 @@ export const API_PATHS = {
   folders: 'api/v1/folders',
   selfTest: 'api/v1/converter/selftest',
   log: 'api/v1/log',
+  autoScanRun: 'api/v1/autoscan/run',
+  cacheClean: 'api/v1/cache/clean',
 } as const;
 
 export interface JobsQuery {
@@ -93,6 +97,13 @@ export interface ApiClient {
   runSelfTest: (file: SelfTestFile | null, signal?: AbortSignal) => Promise<SelfTestResult>;
   /** `GET /api/v1/log`: the newest `limit` lines, oldest first. */
   getLog: (limit?: number, signal?: AbortSignal) => Promise<ServerLog>;
+  /**
+   * `POST /api/v1/autoscan/run`: starts a scan now over the configured roots, or over `roots`
+   * when given. The server answers before the scan has finished.
+   */
+  runAutoScan: (roots: string[] | null, signal?: AbortSignal) => Promise<AutoScanStarted>;
+  /** `POST /api/v1/cache/clean`: cleans the cache up, or with `dryRun` only counts. */
+  cleanCache: (dryRun: boolean, signal?: AbortSignal) => Promise<CacheCleanResult>;
 }
 
 type Method = 'GET' | 'POST' | 'PATCH' | 'DELETE';
@@ -217,6 +228,18 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
       }),
     getLog: (limit, signal) =>
       request(withQuery(API_PATHS.log, { limit }), parseLog, { signal }),
+    runAutoScan: (roots, signal) =>
+      request(API_PATHS.autoScanRun, parseAutoScanStarted, {
+        method: 'POST',
+        body: roots ? { roots } : undefined,
+        signal,
+      }),
+    cleanCache: (dryRun, signal) =>
+      request(API_PATHS.cacheClean, parseCacheClean, {
+        method: 'POST',
+        body: { dryRun },
+        signal,
+      }),
   };
 }
 

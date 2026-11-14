@@ -1,6 +1,6 @@
 import { fireEvent, screen, within } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
-import { sampleJob, sampleJobs, stage3Server } from '../../test/fixtures';
+import { autoScanJob, sampleJob, sampleJobs, fullServer } from '../../test/fixtures';
 import { advance, renderPage, settle, installFakeClock } from '../../test/render';
 import { JobsPage } from './JobsPage';
 import { ACTIVE_REFRESH_MS, IDLE_REFRESH_MS, JOBS_PAGE } from './live';
@@ -21,7 +21,7 @@ function manyJobs(n: number, state = 'done') {
 
 describe('JobsPage', () => {
   it('lists the jobs newest first, each linking to its page', async () => {
-    const server = stage3Server();
+    const server = fullServer();
     await renderPage(<JobsPage state={null} />, server);
 
     expect(server.urlOf('jobs')).toBe(`api/v1/jobs?limit=${JOBS_PAGE}`);
@@ -40,8 +40,23 @@ describe('JobsPage', () => {
     expect(screen.queryByRole('button', { name: 'Load more' })).toBeNull();
   });
 
+  it('marks background jobs and names the automatic scan as their sender', async () => {
+    const server = fullServer({ jobs: { jobs: [autoScanJob(), sampleJob()] } });
+    await renderPage(<JobsPage state={null} />, server);
+
+    const [scan, plugin] = jobRows() as [HTMLElement, HTMLElement];
+    expect(within(scan).getByRole('heading').textContent).toBe('Automatic scan: archive');
+    expect(within(scan).getByText('Background', { selector: '.badge' })).toBeTruthy();
+    expect(within(scan).getByText('Job 8 · Automatic scan')).toBeTruthy();
+    // Normal priority needs no badge.
+    expect(within(plugin).queryByText('Background')).toBeNull();
+    expect(Array.from(plugin.querySelectorAll('.job__head .badge'), (b) => b.textContent)).toEqual([
+      'Active',
+    ]);
+  });
+
   it('filters by state with links that keep the filter in the address', async () => {
-    const server = stage3Server({ jobs: { jobs: [sampleJob()] } });
+    const server = fullServer({ jobs: { jobs: [sampleJob()] } });
     await renderPage(<JobsPage state="active" />, server);
 
     expect(server.queryOf('jobs').get('state')).toBe('active');
@@ -54,13 +69,13 @@ describe('JobsPage', () => {
   });
 
   it('says so when a filter matches nothing', async () => {
-    const server = stage3Server({ jobs: { jobs: [] } });
+    const server = fullServer({ jobs: { jobs: [] } });
     await renderPage(<JobsPage state="cancelled" />, server);
     expect(screen.getByText('No job was cancelled.')).toBeTruthy();
   });
 
   it('loads more with a larger limit and keeps the list on screen meanwhile', async () => {
-    const server = stage3Server({ jobs: manyJobs(JOBS_PAGE) });
+    const server = fullServer({ jobs: manyJobs(JOBS_PAGE) });
     await renderPage(<JobsPage state={null} />, server);
     expect(jobRows()).toHaveLength(JOBS_PAGE);
 
@@ -80,7 +95,7 @@ describe('JobsPage', () => {
   });
 
   it('refreshes every 2 s while a job is active and every 15 s otherwise', async () => {
-    const server = stage3Server();
+    const server = fullServer();
     await renderPage(<JobsPage state={null} />, server);
     expect(server.calls('jobs')).toBe(1);
 
@@ -97,7 +112,7 @@ describe('JobsPage', () => {
   });
 
   it('reports a failure before any data and retries on request', async () => {
-    const server = stage3Server();
+    const server = fullServer();
     server.reply('jobs', { detail: 'Internal error' }, 500);
     await renderPage(<JobsPage state={null} />, server);
 
@@ -112,7 +127,7 @@ describe('JobsPage', () => {
   });
 
   it('keeps the list when a refresh fails, and says so', async () => {
-    const server = stage3Server();
+    const server = fullServer();
     await renderPage(<JobsPage state={null} />, server);
     server.failNetwork('jobs');
     await advance(ACTIVE_REFRESH_MS);

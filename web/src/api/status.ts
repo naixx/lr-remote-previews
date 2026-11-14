@@ -1,9 +1,12 @@
 import {
+  asBoolean,
   asCount,
   asNonNegative,
+  asNullableTimestamp,
   asNumber,
   asObject,
   asOneOf,
+  fieldPath,
   nullable,
   optional,
 } from './validate';
@@ -14,6 +17,18 @@ export const SERVER_STATES = ['running', 'idle', 'paused', 'waiting'] as const;
  * on; `waiting`: work is queued but the working hours have not begun.
  */
 export type ServerState = (typeof SERVER_STATES)[number];
+
+/** What the automatic scan is doing, as the status reports it. */
+export interface AutoScanStatus {
+  /** True while a scan walks the roots, automatic or started with Scan now. */
+  running: boolean;
+  /** When the last scan finished; null before the first. */
+  lastRun: string | null;
+  /** How many files the last scan queued; 0 before the first. */
+  lastQueued: number;
+  /** When the next automatic scan is due; null while the automatic scan is off. */
+  nextRun: string | null;
+}
 
 /** Response of `GET /api/v1/status`: the server's work at this moment. */
 export interface ServerStatus {
@@ -57,6 +72,18 @@ export interface ServerStatus {
   };
   /** Degrees Celsius of the hottest CPU sensor; null when unreadable, and from an older server. */
   cpuTemperature: number | null;
+  /** Null from a server older than 0.5, which has no automatic scan. */
+  autoScan: AutoScanStatus | null;
+}
+
+function parseAutoScanStatus(value: unknown, path: string): AutoScanStatus {
+  const obj = asObject(value, path);
+  return {
+    running: asBoolean(obj.running, fieldPath(path, 'running')),
+    lastRun: asNullableTimestamp(obj.lastRun, fieldPath(path, 'lastRun')),
+    lastQueued: asCount(obj.lastQueued, fieldPath(path, 'lastQueued')),
+    nextRun: asNullableTimestamp(obj.nextRun, fieldPath(path, 'nextRun')),
+  };
 }
 
 /** Checks the shape of a status response; throws a ShapeError naming the first bad field. */
@@ -100,6 +127,7 @@ export function parseServerStatus(data: unknown): ServerStatus {
     cpuTemperature: optional(obj.cpuTemperature, 'cpuTemperature', (value, path) =>
       nullable(value, path, asNumber),
     ),
+    autoScan: optional(obj.autoScan, 'autoScan', parseAutoScanStatus),
   };
 }
 

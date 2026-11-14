@@ -1,7 +1,12 @@
 import type { ReactNode } from 'react';
 import type { ApiError } from '../../api/errors';
 import type { ServerSettings } from '../../api/settings';
-import { isQueueBusy, type ServerState, type ServerStatus } from '../../api/status';
+import {
+  isQueueBusy,
+  type AutoScanStatus,
+  type ServerState,
+  type ServerStatus,
+} from '../../api/status';
 import { links } from '../../app/router';
 import { Card } from '../../components/Card';
 import { PauseButton } from '../../components/PauseButton';
@@ -9,8 +14,13 @@ import { StatusBadge, type Tone } from '../../components/StatusBadge';
 import {
   byteParts,
   formatCount,
+  formatFullTime,
+  formatLocalTime,
+  formatRelative,
   formatTemperature,
   formatTimeLeft,
+  formatUntil,
+  plural,
   rateParts,
 } from '../../lib/format';
 import { IDLE_REFRESH_MS } from './live';
@@ -26,6 +36,8 @@ interface QueueCardProps {
   /** Set when no status has arrived because the requests fail. */
   error: ApiError | null;
   converterInstalled: boolean;
+  /** When the status was fetched, for «in 27 min». */
+  now: number;
   onRetry: () => void;
   onSettingsChanged: (settings: ServerSettings) => void;
 }
@@ -35,6 +47,7 @@ export function QueueCard({
   paused,
   error,
   converterInstalled,
+  now,
   onRetry,
   onSettingsChanged,
 }: QueueCardProps) {
@@ -51,6 +64,7 @@ export function QueueCard({
         <>
           <QueueState status={status} paused={paused} onSettingsChanged={onSettingsChanged} />
           <QueueStats status={status} />
+          {status.autoScan && <AutoScanLine scan={status.autoScan} now={now} />}
         </>
       ) : error ? (
         <LiveError error={error} onRetry={onRetry} />
@@ -174,6 +188,35 @@ function QueueStats({ status }: { status: ServerStatus }) {
         note={`${formatCount(cache.entries)} ${cache.entries === 1 ? 'file' : 'files'}`}
       />
     </dl>
+  );
+}
+
+/** The automatic scan in one line; the Settings page has the details. */
+function AutoScanLine({ scan, now }: { scan: AutoScanStatus; now: number }) {
+  const at = (iso: string) => (
+    <time dateTime={iso} title={formatFullTime(iso)}>
+      {formatLocalTime(iso, now)}
+    </time>
+  );
+  return (
+    <p className="queue-autoscan">
+      <a href={links.settings()}>Automatic scan</a>:{' '}
+      {scan.running ? (
+        'running now'
+      ) : scan.nextRun ? (
+        <>
+          next at {at(scan.nextRun)} ({formatUntil(scan.nextRun, now)})
+        </>
+      ) : (
+        'off'
+      )}
+      {!scan.running && scan.lastRun && (
+        <>
+          {' · '}last at {at(scan.lastRun)} ({formatRelative(scan.lastRun, now)}),{' '}
+          {plural(scan.lastQueued, 'file', 'files')} queued
+        </>
+      )}
+    </p>
   );
 }
 

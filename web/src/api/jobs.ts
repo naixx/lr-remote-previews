@@ -19,6 +19,18 @@ export const JOB_STATES = ['active', 'done', 'cancelled'] as const;
 /** `active` while any item is queued or building; `done` when none is; `cancelled` after a cancel. */
 export type JobState = (typeof JOB_STATES)[number];
 
+export const JOB_PRIORITIES = ['normal', 'background'] as const;
+/**
+ * `normal` or `background`: the server builds every queued item of normal jobs before any item
+ * of a background job, and within a priority the oldest job first.
+ */
+export type JobPriority = (typeof JOB_PRIORITIES)[number];
+
+/** The `client` of the jobs the automatic scan makes. */
+export const AUTO_SCAN_CLIENT = 'auto-scan';
+/** The `client` of the jobs made by queueing a folder in the dashboard. */
+export const DASHBOARD_CLIENT = 'dashboard';
+
 export const ITEM_STATES = ['queued', 'building', 'ready', 'failed', 'rejected', 'cancelled'] as const;
 /** The state of one file of a job; see the protocol's table of item states. */
 export type ItemState = (typeof ITEM_STATES)[number];
@@ -43,6 +55,8 @@ export interface Job {
   client: string | null;
   /** The identifier a client sends to find its own jobs again; null when it sent none. */
   clientId: string | null;
+  /** Null from a server older than 0.5, which builds every job at the same priority. */
+  priority: JobPriority | null;
   state: JobState;
   /** ISO 8601 time, UTC. */
   created: string;
@@ -126,6 +140,9 @@ export function parseJob(value: unknown, path: string): Job {
     label: optional(obj.label, fieldPath(path, 'label'), asNullableString),
     client: optional(obj.client, fieldPath(path, 'client'), asNullableString),
     clientId: optional(obj.clientId, fieldPath(path, 'clientId'), asNullableString),
+    priority: optional(obj.priority, fieldPath(path, 'priority'), (value, at) =>
+      asOneOf(value, at, JOB_PRIORITIES),
+    ),
     state: asOneOf(obj.state, fieldPath(path, 'state'), JOB_STATES),
     created: asTimestamp(obj.created, fieldPath(path, 'created')),
     finished: asNullableTimestamp(obj.finished, fieldPath(path, 'finished')),
@@ -194,6 +211,18 @@ export function parseItemPage(data: unknown): ItemPage {
 /** Items that will not change any more. */
 export function finishedCount(counts: JobCounts): number {
   return counts.ready + counts.failed + counts.rejected + counts.cancelled;
+}
+
+/**
+ * Who made the job, in words: the automatic scan and the dashboard by name, anything else as it
+ * calls itself (`lr-plugin/0.3.0`); null when the job does not say.
+ */
+export function clientName(client: string | null): string | null {
+  const name = client?.trim();
+  if (!name) return null;
+  if (name === AUTO_SCAN_CLIENT) return 'Automatic scan';
+  if (name === DASHBOARD_CLIENT) return 'Dashboard';
+  return name;
 }
 
 /** The label a person gave the job, or «Job 7». */

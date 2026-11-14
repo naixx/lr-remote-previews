@@ -1,6 +1,6 @@
 import { act, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
-import { stage3Server } from '../test/fixtures';
+import { fullServer } from '../test/fixtures';
 import { ApiProvider } from './ApiProvider';
 import { CurrentPage } from './App';
 import { Layout } from './Layout';
@@ -67,7 +67,7 @@ describe('parseRoute', () => {
 
 function renderApp(hash: string) {
   window.location.hash = hash;
-  const server = stage3Server();
+  const server = fullServer();
   render(
     <ApiProvider fetch={server.fetch}>
       <Layout>

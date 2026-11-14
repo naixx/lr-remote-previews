@@ -47,8 +47,9 @@ export function toApiError(error: unknown): ApiError {
 
 /**
  * True when the server does not have the endpoint at all: a 404 without a `code`. Unknown API
- * paths answer that way, while every 404 the protocol defines for the endpoints added in stage 3
- * carries a `code`. Do not use it for job and item ids, whose 404 has no code either.
+ * paths answer that way, while every 404 the protocol defines for the endpoints added since
+ * stage 3 carries a `code` (the automatic scan and the cache clean-up define none). Do not use it
+ * for job and item ids, whose 404 has no code either.
  */
 export function isMissingEndpoint(error: ApiError | null): boolean {
   return error !== null && error.kind === 'http' && error.status === 404 && error.code === null;

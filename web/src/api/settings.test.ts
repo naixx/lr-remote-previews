@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { sampleBrowse, sampleFolderQueued, sampleSettings } from '../test/fixtures';
+import {
+  sampleBrowse,
+  sampleFolderQueued,
+  sampleSettings,
+  stage3Settings,
+} from '../test/fixtures';
 import { parseBrowse, parseFolderQueued } from './browse';
 import { parseSettings } from './settings';
 import { ShapeError } from './validate';
@@ -23,8 +28,44 @@ describe('parseSettings', () => {
     expect(parseSettings(sampleSettings({ workers: 6 })).workers).toBe(6);
   });
 
+  it('reads the automatic scan and the cache limits', () => {
+    const autoScan = {
+      enabled: true,
+      roots: ['archive', 'offsite'],
+      intervalMinutes: 30,
+      settleMinutes: 0,
+      maxFilesPerRun: 50000,
+    };
+    const cache = { maxBytes: 50_000_000_000, maxAgeDays: 90 };
+    expect(parseSettings(sampleSettings({ autoScan, cache }))).toMatchObject({ autoScan, cache });
+    expect(parseSettings(sampleSettings()).cache).toEqual({ maxBytes: null, maxAgeDays: null });
+  });
+
+  it('gives no automatic scan and no cache limits for a server before 0.5', () => {
+    expect(parseSettings(stage3Settings())).toMatchObject({
+      workers: 'auto',
+      autoScan: null,
+      cache: null,
+    });
+  });
+
   it('names the field that is wrong', () => {
     expect(shapeErrorOf(parseSettings, sampleSettings({ workers: 0 })).path).toBe('workers');
+    const base = sampleSettings();
+    expect(
+      shapeErrorOf(parseSettings, { ...base, autoScan: { ...base.autoScan, roots: [7] } }).path,
+    ).toBe('autoScan.roots[0]');
+    expect(
+      shapeErrorOf(parseSettings, { ...base, autoScan: { ...base.autoScan, intervalMinutes: '60' } })
+        .path,
+    ).toBe('autoScan.intervalMinutes');
+    expect(shapeErrorOf(parseSettings, { ...base, autoScan: null }).path).toBe('autoScan');
+    expect(shapeErrorOf(parseSettings, { ...base, cache: { maxBytes: -1, maxAgeDays: null } }).path).toBe(
+      'cache.maxBytes',
+    );
+    expect(shapeErrorOf(parseSettings, { ...base, cache: { maxBytes: null } }).path).toBe(
+      'cache.maxAgeDays',
+    );
     expect(shapeErrorOf(parseSettings, { ...sampleSettings(), paused: 'no' }).path).toBe('paused');
     const hours = { enabled: true, from: '7:00', to: '22:00' };
     expect(shapeErrorOf(parseSettings, sampleSettings({ workingHours: hours })).path).toBe(

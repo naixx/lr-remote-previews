@@ -1,8 +1,13 @@
 import {
+  asArray,
   asBoolean,
   asClockTime,
   asCount,
   asObject,
+  asString,
+  fieldPath,
+  nullable,
+  optional,
   ShapeError,
 } from './validate';
 
@@ -17,6 +22,28 @@ export interface WorkingHours {
   to: string;
 }
 
+/** The automatic scan: which roots the server walks, how often, and how much it queues. */
+export interface AutoScanSettings {
+  /** Off unless set. Scan now works either way. */
+  enabled: boolean;
+  /** Ids of the roots to scan; each must exist on the server. */
+  roots: string[];
+  /** Minutes between two scans, 5 to 1440. */
+  intervalMinutes: number;
+  /** A file modified more recently than this many minutes is left for a later scan, 0 to 1440. */
+  settleMinutes: number;
+  /** The most files one scan queues, 1 to 50000; the rest wait for the next scan. */
+  maxFilesPerRun: number;
+}
+
+/** Limits for the cache clean-up; null means no limit. */
+export interface CacheLimits {
+  /** Null, or at least 104857600 bytes (100 MiB). */
+  maxBytes: number | null;
+  /** Null, or 1 to 3650 days since a DNG was last used. */
+  maxAgeDays: number | null;
+}
+
 /** Response of `GET` and `PATCH /api/v1/settings`. */
 export interface ServerSettings {
   workers: WorkersSetting;
@@ -27,14 +54,23 @@ export interface ServerSettings {
   /** When true no new wave starts; a wave that is running finishes. */
   paused: boolean;
   workingHours: WorkingHours;
+  /** Null from a server older than 0.5, which has no automatic scan. */
+  autoScan: AutoScanSettings | null;
+  /** Null from a server older than 0.5, which has no cache clean-up. */
+  cache: CacheLimits | null;
 }
 
-/** The body of `PATCH /api/v1/settings`: any subset; `workingHours` only as a whole. */
+/**
+ * The body of `PATCH /api/v1/settings`: any subset; `workingHours`, `autoScan` and `cache` only
+ * as whole objects.
+ */
 export interface SettingsChange {
   workers?: WorkersSetting;
   batchSize?: number;
   paused?: boolean;
   workingHours?: WorkingHours;
+  autoScan?: AutoScanSettings;
+  cache?: CacheLimits;
 }
 
 /** Limits of the settings, as the protocol states them. */
@@ -44,6 +80,16 @@ export const WORKERS_MAX = 32;
 export const WORKERS_FORBIDDEN = 2;
 export const BATCH_MIN = 1;
 export const BATCH_MAX = 64;
+export const SCAN_INTERVAL_MIN = 5;
+export const SCAN_INTERVAL_MAX = 1440;
+export const SCAN_SETTLE_MIN = 0;
+export const SCAN_SETTLE_MAX = 1440;
+export const SCAN_FILES_MIN = 1;
+export const SCAN_FILES_MAX = 50_000;
+/** The smallest size limit the server accepts: 100 MiB. */
+export const CACHE_MIN_BYTES = 104_857_600;
+export const CACHE_AGE_MIN = 1;
+export const CACHE_AGE_MAX = 3650;
 
 function parseWorkers(value: unknown, path: string): WorkersSetting {
   if (value === 'auto') return 'auto';
@@ -60,6 +106,25 @@ function parseWorkingHours(value: unknown, path: string): WorkingHours {
   };
 }
 
+function parseAutoScan(value: unknown, path: string): AutoScanSettings {
+  const obj = asObject(value, path);
+  return {
+    enabled: asBoolean(obj.enabled, fieldPath(path, 'enabled')),
+    roots: asArray(obj.roots, fieldPath(path, 'roots'), asString),
+    intervalMinutes: asCount(obj.intervalMinutes, fieldPath(path, 'intervalMinutes')),
+    settleMinutes: asCount(obj.settleMinutes, fieldPath(path, 'settleMinutes')),
+    maxFilesPerRun: asCount(obj.maxFilesPerRun, fieldPath(path, 'maxFilesPerRun')),
+  };
+}
+
+function parseCacheLimits(value: unknown, path: string): CacheLimits {
+  const obj = asObject(value, path);
+  return {
+    maxBytes: nullable(obj.maxBytes, fieldPath(path, 'maxBytes'), asCount),
+    maxAgeDays: nullable(obj.maxAgeDays, fieldPath(path, 'maxAgeDays'), asCount),
+  };
+}
+
 /** Checks the shape of a settings response; throws a ShapeError naming the first bad field. */
 export function parseSettings(data: unknown): ServerSettings {
   const obj = asObject(data, '');
@@ -69,5 +134,7 @@ export function parseSettings(data: unknown): ServerSettings {
     batchSize: asCount(obj.batchSize, 'batchSize'),
     paused: asBoolean(obj.paused, 'paused'),
     workingHours: parseWorkingHours(obj.workingHours, 'workingHours'),
+    autoScan: optional(obj.autoScan, 'autoScan', parseAutoScan),
+    cache: optional(obj.cache, 'cache', parseCacheLimits),
   };
 }
