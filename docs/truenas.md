@@ -5,9 +5,10 @@ The server runs on TrueNAS SCALE as a custom app installed from a YAML file
 that shows «converter installed». Everything after that, from the plug-in's settings to the first delivered smart
 preview, is in the [guide](guide.md).
 
-*Tried on:* TrueNAS SCALE 25.10 with Docker 28. The image was built on the NAS and the server ran there as a plain
-container with the same settings this file gives the app; **the YAML itself has not been installed through the
-TrueNAS interface yet.** The `x-portals` block is the form a custom app on that system uses.
+*Tried on:* TrueNAS SCALE 25.10 with Docker 28. The image was built on the NAS and the YAML was installed as a custom
+app through the middleware call behind «Install via YAML» (`app.create` with the YAML as its compose text): the app
+runs, its **Web UI** button opens the dashboard, and a folder of originals was built through it. The dialog in the
+web interface itself has not been clicked through.
 
 ## 1. Folders
 
