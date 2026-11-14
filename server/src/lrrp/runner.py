@@ -53,6 +53,9 @@ POLL_INTERVAL = 0.02
 WARM_UP_INPUT = "no-such-input.arw"
 """The input of the warm-up run. It never exists, so the run can never wait for or read a file."""
 
+LOG_NAME = "converter.log"
+"""The converter's output (stdout and stderr) in each run's folder."""
+
 if os.name == "posix":
     _OWN_SESSION: dict[str, Any] = {"start_new_session": True}
 else:  # Windows, for the tests: the fake converter's process tree is killed with taskkill.
@@ -150,6 +153,8 @@ class RunnerConfig:
 def default_config(settings: Settings, environ: Mapping[str, str] | None = None) -> RunnerConfig:
     """The production configuration: Wine, the converter in the prefix, ``Z:`` paths."""
     env = dict(os.environ if environ is None else environ)
+    # The converter has no use for the API token; keep it out of Wine and of the output we log.
+    env.pop("LRRP_TOKEN", None)
     prefix = str(settings.wineprefix)
     if env.get("WINEPREFIX") not in (None, "", prefix):
         log.warning(
@@ -185,6 +190,18 @@ class FileResult:
     @property
     def ok(self) -> bool:
         return self.output is not None and self.error is None
+
+
+@dataclass(frozen=True)
+class WarmUp:
+    """What ``Runner.warm_up`` did."""
+
+    needed: bool
+    """False when the converter has run in this prefix before (or warm-ups are off)."""
+    problem: str | None = None
+    """None when the converter can run now, else a message for a person."""
+    exit_code: int | None = None
+    """The exit code of the warm-up run, when there was one."""
 
 
 @dataclass
@@ -237,13 +254,34 @@ class Runner:
 
         Returns None when it can, else a message for the items that cannot be built now.
         """
+        problem = self.prepare_display()
+        if problem is not None:
+            return problem
+        return self.warm_up().problem
+
+    def prepare_display(self) -> str | None:
+        """The first part of ``prepare``: the X display and the persistent wineserver.
+
+        Returns None when the display is there, else a message for a person.
+        """
         try:
             self._display_value = self._display.ensure()
         except DisplayError as exc:
             log.error("no X display for the converter: %s", exc)
             return f"No X display could be started for Adobe DNG Converter ({exc})"
         self._start_wineserver()
-        return self._warm_up()
+        return None
+
+    def describe_display(self) -> str:
+        """For a person: the display the converter runs on."""
+        return self._display.describe()
+
+    def output_tail(self, result: FileResult) -> str:
+        """The last lines of the converter's output in the run that made ``result``, on one line.
+
+        Only until the result is discarded.
+        """
+        return _tail(result.work_dir / LOG_NAME)
 
     def run(self, batches: Sequence[Sequence[BatchFile]], *, final: bool) -> list[FileResult]:
         """Run one wave: start every batch together, wait for all, and check the outputs.
@@ -276,9 +314,8 @@ class Runner:
         work_dir = self._new_work_dir(prefix)
         out_dir = work_dir / "out"
         out_dir.mkdir()
-        return _Run(
-            work_dir=work_dir, out_dir=out_dir, log_path=work_dir / "converter.log", timeout=timeout
-        )
+        log_path = work_dir / LOG_NAME
+        return _Run(work_dir=work_dir, out_dir=out_dir, log_path=log_path, timeout=timeout)
 
     def _start(self, run: _Run, inputs: Sequence[Path]) -> None:
         try:
@@ -451,10 +488,12 @@ class Runner:
             return
         log.info("started a persistent wineserver (%s exited with code %s)", command[0], code)
 
-    def _warm_up(self) -> str | None:
+    def warm_up(self) -> WarmUp:
+        """The second part of ``prepare``: one throw-away run in a prefix where the converter has
+        never run (see ``lrrp.converter``). Call ``prepare_display`` first."""
         config_file = self.config.gpu_config
         if config_file is None or config_file.is_file():
-            return None
+            return WarmUp(needed=False)
         log.info(
             "Adobe DNG Converter has not run in this Wine prefix yet (no %r); warming it up",
             config_file.name,
@@ -467,9 +506,9 @@ class Runner:
         shutil.rmtree(run.work_dir, ignore_errors=True)
         if config_file.is_file():
             log.info("warm-up done (the run exited with code %s)", run.exit_code)
-            return None
+            return WarmUp(needed=True, exit_code=run.exit_code)
         if run.aborted:
-            return "The server is stopping"
+            return WarmUp(needed=True, problem="The server is stopping")
         if run.start_error is not None:
             how = f"it could not be started: {run.start_error}"
         elif run.timed_out:
@@ -486,7 +525,7 @@ class Runner:
         message = f"Adobe DNG Converter could not initialise in its Wine prefix ({how})"
         if excerpt:
             message += f"; its last output: {excerpt}"
-        return message
+        return WarmUp(needed=True, problem=message, exit_code=run.exit_code)
 
 
 def _kill_group(process: subprocess.Popen[bytes]) -> None:

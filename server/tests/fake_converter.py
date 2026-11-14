@@ -17,7 +17,8 @@ Environment variables (names are base names with extension, comma-separated, any
   ``concurrency/`` one file per run with the number of runs going on at the same time.
 - ``FAKE_CONVERTER_SETTLE`` seconds to wait before counting the runs going on (and again after).
 - ``FAKE_CONVERTER_DELAY`` seconds every run takes.
-- ``FAKE_CONVERTER_FAIL`` names it writes nothing for, and then exits with code 1.
+- ``FAKE_CONVERTER_FAIL`` names it writes nothing for (printing an error line for each), and then
+  exits with code 1.
 - ``FAKE_CONVERTER_SKIP`` names it writes nothing for, exiting with code 0.
 - ``FAKE_CONVERTER_HANG`` names that make the run hang.
 - ``FAKE_CONVERTER_WRONG_NAME`` names whose DNG records another original name.
@@ -204,6 +205,7 @@ def main(arguments: list[str]) -> int:
             if name in names("FAKE_CONVERTER_SKIP"):
                 continue
             if name in names("FAKE_CONVERTER_FAIL"):
+                print(f"Error: cannot convert {path.name} (fake)", file=sys.stderr)
                 failed = True
                 continue
             recorded = path.name

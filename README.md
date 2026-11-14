@@ -2,7 +2,8 @@
 
 Build Lightroom Classic smart previews on the machine that holds your originals, not on the computer you edit on.
 
-**Status: early development (stage 1 of the [plan](docs/plan.md) in progress).** Nothing here is ready for use yet. The idea
+**Status: early development (stages 2 and 3 of the [plan](docs/plan.md) in progress).** It is not released and
+has only been used on its authors' own setup. The idea
 itself is proven by experiment; see [docs/research/smart-previews.md](docs/research/smart-previews.md).
 
 ## The problem
@@ -44,6 +45,9 @@ between the two): 0.26–0.35 s per photo on the server against 0.9–1.2 s thro
 
 ## Documentation
 
+- [Guide](docs/guide.md): from nothing to the first delivered smart preview.
+- [Troubleshooting](docs/troubleshooting.md).
+- [Installing on TrueNAS SCALE](docs/truenas.md).
 - [Plan](docs/plan.md): the stages from the minimum to the complete product.
 - [Decision records](docs/adr/): why it is built the way it is.
 - [How Lightroom stores smart previews, and what we tested](docs/research/smart-previews.md).

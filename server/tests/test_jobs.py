@@ -758,12 +758,16 @@ def test_status(harness: Harness) -> None:
     harness.raw("IMG_0001.ARW")
     with harness.client(workers=4) as client:
         assert client.get("/api/v1/status").json() == {
+            "state": "idle",
             "queue": {"queued": 0, "building": 0},
             "workers": {"configured": 4, "busy": 0},
             "rate": {"perMinute": 0.0, "windowSeconds": 60},
+            "etaSeconds": None,
             "today": {"built": 0, "failed": 0},
             "cache": {"entries": 0, "bytes": 0},
             "jobs": {"active": 0},
+            "cpuTemperature": None,
+            "autoScan": {"running": False, "lastRun": None, "lastQueued": 0, "nextRun": None},
         }
         job = post_job(client, ["IMG_0001.ARW"])["job"]
         assert client.get("/api/v1/status").json()["jobs"]["active"] in (0, 1)

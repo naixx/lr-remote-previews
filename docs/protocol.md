@@ -2,7 +2,7 @@
 
 HTTP and JSON. Everything under `/api/v1`. The server also publishes an OpenAPI description at `/docs` (generated;
 the text here is the contract that the three parts are written against). This file grows with the stages of the
-[plan](plan.md); it now covers stage 3.
+[plan](plan.md); it now covers stage 4.
 
 Conventions: JSON bodies are UTF-8. Times are UTC, written exactly as `YYYY-MM-DDTHH:MM:SSZ`
 (`2026-11-14T09:30:00Z`): a literal `Z`, no numeric offset, no fractions of a second. Identifiers of
@@ -27,14 +27,15 @@ type or value. `detail` is always one string, also for `422`.
 
 `200` `{"status": "ok", "busy": false}`. For container health checks, and for software that must know whether
 the server is working: `busy` is true while `status.state` (below) is `running`. A NAS that sleeps when idle can
-poll this to stay awake while the queue runs. Never needs a token.
+poll this to stay awake while the queue runs. An automatic scan or a cache clean-up alone does not make it busy.
+Never needs a token.
 
 ## `GET /api/v1/info`
 
 ```json
 {
   "name": "LR Remote Previews",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "api": 1,
   "auth": "token",
   "converter": {
@@ -130,7 +131,7 @@ file the server is not permitted to read is `not_found`.
 | `ref` | A string of at most 64 characters chosen by the client and echoed back unchanged. The server does not interpret it. Unique within a job |
 | `seq` | The job's change counter at the item's last state change (see polling) |
 | `error` | `null`, or `{"code": "...", "message": "..."}` for `failed` and `rejected` |
-| `result` | `null` until `ready`. `key` names the DNG in the server's cache (64 lower-case hex characters; see `GET /api/v1/files/{key}`); `size` and `sha256` (lower-case hex) of the DNG; `originalName` and the original pixel size as the DNG records them (`OriginalRawFileName`, `OriginalDefaultFinalSize`), `null` where the DNG has no such tag |
+| `result` | `null` until `ready`, and `null` again on a `ready` item whose DNG the cache clean-up has removed since (its download answers `404` `not_in_cache`). `key` names the DNG in the server's cache (64 lower-case hex characters; see `GET /api/v1/files/{key}`); `size` and `sha256` (lower-case hex) of the DNG; `originalName` and the original pixel size as the DNG records them (`OriginalRawFileName`, `OriginalDefaultFinalSize`), `null` where the DNG has no such tag |
 
 ### The job object
 
@@ -140,6 +141,7 @@ file the server is not permitted to read is `not_found`.
   "label": "Lightroom selection",
   "client": "lr-plugin/0.3.0",
   "clientId": "c1f0a6e2-7d0b-4c55-9d0e-3f6a1b2c4d5e",
+  "priority": "normal",
   "state": "active",
   "created": "2026-11-14T09:30:00Z",
   "finished": null,
@@ -152,6 +154,9 @@ file the server is not permitted to read is `not_found`.
 `clientId` is a string of at most 64 characters that a client makes up once and sends with every job, so that it
 can find its own jobs again later (for example a random UUID kept in the plug-in's settings per catalog). The
 server does not interpret it.
+`priority` is `normal` or `background`: the server builds every queued item of `normal` jobs before any item of a
+`background` job, and within a priority the oldest job first. A file two jobs want is built with the higher of
+their priorities.
 `state`: `active` while any item is `queued` or `building`; `done` when none is; `cancelled` after a cancel.
 `finished` is the time the job left `active`, or `null`. `seq` is the job's change counter: it grows by one with
 every state change of any of its items.
@@ -169,7 +174,8 @@ every state change of any of its items.
 }
 ```
 
-`client` and `label` are optional free text (at most 100 characters each); `clientId` is optional (at most 64). `items` has 1 to
+`client` and `label` are optional free text (at most 100 characters each); `clientId` is optional (at most 64);
+`priority` is optional (`normal` by default). `items` has 1 to
 `capabilities.maxItemsPerJob` entries with unique `ref`s.
 
 `201`:
@@ -293,18 +299,23 @@ For the dashboard.
   "today": {"built": 1234, "failed": 2},
   "cache": {"entries": 5321, "bytes": 2890000000},
   "jobs": {"active": 1},
-  "cpuTemperature": 67.5
+  "cpuTemperature": 67.5,
+  "autoScan": {"running": false, "lastRun": "2026-11-14T09:00:00Z", "lastQueued": 120, "nextRun": "2026-11-14T10:00:00Z"}
 }
 ```
 
 `state`: `running` (building, or about to), `idle` (nothing queued), `paused` (the `paused` setting is on),
-`waiting` (work is queued but the working hours have not begun). `queue`: items over all jobs.
+`waiting` (work is queued but the working hours have not begun). While a wave or a self-test is in progress the
+state is `running` whatever the settings say; otherwise `paused` wins over `idle`, and `idle` over `waiting`. `queue`: items over all jobs.
 `workers.configured`: the number of converter processes the server may run side by side; `busy`: how many run now.
 `rate.perMinute`: items built in the last `windowSeconds`, scaled to a minute; 0 when idle. `etaSeconds`: an
-estimate of the time until the queue is empty from the current rate, or `null` when there is nothing to estimate
+estimate of the time until the queue is empty from the current rate (counting files, like `rate`), or `null` when there is nothing to estimate
 (idle, paused, waiting, or no rate yet). `today`: since local midnight of the server. `rate` and `today` count
 conversions, not items: a file two jobs asked for counts once, and `rate` counts successful conversions only.
 `cache`: the DNGs kept. `cpuTemperature`: degrees Celsius of the hottest CPU sensor the server can read, or `null`.
+`autoScan`: whether a scan is going on (true from the moment one is asked for), when the last one finished and how
+many files it queued (`null` and 0 before the first ever; both are kept across restarts), and when the next is due
+(`null` while the automatic scan is off; while a scan runs, its start plus the interval).
 
 ## Settings
 
@@ -319,7 +330,9 @@ variables only give their first values.
   "effectiveWorkers": 4,
   "batchSize": 8,
   "paused": false,
-  "workingHours": {"enabled": false, "from": "22:00", "to": "07:00"}
+  "workingHours": {"enabled": false, "from": "22:00", "to": "07:00"},
+  "autoScan": {"enabled": false, "roots": [], "intervalMinutes": 60, "settleMinutes": 15, "maxFilesPerRun": 2000},
+  "cache": {"maxBytes": null, "maxAgeDays": null}
 }
 ```
 
@@ -330,12 +343,17 @@ variables only give their first values.
 | `batchSize` | Files per converter process in one wave, 1 to 64 |
 | `paused` | When true no new wave starts; a wave that is running finishes |
 | `workingHours` | When `enabled`, waves start only between `from` and `to`, local time of the server, `HH:MM` in 24-hour form. `from` later than `to` means a window across midnight. `from` equal to `to` is refused |
+| `autoScan` | The automatic scan (below). `roots`: ids of the roots to scan, each must exist; `intervalMinutes` 5 to 1440; `settleMinutes` 0 to 1440; `maxFilesPerRun` 1 to 50000 |
+| `cache` | Limits for the cache clean-up (below). `maxBytes`: `null` for no limit, or at least 104857600 (100 MiB); `maxAgeDays`: `null` for no limit, or 1 to 3650 |
 
 ### `PATCH /api/v1/settings`
 
-A JSON object with any subset of `workers`, `batchSize`, `paused`, `workingHours` (the whole `workingHours` object
-when it is given). `200` with the settings object after the change. `422` when a value is not acceptable; nothing
-is changed then. A change takes effect with the next wave.
+A JSON object with any subset of `workers`, `batchSize`, `paused`, `workingHours`, `autoScan`, `cache` (each of the
+last three as a whole object when it is given). `200` with the settings object after the change. `422` when a value is not acceptable
+(including an explicit `null`, and `from` equal to `to` even when `enabled` is false); nothing is changed then.
+Fields the server does not know, and the read-only `effectiveWorkers`, are ignored, so a client may send back
+what it read. A change takes effect with the next wave. A value that was never changed this way keeps following
+the server's environment variables.
 
 ## Browsing the roots and queueing a folder
 
@@ -357,7 +375,8 @@ Query: `root` (a root id), `path` (a folder relative to the root; empty or absen
 ```
 
 `parent` is the path of the folder above, `""` for a folder directly under the root, `null` for the root itself.
-`dirs`: the sub-folders, sorted by name without regard to case; names that start with a dot are left out.
+`dirs`: the sub-folders, sorted by name without regard to case. Names that start with a dot and symbolic links are
+left out, here and in every count, and so are names a client could not send back as a path.
 `rawFiles`: the files directly in this folder that the server accepts as camera raw files; `builtFiles`: how many
 of those have their DNG in the cache now; `otherFiles`: the other files directly in this folder. Nothing is counted
 in sub-folders. `truncated` is true when the folder has more than 5000 sub-folders and the list was cut. Errors:
@@ -368,11 +387,12 @@ in sub-folders. `truncated` is true when the folder has more than 5000 sub-folde
 Queues the raw files of a folder.
 
 ```json
-{"root": "archive", "path": "2026/2026.06.20 - shoot", "recursive": false, "label": null}
+{"root": "archive", "path": "2026/2026.06.20 - shoot", "recursive": false, "label": null, "priority": "normal"}
 ```
 
 `recursive` (default false) also takes the files of all sub-folders (not following symbolic links, skipping names
-that start with a dot). `label` is optional; without it the jobs are labelled with the folder's path.
+that start with a dot). `priority` is optional (`normal` by default). `label` is optional; without it the jobs are labelled with the folder's path (the root's
+id for the root itself). `path` may be absent or empty for the root.
 
 `201`:
 
@@ -385,6 +405,54 @@ The files are put into one job, or several when there are more than `capabilitie
 were in the cache already (their items are `ready` at once). A folder without raw files gives `201` with
 `"files": 0` and no jobs. Errors: as for browse; `409` `converter_not_installed`; `422` with
 `"code": "too_many_files"` when more than 50000 raw files are found (queue sub-folders instead).
+
+## The automatic scan
+
+Off unless `autoScan.enabled` is set. Every `intervalMinutes` the server walks the listed roots (all sub-folders;
+not following symbolic links; skipping names that start with a dot), and queues every camera raw file that is not
+in the cache, is not already queued or building, and was last modified at least `settleMinutes` ago (so that a file
+still being copied is left alone). It queues at most `maxFilesPerRun` files per run, oldest folders first (a
+folder is as old as its oldest raw file); the rest wait for the next run. The files go into jobs with `client`
+`"auto-scan"`, `priority` `"background"`, no `clientId`, and the label `Automatic scan: <root id>`. A file that
+failed in an earlier automatic job is not queued again until it changes. Scanning does not depend on `paused` or
+the working hours; building what it queued does.
+
+A scan is due `intervalMinutes` after the previous one finished, and at once when none has ever run. A scan started
+by hand counts as a scan. While the converter is not installed the periodic scan is skipped.
+
+### `POST /api/v1/autoscan/run`
+
+Starts a scan now, whether or not the automatic scan is enabled, over the roots in `autoScan.roots` (or, with a
+body `{"roots": ["archive"]}`, over those; no body, `{}`, `"roots": null` and an empty list all mean the configured
+roots). `202` `{"started": true}`. Errors, checked in this order: `422` when no root is given and none is
+configured; `422` with `"code": "unknown_root"` for a root id the server does not have; `409`
+`converter_not_installed`; `409` with `"code": "busy"` when a scan is running.
+
+## The cache clean-up
+
+The cache only grows unless it is cleaned. A clean-up removes, in this order:
+
+1. DNGs whose original is gone or has changed (another size or modification time);
+2. DNGs not used for `cache.maxAgeDays` days («used» = built, found by a job or a lookup, or downloaded);
+3. the least recently used DNGs until the cache is no larger than `cache.maxBytes`.
+
+Steps 2 and 3 are skipped while their limit is `null`. A DNG that an item of an active job points to (an item in
+any state) is never removed. An original is not treated as gone while its root is unavailable, is no longer
+configured, or is an empty folder (a volume that is not mounted often leaves one). The server runs a clean-up a
+day after the previous one (not at start); removed files are simply built again if somebody asks for them. An item
+that was `ready` stays `ready` when its DNG is removed; its `result` becomes `null`.
+
+### `POST /api/v1/cache/clean`
+
+Body optional: `{"dryRun": true}` only counts (`dryRun` must be a JSON boolean, anything else is `422`). The
+clean-up runs inside the request, so on a large cache the answer can take minutes. `200`:
+
+```json
+{"dryRun": false, "removed": {"originalGone": 12, "expired": 0, "overLimit": 0}, "bytesFreed": 6291456}
+```
+
+`bytesFreed`: the size of the removed DNGs (with `dryRun`, of those that would be removed). `409` with
+`"code": "busy"` when a clean-up is running.
 
 ## The converter
 

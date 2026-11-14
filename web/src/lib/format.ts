@@ -119,3 +119,55 @@ export function formatRelative(iso: string, now: number): string {
   const days = Math.floor(elapsed / DAY);
   return days === 1 ? '1 day ago' : `${days} days ago`;
 }
+
+/**
+ * How long until a time in the future, in the largest whole unit: `in 27 min`, `in 3 h`,
+ * `in 2 days`; `in less than a minute`, and `due now` for a time that has passed.
+ */
+export function formatUntil(iso: string, now: number): string {
+  const left = Date.parse(iso) - now;
+  if (left <= 0) return 'due now';
+  if (left < MINUTE) return 'in less than a minute';
+  if (left < HOUR) return `in ${Math.floor(left / MINUTE)} min`;
+  if (left < DAY) return `in ${Math.floor(left / HOUR)} h`;
+  const days = Math.floor(left / DAY);
+  return days === 1 ? 'in 1 day' : `in ${days} days`;
+}
+
+/**
+ * An estimate of time left, deliberately rough: `less than a minute left`, `about 4 min left`,
+ * `about 2 h 15 min left`, `about 3 days left`.
+ */
+export function formatTimeLeft(seconds: number): string {
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 1) return 'less than a minute left';
+  if (minutes < 60) return `about ${minutes} min left`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) {
+    const rest = minutes % 60;
+    return rest === 0 ? `about ${hours} h left` : `about ${hours} h ${rest} min left`;
+  }
+  return `about ${Math.round(hours / 24)} days left`;
+}
+
+/** `67.5` → `68 °C`. */
+export function formatTemperature(celsius: number): string {
+  return `${wholeNumber.format(celsius)} °C`;
+}
+
+const logTime = new Intl.DateTimeFormat(undefined, {
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+  hourCycle: 'h23',
+});
+
+/** Local time of day with seconds for a log line, always on the 24-hour clock (`21:31:05`). */
+export function formatLogTime(iso: string): string {
+  return logTime.format(new Date(iso));
+}
+
+/** `1` → `1 file`, `3` → `3 files`, with grouped digits. */
+export function plural(count: number, one: string, many: string): string {
+  return `${formatCount(count)} ${count === 1 ? one : many}`;
+}

@@ -5,8 +5,38 @@ import {
   formatLocalTime,
   formatQuantity,
   formatRelative,
+  formatTemperature,
+  formatTimeLeft,
+  formatUntil,
+  plural,
   rateParts,
 } from './format';
+
+describe('formatTimeLeft', () => {
+  it('stays rough: minutes, then hours and minutes, then days', () => {
+    expect(formatTimeLeft(0)).toBe('less than a minute left');
+    expect(formatTimeLeft(29)).toBe('less than a minute left');
+    expect(formatTimeLeft(104)).toBe('about 2 min left');
+    expect(formatTimeLeft(59 * 60)).toBe('about 59 min left');
+    expect(formatTimeLeft(3600)).toBe('about 1 h left');
+    expect(formatTimeLeft(8100)).toBe('about 2 h 15 min left');
+    expect(formatTimeLeft(47 * 3600)).toBe('about 47 h left');
+    expect(formatTimeLeft(5 * 86400)).toBe('about 5 days left');
+  });
+});
+
+describe('formatTemperature and plural', () => {
+  it('rounds to whole degrees', () => {
+    expect(formatTemperature(67.5)).toBe('68 °C');
+    expect(formatTemperature(41.2)).toBe('41 °C');
+  });
+
+  it('picks the word for the count and groups digits', () => {
+    expect(plural(1, 'file', 'files')).toBe('1 file');
+    expect(plural(0, 'file', 'files')).toBe('0 files');
+    expect(plural(1384, 'file', 'files')).toBe('1,384 files');
+  });
+});
 
 describe('formatCount', () => {
   it('groups thousands as the English page does', () => {
@@ -59,6 +89,23 @@ describe('formatRelative', () => {
 
   it('treats a time ahead of the clock as just now', () => {
     expect(formatRelative('2026-11-14T09:40:00Z', now)).toBe('just now');
+  });
+});
+
+describe('formatUntil', () => {
+  const now = Date.parse('2026-11-14T09:33:00Z');
+
+  it('says how long until a time ahead, in the largest whole unit', () => {
+    expect(formatUntil('2026-11-14T09:33:40Z', now)).toBe('in less than a minute');
+    expect(formatUntil('2026-11-14T10:00:00Z', now)).toBe('in 27 min');
+    expect(formatUntil('2026-11-14T12:40:00Z', now)).toBe('in 3 h');
+    expect(formatUntil('2026-11-15T09:33:00Z', now)).toBe('in 1 day');
+    expect(formatUntil('2026-11-17T10:00:00Z', now)).toBe('in 3 days');
+  });
+
+  it('says due now for a time that has passed', () => {
+    expect(formatUntil('2026-11-14T09:33:00Z', now)).toBe('due now');
+    expect(formatUntil('2026-11-14T09:20:00Z', now)).toBe('due now');
   });
 });
 

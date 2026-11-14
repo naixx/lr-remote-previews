@@ -6,6 +6,7 @@ import sys
 import uvicorn
 
 from lrrp.app import create_app
+from lrrp.logring import Redactor
 from lrrp.settings import Settings, SettingsError
 
 
@@ -22,11 +23,9 @@ def main() -> None:
             "lrrp: LRRP_TOKEN is not set; the API is open to anyone who can reach the port.",
             file=sys.stderr,
         )
-    logging.getLogger("lrrp").info(
-        "%d converter process(es) side by side, batches of up to %d files",
-        settings.workers,
-        settings.batch_size,
-    )
+    # The token never appears in a log line; this guards the console as LogRing guards the API.
+    for handler in logging.getLogger().handlers:
+        handler.addFilter(Redactor(settings.token))
     uvicorn.run(create_app(settings), host=settings.host, port=settings.port)
 
 

@@ -1,32 +1,71 @@
 import type { ReactNode } from 'react';
 import type { ApiError } from '../../api/errors';
-import { isQueueBusy, type ServerStatus } from '../../api/status';
+import type { ServerSettings } from '../../api/settings';
+import {
+  isQueueBusy,
+  type AutoScanStatus,
+  type ServerState,
+  type ServerStatus,
+} from '../../api/status';
+import { links } from '../../app/router';
 import { Card } from '../../components/Card';
-import { StatusBadge } from '../../components/StatusBadge';
-import { byteParts, formatCount, rateParts } from '../../lib/format';
+import { PauseButton } from '../../components/PauseButton';
+import { StatusBadge, type Tone } from '../../components/StatusBadge';
+import {
+  byteParts,
+  formatCount,
+  formatFullTime,
+  formatLocalTime,
+  formatRelative,
+  formatTemperature,
+  formatTimeLeft,
+  formatUntil,
+  plural,
+  rateParts,
+} from '../../lib/format';
 import { IDLE_REFRESH_MS } from './live';
 
 interface QueueCardProps {
   /** Null until the first status arrives. */
   status: ServerStatus | null;
+  /**
+   * The `paused` setting for the pause button; null when the server has no settings (older
+   * than 0.4), undefined until the first answer.
+   */
+  paused: boolean | null | undefined;
   /** Set when no status has arrived because the requests fail. */
   error: ApiError | null;
   converterInstalled: boolean;
+  /** When the status was fetched, for «in 27 min». */
+  now: number;
   onRetry: () => void;
+  onSettingsChanged: (settings: ServerSettings) => void;
 }
 
-export function QueueCard({ status, error, converterInstalled, onRetry }: QueueCardProps) {
+export function QueueCard({
+  status,
+  paused,
+  error,
+  converterInstalled,
+  now,
+  onRetry,
+  onSettingsChanged,
+}: QueueCardProps) {
   const badge = <QueueBadge status={status} converterInstalled={converterInstalled} />;
   return (
     <Card title="Queue" wide aside={badge}>
       {!converterInstalled && (
         <p className="callout callout--warn">
-          Jobs cannot be built until Adobe DNG Converter is installed on the server. The DNG
-          converter card below shows where the server looks for it.
+          Jobs cannot be built until Adobe DNG Converter is installed on the server. The{' '}
+          <a href={links.converter()}>Converter page</a> shows where the server looks for it.
         </p>
       )}
       {status ? (
-        <QueueStats status={status} />
+        <>
+          <QueueState status={status} paused={paused} onSettingsChanged={onSettingsChanged} />
+          <QueueStats status={status} />
+          {status.autoScan && <AutoScanLine scan={status.autoScan} now={now} />}
+        </>
       ) : error ? (
         <LiveError error={error} onRetry={onRetry} />
       ) : (
@@ -34,6 +73,18 @@ export function QueueCard({ status, error, converterInstalled, onRetry }: QueueC
       )}
     </Card>
   );
+}
+
+const STATE_WORDS: Record<ServerState, { label: string; tone: Tone }> = {
+  running: { label: 'Running', tone: 'info' },
+  idle: { label: 'Idle', tone: 'neutral' },
+  paused: { label: 'Paused', tone: 'warn' },
+  waiting: { label: 'Waiting for working hours', tone: 'neutral' },
+};
+
+/** The state as the server reports it; an older server without `state` gets it from the queue. */
+function stateOf(status: ServerStatus): ServerState {
+  return status.state ?? (isQueueBusy(status) ? 'running' : 'idle');
 }
 
 function QueueBadge({
@@ -45,10 +96,56 @@ function QueueBadge({
 }) {
   if (!converterInstalled) return <StatusBadge tone="warn">Converter missing</StatusBadge>;
   if (!status) return null;
-  return isQueueBusy(status) ? (
-    <StatusBadge tone="info">Working</StatusBadge>
-  ) : (
-    <StatusBadge tone="neutral">Idle</StatusBadge>
+  const { label, tone } = STATE_WORDS[stateOf(status)];
+  return <StatusBadge tone={tone}>{label}</StatusBadge>;
+}
+
+function stateSentence(state: ServerState, status: ServerStatus): string {
+  switch (state) {
+    case 'running':
+      return status.etaSeconds === null
+        ? 'Building. The time left is not known yet.'
+        : `Building, ${formatTimeLeft(status.etaSeconds)}.`;
+    case 'idle':
+      return 'Nothing is queued.';
+    case 'paused':
+      return 'Paused: no new wave of conversions starts until you resume.';
+    case 'waiting':
+      return 'Work is queued; building starts when the working hours begin.';
+  }
+}
+
+function QueueState({
+  status,
+  paused,
+  onSettingsChanged,
+}: {
+  status: ServerStatus;
+  paused: boolean | null | undefined;
+  onSettingsChanged: (settings: ServerSettings) => void;
+}) {
+  const state = stateOf(status);
+  const details = [
+    state !== 'idle' ? `${formatCount(status.queue.queued + status.queue.building)} left` : null,
+    status.cpuTemperature !== null ? `CPU ${formatTemperature(status.cpuTemperature)}` : null,
+  ].filter((part): part is string => part !== null);
+
+  return (
+    <div className="queue-state">
+      <div className="queue-state__text">
+        <p className="queue-state__headline">{stateSentence(state, status)}</p>
+        {details.length > 0 && <p className="queue-state__detail">{details.join(' · ')}</p>}
+      </div>
+      <div className="queue-state__control">
+        {paused === null ? (
+          <p className="hint">
+            This server is older than the dashboard and cannot be paused from here.
+          </p>
+        ) : paused === undefined ? null : (
+          <PauseButton paused={paused} onChanged={onSettingsChanged} />
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -91,6 +188,35 @@ function QueueStats({ status }: { status: ServerStatus }) {
         note={`${formatCount(cache.entries)} ${cache.entries === 1 ? 'file' : 'files'}`}
       />
     </dl>
+  );
+}
+
+/** The automatic scan in one line; the Settings page has the details. */
+function AutoScanLine({ scan, now }: { scan: AutoScanStatus; now: number }) {
+  const at = (iso: string) => (
+    <time dateTime={iso} title={formatFullTime(iso)}>
+      {formatLocalTime(iso, now)}
+    </time>
+  );
+  return (
+    <p className="queue-autoscan">
+      <a href={links.settings()}>Automatic scan</a>:{' '}
+      {scan.running ? (
+        'running now'
+      ) : scan.nextRun ? (
+        <>
+          next at {at(scan.nextRun)} ({formatUntil(scan.nextRun, now)})
+        </>
+      ) : (
+        'off'
+      )}
+      {!scan.running && scan.lastRun && (
+        <>
+          {' · '}last at {at(scan.lastRun)} ({formatRelative(scan.lastRun, now)}),{' '}
+          {plural(scan.lastQueued, 'file', 'files')} queued
+        </>
+      )}
+    </p>
   );
 }
 

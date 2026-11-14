@@ -2,19 +2,23 @@
 
 The converter writes into a batch folder under ``<cache dir>/work``, on the same file system, and
 a finished DNG is renamed into place, so a reader never sees a partial file. The index (size,
-SHA-256, the DNG's identity tags) lives in the database (``lrrp.store``).
+SHA-256, the DNG's identity tags, its original, its last use) lives in the database
+(``lrrp.store``); the clean-up (``lrrp.cleanup``) removes files and index rows together.
 """
 
 import hashlib
+import logging
 import os
 import re
 import shutil
 import stat
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from lrrp.dng import DngTags
+
+log = logging.getLogger(__name__)
 
 WORK_DIR_NAME = "work"
 WORK_PREFIXES = ("batch-", "warm-up-")
@@ -33,6 +37,8 @@ class CacheEntry:
     original_width: int | None
     original_height: int | None
     created: float
+    used: float | None = field(default=None, compare=False)
+    """When the entry was last used, as the index records it (None: not read)."""
 
 
 class Cache:
@@ -76,6 +82,29 @@ class Cache:
             original_height=tags.original_height,
             created=now,
         )
+
+    def remove(self, key: str) -> bool:
+        """Delete the DNG for ``key``. True when it is gone, also when it was gone already."""
+        try:
+            self.path(key).unlink()
+        except FileNotFoundError:
+            return True
+        except OSError as exc:
+            log.warning("cannot delete the cached DNG %s: %s", self.path(key), exc)
+            return False
+        return True
+
+    def names(self, prefix: str) -> set[str] | None:
+        """The names in the folder of the keys that start with ``prefix`` (the first two
+        characters of a key); None when that folder cannot be listed."""
+        try:
+            with os.scandir(self.root / prefix) as entries:
+                return {entry.name for entry in entries}
+        except FileNotFoundError:
+            return set()
+        except OSError as exc:
+            log.warning("cannot list the cache folder %s: %s", self.root / prefix, exc)
+            return None
 
     def new_work_dir(self, prefix: str) -> Path:
         if prefix not in WORK_PREFIXES:

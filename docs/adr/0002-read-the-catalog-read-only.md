@@ -19,8 +19,10 @@ The plug-in runs a `sqlite3` command-line tool against the open catalog, read-on
 files behind the photos it is about to send (`Adobe_images.id_local` = the SDK's `photo.localIdentifier`, joined to
 `AgLibraryFile` through `rootFile`). It reads nothing else and writes nothing.
 
-The `sqlite3` tool is public-domain software. On macOS it is part of the system; for Windows it ships with the
-plug-in package (not committed to the repository; added when a release is packaged).
+The `sqlite3` tool is public-domain software. The plug-in looks for it in three places: a path given in its
+settings, next to the plug-in's own files, and on the PATH (macOS ships one). No copy is in the repository. Whether
+the Windows build is put into the release package is decided when the first release is made; until then the user
+provides it.
 
 ## Consequences
 

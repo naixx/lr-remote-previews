@@ -10,11 +10,19 @@ export interface PollingOptions<T> {
    * wrapped in useCallback.
    */
   interval: (data: T | null) => number;
+  /**
+   * When `load` changes (another page of a list, another filter), keep showing the data of the
+   * previous `load` until the new one has answered, instead of starting from nothing. `stale`
+   * is true meanwhile. Defaults to false.
+   */
+  keepPrevious?: boolean;
 }
 
 export interface Polled<T> {
   /** The latest data that arrived; kept when a later refresh fails. */
   data: T | null;
+  /** True while `data` came from a previous `load` (only with `keepPrevious`). */
+  stale: boolean;
   /** The error of the latest refresh, or null when it succeeded or none has settled yet. */
   error: ApiError | null;
   /** `Date.now()` when `data` arrived. */
@@ -28,8 +36,11 @@ export interface Polled<T> {
 type Loader<T> = (signal: AbortSignal) => Promise<T>;
 
 interface Snapshot<T> {
+  /** The loader whose latest refresh this describes. */
   load: Loader<T>;
   data: T | null;
+  /** The loader `data` came from; another one only with `keepPrevious`. */
+  dataLoad: Loader<T> | null;
   error: ApiError | null;
   updatedAt: number | null;
   checkedAt: number | null;
@@ -44,10 +55,10 @@ const isHidden = () => document.visibilityState === 'hidden';
  * and a new token means a new `load`.
  *
  * `load` must be stable between renders (wrap it in useCallback); a new function starts over
- * without the old data, as useApiResource does.
+ * without the old data, as useApiResource does, unless `keepPrevious` is set.
  */
 export function usePolling<T>(load: Loader<T>, options: PollingOptions<T>): Polled<T> {
-  const { enabled = true, interval } = options;
+  const { enabled = true, interval, keepPrevious = false } = options;
   const [restarts, setRestarts] = useState(0);
   const [snapshot, setSnapshot] = useState<Snapshot<T> | null>(null);
   // The latest data, readable by a restarted effect so its first interval is the right one.
@@ -86,7 +97,7 @@ export function usePolling<T>(load: Loader<T>, options: PollingOptions<T>): Poll
           inFlight = null;
           latest.current = { load, data };
           const now = Date.now();
-          setSnapshot({ load, data, error: null, updatedAt: now, checkedAt: now });
+          setSnapshot({ load, data, dataLoad: load, error: null, updatedAt: now, checkedAt: now });
           schedule(interval(data));
         },
         (reason: unknown) => {
@@ -94,11 +105,11 @@ export function usePolling<T>(load: Loader<T>, options: PollingOptions<T>): Poll
           inFlight = null;
           const error = toApiError(reason);
           const now = Date.now();
-          setSnapshot((previous) =>
-            previous?.load === load
-              ? { ...previous, error, checkedAt: now }
-              : { load, data: null, error, updatedAt: null, checkedAt: now },
-          );
+          setSnapshot((previous) => {
+            if (previous?.load === load) return { ...previous, error, checkedAt: now };
+            if (keepPrevious && previous) return { ...previous, load, error, checkedAt: now };
+            return { load, data: null, dataLoad: null, error, updatedAt: null, checkedAt: now };
+          });
           if (error.kind === 'unauthorized') {
             stopped = true;
             return;
@@ -122,16 +133,28 @@ export function usePolling<T>(load: Loader<T>, options: PollingOptions<T>): Poll
       inFlight?.abort();
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
-  }, [load, enabled, interval, restarts]);
+  }, [load, enabled, interval, keepPrevious, restarts]);
 
   const refresh = useCallback(() => setRestarts((n) => n + 1), []);
 
-  const current = snapshot?.load === load ? snapshot : null;
+  if (snapshot?.load === load) {
+    return {
+      data: snapshot.data,
+      stale: snapshot.dataLoad !== null && snapshot.dataLoad !== load,
+      error: snapshot.error,
+      updatedAt: snapshot.updatedAt,
+      checkedAt: snapshot.checkedAt,
+      refresh,
+    };
+  }
+  // A new loader that has not answered yet.
+  const previous = keepPrevious ? snapshot : null;
   return {
-    data: current?.data ?? null,
-    error: current?.error ?? null,
-    updatedAt: current?.updatedAt ?? null,
-    checkedAt: current?.checkedAt ?? null,
+    data: previous?.data ?? null,
+    stale: previous?.data != null,
+    error: null,
+    updatedAt: previous?.updatedAt ?? null,
+    checkedAt: previous?.checkedAt ?? null,
     refresh,
   };
 }

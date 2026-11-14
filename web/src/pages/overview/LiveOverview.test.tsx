@@ -7,8 +7,12 @@ import {
   fakeServer,
   idleStatus,
   installedInfo,
+  legacyStatus,
   sampleInfo,
   sampleJobs,
+  sampleSettings,
+  scheduledScan,
+  stage3Status,
   type FakeServer,
 } from '../../test/fixtures';
 import { BUSY_REFRESH_MS, IDLE_REFRESH_MS } from './live';
@@ -90,7 +94,9 @@ describe('Queue card', () => {
   it('shows the work in progress', async () => {
     await renderOverview(busyServer());
 
-    expect(within(queueCard()).getByText('Working')).toBeTruthy();
+    expect(within(queueCard()).getByText('Running', { selector: '.badge' })).toBeTruthy();
+    expect(queueCard().textContent).toContain('Building, about 2 min left.');
+    expect(queueCard().textContent).toContain('308 left · CPU 68 °C');
     expect(stat('Queued')).toContain('300');
     expect(stat('Building')).toContain('8');
     expect(stat('Processes busy')).toContain('4 of 4');
@@ -127,6 +133,144 @@ describe('Queue card', () => {
   });
 });
 
+describe('Automatic scan line', () => {
+  function scanLine(): string {
+    return queueCard().querySelector('.queue-autoscan')?.textContent ?? '';
+  }
+
+  it('says when the next scan is due and what the last one queued', async () => {
+    await renderOverview(busyServer());
+    expect(scanLine()).toMatch(
+      /^Automatic scan: next at .+ \(in 27 min\) · last at .+ \(33 min ago\), 120 files queued$/,
+    );
+    const link = within(queueCard()).getByRole('link', { name: 'Automatic scan' });
+    expect(link.getAttribute('href')).toBe('#/settings');
+    const times = queueCard().querySelectorAll('.queue-autoscan time');
+    expect(Array.from(times, (time) => time.getAttribute('dateTime'))).toEqual([
+      '2026-11-14T10:00:00Z',
+      '2026-11-14T09:00:00Z',
+    ]);
+  });
+
+  it('says when the scan is off or running', async () => {
+    const server = idleServer();
+    await renderOverview(server);
+    expect(scanLine()).toBe('Automatic scan: off');
+
+    server.reply('status', { ...idleStatus(), autoScan: scheduledScan({ nextRun: null }) });
+    await advance(IDLE_REFRESH_MS);
+    expect(scanLine()).toMatch(
+      /^Automatic scan: off · last at .+ \(33 min ago\), 120 files queued$/,
+    );
+
+    server.reply('status', { ...idleStatus(), autoScan: scheduledScan({ running: true }) });
+    await advance(IDLE_REFRESH_MS);
+    expect(scanLine()).toBe('Automatic scan: running now');
+  });
+
+  it('leaves the line out for a server without the automatic scan', async () => {
+    await renderOverview(
+      fakeServer({ info: installedInfo(), status: stage3Status(), jobs: sampleJobs() }),
+    );
+    expect(stat('Queued')).toContain('300');
+    expect(queueCard().querySelector('.queue-autoscan')).toBeNull();
+  });
+});
+
+describe('Server state and pausing', () => {
+  function serverWith(status: unknown, settings: unknown = sampleSettings()) {
+    return fakeServer({ info: installedInfo(), status, jobs: sampleJobs(), settings });
+  }
+
+  it('names each state plainly', async () => {
+    const server = serverWith({ ...busyStatus(), state: 'waiting', etaSeconds: null });
+    await renderOverview(server);
+    expect(within(queueCard()).getByText('Waiting for working hours')).toBeTruthy();
+    expect(queueCard().textContent).toContain('building starts when the working hours begin');
+
+    server.reply('status', { ...busyStatus(), etaSeconds: null });
+    await advance(BUSY_REFRESH_MS);
+    expect(within(queueCard()).getByText('Running', { selector: '.badge' })).toBeTruthy();
+    expect(queueCard().textContent).toContain('The time left is not known yet.');
+
+    server.reply('status', { ...busyStatus(), etaSeconds: 8100 });
+    await advance(BUSY_REFRESH_MS);
+    expect(queueCard().textContent).toContain('about 2 h 15 min left');
+
+    server.reply('status', idleStatus());
+    await advance(BUSY_REFRESH_MS);
+    expect(queueCard().textContent).toContain('Nothing is queued.');
+    // No temperature from this server: none shown.
+    expect(queueCard().textContent).not.toContain('°C');
+  });
+
+  it('pauses: the button is disabled while the request runs, then shows Resume', async () => {
+    const server = serverWith(busyStatus());
+    await renderOverview(server);
+
+    const gate = server.hold('updateSettings');
+    server.reply('updateSettings', sampleSettings({ paused: true }));
+    fireEvent.click(within(queueCard()).getByRole('button', { name: 'Pause' }));
+    await settle();
+    expect(server.bodyOf('updateSettings')).toEqual({ paused: true });
+    expect(within(queueCard()).getByRole('button', { name: 'Pause' })).toHaveProperty(
+      'disabled',
+      true,
+    );
+
+    // The server now reports the pause; the answer to the change starts a refresh at once.
+    server.reply('status', { ...busyStatus(), state: 'paused', etaSeconds: null });
+    server.reply('settings', sampleSettings({ paused: true }));
+    const before = server.calls('status');
+    gate.release();
+    await settle();
+
+    expect(server.calls('status')).toBe(before + 1);
+    expect(within(queueCard()).getByText('Paused', { selector: '.badge' })).toBeTruthy();
+    expect(queueCard().textContent).toContain('no new wave of conversions starts');
+    const resume = within(queueCard()).getByRole('button', { name: 'Resume' });
+    expect(resume).toHaveProperty('disabled', false);
+
+    server.reply('updateSettings', sampleSettings({ paused: false }));
+    server.reply('status', busyStatus());
+    server.reply('settings', sampleSettings({ paused: false }));
+    fireEvent.click(resume);
+    await settle();
+    expect(server.bodyOf('updateSettings', -1)).toEqual({ paused: false });
+    expect(within(queueCard()).getByRole('button', { name: 'Pause' })).toBeTruthy();
+    expect(within(queueCard()).getByText('Running', { selector: '.badge' })).toBeTruthy();
+  });
+
+  it('shows the server error when pausing fails', async () => {
+    const server = serverWith(busyStatus());
+    server.reply('updateSettings', { detail: 'The database is read-only.' }, 500);
+    await renderOverview(server);
+
+    fireEvent.click(within(queueCard()).getByRole('button', { name: 'Pause' }));
+    await settle();
+
+    const alert = within(queueCard()).getByRole('alert');
+    expect(alert.textContent).toContain('Could not pause.');
+    expect(alert.textContent).toContain('The database is read-only.');
+    expect(within(queueCard()).getByRole('button', { name: 'Pause' })).toHaveProperty(
+      'disabled',
+      false,
+    );
+  });
+
+  it('works with a server older than the dashboard', async () => {
+    // No state, time left or temperature in the status, and no settings endpoint.
+    const server = fakeServer({ info: installedInfo(), status: legacyStatus(), jobs: sampleJobs() });
+    await renderOverview(server);
+
+    expect(within(queueCard()).getByText('Running', { selector: '.badge' })).toBeTruthy();
+    expect(queueCard().textContent).toContain('The time left is not known yet.');
+    expect(queueCard().textContent).toContain('older than the dashboard and cannot be paused');
+    expect(within(queueCard()).queryByRole('button', { name: 'Pause' })).toBeNull();
+    expect(stat('Queued')).toContain('300');
+  });
+});
+
 describe('Jobs card', () => {
   it('lists the most recent jobs, newest first, with their progress', async () => {
     const server = busyServer();
@@ -139,6 +283,9 @@ describe('Jobs card', () => {
 
     // Active job with a label: the label is the title, the id goes next to the client.
     expect(within(active).getByRole('heading', { name: 'Lightroom selection' })).toBeTruthy();
+    expect(
+      within(active).getByRole('link', { name: 'Lightroom selection' }).getAttribute('href'),
+    ).toBe('#/jobs/7');
     expect(within(active).getByText('Active')).toBeTruthy();
     expect(within(active).getByText('Job 7 · lr-plugin/0.2.0')).toBeTruthy();
     expect(within(active).getByText('3 min ago')).toBeTruthy();

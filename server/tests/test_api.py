@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 import lrrp
 from lrrp.converter import DEFAULT_CONVERTER_EXE, RAW_EXTENSIONS
+from pe_builder import version_resource, windows_exe
 
 MakeClient = Callable[..., TestClient]
 
@@ -15,13 +16,13 @@ MakeClient = Callable[..., TestClient]
 def test_healthz(make_client: MakeClient) -> None:
     response = make_client().get("/healthz")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    assert response.json() == {"status": "ok", "busy": False}
 
 
 def test_healthz_needs_no_token(make_client: MakeClient, token: str) -> None:
     response = make_client(LRRP_TOKEN=token).get("/healthz")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    assert response.json() == {"status": "ok", "busy": False}
 
 
 def test_info_without_a_token_configured(make_client: MakeClient) -> None:
@@ -29,7 +30,7 @@ def test_info_without_a_token_configured(make_client: MakeClient) -> None:
     assert response.status_code == 200
     assert response.json() == {
         "name": "LR Remote Previews",
-        "version": "0.3.0",
+        "version": "0.5.0",
         "api": 1,
         "auth": "none",
         "converter": {"installed": False, "path": DEFAULT_CONVERTER_EXE, "version": None},
@@ -179,3 +180,53 @@ def test_version_matches_pyproject() -> None:
     pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
     with pyproject.open("rb") as file:
         assert tomllib.load(file)["project"]["version"] == lrrp.__version__
+
+
+def test_openapi_describes_the_stage_3_calls(make_client: MakeClient) -> None:
+    paths = make_client().get("/openapi.json").json()["paths"]
+    assert "patch" in paths["/api/v1/settings"] and "get" in paths["/api/v1/settings"]
+    for path in ["/api/v1/browse", "/api/v1/folders", "/api/v1/converter/selftest", "/api/v1/log"]:
+        assert path in paths
+
+
+def test_stage_3_calls_need_the_token(make_client: MakeClient, token: str) -> None:
+    with make_client(LRRP_TOKEN=token) as client:
+        for method, path in [
+            ("GET", "/api/v1/settings"),
+            ("PATCH", "/api/v1/settings"),
+            ("GET", "/api/v1/browse?root=archive"),
+            ("POST", "/api/v1/folders"),
+            ("POST", "/api/v1/converter/selftest"),
+            ("GET", "/api/v1/log"),
+        ]:
+            response = client.request(method, path)
+            assert response.status_code == 401, (method, path)
+            assert response.json() == {"detail": "Missing bearer token"}
+
+
+def test_stage_4_calls_are_described_and_need_the_token(
+    make_client: MakeClient, token: str
+) -> None:
+    paths = make_client().get("/openapi.json").json()["paths"]
+    for path in ["/api/v1/autoscan/run", "/api/v1/cache/clean"]:
+        assert "post" in paths[path]
+    with make_client(LRRP_TOKEN=token) as client:
+        for path in ["/api/v1/autoscan/run", "/api/v1/cache/clean"]:
+            response = client.post(path)
+            assert response.status_code == 401, path
+            assert response.json() == {"detail": "Missing bearer token"}
+
+
+def test_the_converter_version_comes_from_its_executable(
+    make_client: MakeClient, tmp_path: Path
+) -> None:
+    exe = tmp_path / "prefix" / "drive_c" / "Tools" / "dngc.exe"
+    exe.parent.mkdir(parents=True)
+    exe.write_bytes(windows_exe(version_resource("17.2")))
+    client = make_client(
+        LRRP_WINEPREFIX=str(tmp_path / "prefix"), LRRP_CONVERTER_EXE=r"C:\Tools\dngc.exe"
+    )
+    converter = client.get("/api/v1/info").json()["converter"]
+    assert converter == {"installed": True, "path": r"C:\Tools\dngc.exe", "version": "17.2"}
+    exe.write_bytes(b"not an executable at all, and of another size")
+    assert client.get("/api/v1/info").json()["converter"]["version"] is None
