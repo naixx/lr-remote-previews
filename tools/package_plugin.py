@@ -9,8 +9,8 @@ The version comes from VERSION in plugin/LRRemotePreviews.lrplugin/Info.lua. The
 LRRemotePreviews.lrplugin/ as its only top-level entry, so unzipping gives a folder that can be added in
 Lightroom's File > Plug-in Manager. The output is deterministic: entries are sorted, timestamps and
 permissions are fixed, and CRLF line endings in text files are stored as LF, so the same sources give the
-same bytes on every platform. The project's LICENSE and the plug-in's third-party notices are added to the
-folder inside the zip, because the zip is what users receive. Prints the path of the zip. Standard library only.
+same bytes on every platform. The project's LICENSE, the plug-in's additional permission and its third-party
+notices are added to the folder inside the zip, because the zip is what users receive. Prints the path of the zip. Standard library only.
 """
 from __future__ import annotations
 
@@ -34,6 +34,7 @@ SKIPPED_NAMES = {"Thumbs.db", "desktop.ini", "__pycache__"}
 # Files from outside the plug-in folder that go into the zip: name inside the plug-in folder -> source.
 EXTRA_FILES = {
     "LICENSE.txt": REPO_ROOT / "LICENSE",
+    "LICENSE-EXCEPTION.md": REPO_ROOT / "plugin" / "LICENSE-EXCEPTION.md",
     "THIRD-PARTY.md": REPO_ROOT / "plugin" / "THIRD-PARTY.md",
 }
 
