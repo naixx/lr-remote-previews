@@ -146,10 +146,13 @@ describe('AutoFetchLoop', function()
     end)
 
     it('arms the fast mode for an import record not seen before, once', function()
-        local env = fakeEnv({ send = true, stopAt = 1000, imports = function()
-            return { { id = 106106, date = '2026-11-14T15:15:56.060+01:00' } }
+        local env = fakeEnv({ send = true, stopAt = 1000, imports = function(clock)
+            -- the record appears after the first read (an import the user starts in Lightroom)
+            return clock > 0 and { { id = 106106, date = '2026-11-14T15:15:56.060+01:00' } } or {}
         end })
         AutoFetchLoop.run(env, { firstDelay = 0 })
+        assert.are.equal(60, env.sends[2] - env.sends[1])
+        table.remove(env.sends, 1)
         -- fast for FIRST_PHOTO_SECONDS from the first look, then the slow interval although the record is still read
         assert.are.equal(3, env.sends[2] - env.sends[1])
         local slow = 0
@@ -160,6 +163,35 @@ describe('AutoFetchLoop', function()
         end
         assert.is_true(slow >= 10)
         assert.is_true(env.sends[#env.sends] - env.sends[#env.sends - 1] == 60)
+    end)
+
+    it('the session of 0.8.3: after a restart an old import record above the mark is no import in progress', function()
+        local start = WatchMode.importTime('2026-11-14T22:25:00+01:00')
+        local env = fakeEnv({ send = true, stopAt = start + 600, imports = function()
+            return { { id = 219546, date = '2026-11-14T21:41:47.693+01:00' } }
+        end })
+        env.clock = start
+        AutoFetchLoop.run(env, { firstDelay = 20 })
+        for i, importing in ipairs(env.importing) do
+            assert.is_false(importing, 'fetch step ' .. i)
+        end
+        assert.are.equal(0, count(env.logs, 'looking every 3 s while photos come in'))
+        assert.are.equal(60, env.sends[2] - env.sends[1])
+    end)
+
+    it('tells the fetch what the fast mode waits for and until when', function()
+        local env = fakeEnv({ send = true, stopAt = 200, found = function(clock)
+            return clock == 0 and 5 or 0
+        end })
+        local waits = {}
+        local fetch = env.fetch
+        env.fetch = function(importing, sweepDue, waiting)
+            waits[#waits + 1] = waiting or false
+            return fetch(importing, sweepDue)
+        end
+        AutoFetchLoop.run(env, { firstDelay = 0 })
+        assert.are.same({ kind = 'photos', untilAt = WatchMode.QUIET_SECONDS }, waits[1])
+        assert.is_false(waits[#waits])
     end)
 
     it('logs the same text once, and a new text again; a nil text not at all', function()

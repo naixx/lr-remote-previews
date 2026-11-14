@@ -362,40 +362,52 @@ end
 -- example from a read that took very long, changes nothing). Returns a short text for the log (nil when there was
 -- nothing to do; the loop logs the same text only once in a row), the number of photos found that no earlier look had
 -- seen (for WatchMode: photos read again because they wait for their rows, their import link or the server do not
--- count), and the import records read above the mark ({ { id, date } }).
+-- count), and the import records read above the mark ({ { id, date, photos = photos of the read linked to it } }; nil
+-- when the catalog was not read).
 function AutoSend.sendOnce(shouldStop)
     local store = LrPrefs.prefsForPlugin()
     local settings = Settings.read(store)
     if settings.serverUrl == '' then
-        return 'no server URL is set; nothing done', 0, {}
+        return 'no server URL is set; nothing done', 0, nil
     end
     local catalogPath = LrApplication.activeCatalog():getPath()
     local tool, toolProblem = AutoSend.tool(settings)
     if not tool then
-        return 'not done: ' .. toolProblem, 0, {}
+        return 'not done: ' .. toolProblem, 0, nil
     end
     local now = os.time()
     local state = AutoSendPlan.load(store, catalogPath)
     if not state then
         local parsed, err = AutoSend.read(tool, catalogPath, CatalogRead.markSql())
         if shouldStop and shouldStop() then
-            return nil, 0, {}
+            return nil, 0, nil
         end
         if not parsed or not parsed.mark then
-            return 'not done: reading the catalog failed: ' .. tostring(err or 'no answer'), 0, {}
+            return 'not done: reading the catalog failed: ' .. tostring(err or 'no answer'), 0, nil
         end
         saveState(store, catalogPath, AutoSendPlan.prime(parsed.mark, now))
         return string.format('watching this catalog for new photos from now on (photos up to catalog id %d are left '
-            .. 'alone)', parsed.mark), 0, {}
+            .. 'alone)', parsed.mark), 0, nil
     end
     local parsed, err = AutoSend.read(tool, catalogPath, CatalogRead.newSql(state.mark))
     if shouldStop and shouldStop() then
-        return nil, 0, {}
+        return nil, 0, nil
     end
     if not parsed then
-        return 'not done: reading the catalog failed: ' .. tostring(err), 0, {}
+        return 'not done: reading the catalog failed: ' .. tostring(err), 0, nil
     end
     local text, new = sendFound(store, settings, catalogPath, state, parsed, now)
+    -- How many photos of this read each import record already has (WatchMode: such an import is not waiting for its
+    -- first photo).
+    local linked = {}
+    for _, photo in ipairs(parsed.photos) do
+        if (photo.importId or 0) > 0 then
+            linked[photo.importId] = (linked[photo.importId] or 0) + 1
+        end
+    end
+    for _, import in ipairs(parsed.imports) do
+        import.photos = linked[import.id] or 0
+    end
     return text, new, parsed.imports
 end
 

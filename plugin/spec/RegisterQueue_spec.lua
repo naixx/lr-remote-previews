@@ -161,4 +161,14 @@ describe('RegisterQueue', function()
             CATALOG)
         assert.is_true(RegisterQueue.due(old, 1731577800, false, true))
     end)
+
+    it('after a restart, photos placed by an earlier session wait for the rest of their job', function()
+        -- 836 placed an hour before the restart at 5000; the session's job has not answered yet (not idle)
+        local queue = filled(836, 5000 - 3600)
+        assert.is_true(RegisterQueue.due(queue, 5000, false, false)) -- 0.8.3: MAX_WAIT from when they were placed
+        assert.is_false(RegisterQueue.due(queue, 5000, false, false, 5000)) -- counted from the start of the session
+        assert.is_false(RegisterQueue.due(queue, 5000 + RegisterQueue.MAX_WAIT - 1, false, false, 5000))
+        assert.is_true(RegisterQueue.due(queue, 5000 + RegisterQueue.MAX_WAIT, false, false, 5000)) -- not for ever
+        assert.is_true(RegisterQueue.due(queue, 5000 + 1, true, false, 5000)) -- the fetch in one go is done
+    end)
 end)

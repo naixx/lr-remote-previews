@@ -12,12 +12,13 @@ without the dialog...** starts Lightroom's own import of a folder without its di
 import (only when that was «Add»), and leaves the sending to the automatic send. It replaces 0.5.0's «Add a folder
 without previews...», which ran once and was far too slow (see «What has been tried in Lightroom»).
 
-Status: **version 0.8.3, which has not been run in Lightroom.** Version 0.7.0 ran end to end in Lightroom Classic
+Status: **version 0.8.4, which has not been run in Lightroom.** Version 0.7.0 ran end to end in Lightroom Classic
 15.6 on Windows: the import of 1384 raw files from a NAS, the automatic send and the automatic fetch placed and
 registered all 1384 smart previews, in 16.5 minutes. 0.8.0 rebuilt that automatic path for speed; in its run the fast
 path worked but sent only 650 of 1384 photos, and 0.8.1 fixed that. 0.8.2 ran once: every photo sent into one job,
 nothing downloaded during the import, but the user closed Lightroom in the middle of the fetch because nothing on the
-screen showed it. 0.8.3 shows a progress bar and starts the fetch after Lightroom's own preview task (see the tables at
+screen showed it. 0.8.3 shows a progress bar and starts the fetch after Lightroom's own preview task; its one session
+waited for an import that was not there (an old import record after a restart), which 0.8.4 fixes (see the tables at
 the end). Before that, 0.2.0's build command ran on 157 photos, 0.3.0's send and «Fetch ready smart previews» for the
 selection on 143 photos from a NAS, 0.5.0's «Add a folder without previews...» once and 0.6.0's «Import a folder
 without the dialog...» once. Everything else is checked only by the unit tests and by runs with stand-in Lightroom
@@ -399,9 +400,12 @@ after a restart (when the session no longer knows which photos it sent), it begi
 
 **The progress bar** (since 0.8.3, `FetchProgress.lua`). While the automatic fetch has at least 20 smart previews to
 bring in (received and not yet placed, or still being built on the server), Lightroom's activity area shows one bar,
-`LRRP: smart previews`, advancing per file: during the import `Waiting for Lightroom's import to end: 600 ready on the
-server, 784 being built`, then `836 of 1384 fetched`, with `; 184 still being built on the server` while the server
-builds, or `; the server does not answer (next try at 21:58)`. It ends when nothing is left to bring in; while the
+`LRRP: smart previews`, advancing per file: `836 of 1384 fetched`, with `; 184 still being built on the server` while
+the server builds, or `; the server does not answer (next try at 21:58)`. While it waits for an import, it says what
+it waits for and the latest time it waits (since 0.8.4): `Waiting while Lightroom adds photos, until 21:50 if no more
+come: ...`, `Waiting for the photos of Lightroom's import, at the latest until 21:47: ...`, `Waiting for Lightroom's
+previews of the import (600 of 1384), at the latest until 22:05: ...`. After a restart with files left over it shows
+`N of M fetched` at once, the files already in place counted. It ends when nothing is left to bring in; while the
 server still builds it stays and says so, so that it never sits still without saying why. A trickle of a few files
 shows no bar. The registration call afterwards shows Lightroom's own bar. **Cancelling the bar pauses the automatic
 fetch** for the rest of the session (the run of its loop): nothing is downloaded, placed or registered until **Fetch
@@ -513,7 +517,11 @@ not been dealt with. The log says when it moves (`every photo up to catalog id 1
 **How often it looks** (`WatchMode.lua`). At the interval of the settings while nothing happens; **every 3 seconds**
 from the trigger of **Import a folder without the dialog...** (it stores the time, `importTriggered`) or an import
 record not seen before, for up to 5 minutes until the first photo comes, and after every look that found new photos
-until none has come for **2 minutes**. (Lightroom prepares an import for 2 to 3 minutes before the first photo, then
+until none has come for **2 minutes**. An import record that the first read of a run finds was there before (the mark
+moves only after five quiet minutes, so the record of an import that ended just before Lightroom was closed still lies
+above it) counts only when no photo is linked to it yet and its date is less than 5 minutes old (2 minutes of clock
+error allowed either way); a record that appears later counts whatever its date says (since 0.8.4: 0.8.3 took such an
+old record for a new import after a restart and waited five minutes). (Lightroom prepares an import for 2 to 3 minutes before the first photo, then
 commits photos in bursts of about a hundred every 22 to 26 seconds.) While it looks fast, an import counts as in
 progress: nothing is downloaded, placed or registered. In the run of 0.8.0 the looks came only every 20 to 26 seconds while Lightroom
 imported, in step with its bursts: plug-in tasks run between them. So nothing depends on the 3 seconds; every logged
@@ -855,11 +863,26 @@ without the dialog...», the automatic send on, server 0.6.0.
 | **The user closed Lightroom at 21:52:30, in the middle of the fetch** | nothing on the screen said that anything was still going on; he watched Lightroom's bar finish and took the import for done. So the registration call and the continuation at the next start were not reached in this run |
 | The import confirmation and **Server status...** at a normal width | not tried |
 
-Version 0.8.3: nothing has been tried in Lightroom yet. In the stand-in run of an import of 600 photos whose stand-in
-preview task ended 3 minutes after the last photo: the fetch began 0 to 10 s after that task ended, the bar showed
-`Waiting for Lightroom's import to end: ...` from the first photos on, then `N of 600 fetched`, and ended when all were
-in; a cancel of the bar paused the fetch until the next start (which showed the bar again) or until **Fetch ready
-smart previews**. What to look at in Lightroom:
+Version 0.8.3, Lightroom Classic 15.6 on Windows: Lightroom started on the catalog whose fetch 0.8.2 had left
+unfinished (job 29: 1384 photos, 836 files in place, none registered), the NAS asleep.
+
+| What | Result |
+|---|---|
+| The server asleep at the start | `job 29: Cannot reach the server ... (cannotFindHost). (next try at 22:26)` at 22:25:08; the retry at 22:26:13 woke the NAS (`the server answers again`) |
+| The mark | moved at the first look (`no new photo for 300 s and nothing waits; every photo up to catalog id 219546 is dealt with`), but that look had read the old import record above the old mark |
+| **The fetch** | **nothing fetched**: the old record was taken for a new import (`looking every 3 s while photos come in`, `an import is in progress`), and the bar said `Waiting for Lightroom's import to end: 1384 ready on the server, 0 being built` for three minutes, although no import was running, until the user closed Lightroom at 22:29:07. The cause: WatchMode armed the five minutes of «waiting for the first photo» for every import record its run had not seen, and a new run had seen none |
+
+Version 0.8.4: nothing has been tried in Lightroom yet. In the stand-in run of that session (1384 photos, 836 placed,
+the import's record above the mark, the server away for the first minute): no import in progress, the 548 missing
+downloads began within a few seconds of the server's first answer, the 836 in place were not downloaded again, one
+registration call for all 1384, the bar `N of M fetched` from the start. What to look at in Lightroom: the same as for
+0.8.3 below, and that a restart with files left over fetches at once.
+
+Version 0.8.3, beyond the session above: in the stand-in run of an import of 600 photos whose stand-in preview task
+ended 3 minutes after the last photo, the fetch began 0 to 10 s after that task ended, the bar showed a waiting
+caption from the first photos on, then `N of 600 fetched`, and ended when all were in; a cancel of the bar paused the
+fetch until the next start (which showed the bar again) or until **Fetch ready smart previews**. What to look at in
+Lightroom:
 
 | What | Result |
 |---|---|

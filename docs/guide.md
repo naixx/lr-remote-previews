@@ -4,7 +4,7 @@ This guide takes you from nothing to a first smart preview that was built on you
 Lightroom Classic catalog. It assumes that you are comfortable with a NAS, Docker and a command line, and that you
 have never seen this project. When something does not work, see [troubleshooting.md](troubleshooting.md).
 
-> **State of the project: server 0.6.0, plug-in 0.8.3.** Verified with Lightroom Classic 15.6 on Windows and Adobe
+> **State of the project: server 0.6.0, plug-in 0.8.4.** Verified with Lightroom Classic 15.6 on Windows and Adobe
 > DNG Converter 17.2 under Wine 8.0 on a TrueNAS SCALE machine: the server builds smart previews (0.26–0.35 s per
 > 24 MP photo on a 14-core desktop CPU) and survives a restart in the middle of a job; its dashboard, the folder
 > queue, the automatic scan and the cache clean-up ran there with the real converter. In Lightroom, «Build smart
@@ -607,8 +607,8 @@ registered 152 s)`, the totals per job, and lines for the import judged over, th
 and the registration call (seconds, answer).
 
 While there are more than a few smart previews to bring in, a progress bar **LRRP: smart previews** in Lightroom's
-activity area says how many are fetched, how many are still being built, or that the plug-in waits for Lightroom's
-import to end. Cancelling it pauses the automatic fetch until **Fetch ready smart previews** or the next start of
+activity area says how many are fetched and how many are still being built, or, while the plug-in waits for an import
+or for Lightroom's previews of it, what it waits for and the latest time it waits. Cancelling it pauses the automatic fetch until **Fetch ready smart previews** or the next start of
 Lightroom.
 
 An interrupted fetch finishes by itself; **nothing needs to be done** after one. When Lightroom quits in the middle,

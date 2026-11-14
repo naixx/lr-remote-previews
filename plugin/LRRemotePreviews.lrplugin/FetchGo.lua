@@ -39,6 +39,16 @@ function FetchGo.step(state, importing, idle, now, ready)
     return nil
 end
 
+-- Begins a fetch in one go outside an import (since 0.8.4): many smart previews are ready at once, for example after a
+-- restart with files left over. Returns 'start', or nil when one is running or an import is in progress.
+function FetchGo.begin(state, now, ready)
+    if state.go or state.holding then
+        return nil
+    end
+    state.go = { started = now, ready = ready or 0, placed = 0, left = 0, again = 0, bytes = 0 }
+    return 'start'
+end
+
 -- Counts one download of the fetch in one go (when one is running). kind: 'placed', 'left' (given up or not needed),
 -- 'again' (to be tried again later); bytes: what was downloaded.
 function FetchGo.count(state, kind, bytes)

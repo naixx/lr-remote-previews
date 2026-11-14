@@ -28,6 +28,17 @@ describe('FetchGo', function()
         assert.are.equal(2, state.last.placed)
     end)
 
+    it('many ready at once outside an import (a restart with files left over) make a fetch in one go', function()
+        local state = FetchGo.new()
+        assert.are.equal('start', FetchGo.begin(state, 100, 1384))
+        assert.is_nil(FetchGo.begin(state, 101, 5)) -- one is running
+        FetchGo.count(state, 'placed', 1000)
+        assert.are.equal('finish', FetchGo.step(state, false, true, 160, 0))
+        assert.are.equal(1, state.last.placed)
+        assert.are.equal('begin', FetchGo.step(state, true, true, 200, 0))
+        assert.is_nil(FetchGo.begin(state, 201, 50)) -- not during an import
+    end)
+
     it('a job while no import is in progress is fetched as it finishes, with no fetch in one go', function()
         local state = FetchGo.new()
         for t = 1, 50 do

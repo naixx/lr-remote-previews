@@ -107,15 +107,17 @@ local function eligible(entry, now, force)
 end
 
 -- True when a call is due now. force: a fetch in one go has just ended (held photos count too); idle: nothing is on its
--- way (no download queued, nothing received and not yet placed).
-function RegisterQueue.due(queue, now, force, idle)
+-- way (no download queued, nothing received and not yet placed, every followed job has answered); since (optional): the
+-- time this session took the queue over: no photo counts as placed earlier (since 0.8.4: after a restart the photos
+-- placed by an earlier session wait for the rest of their job, not MAX_WAIT from when they were placed).
+function RegisterQueue.due(queue, now, force, idle, since)
     local newest, oldest
     for _, entry in ipairs(queue) do
         if eligible(entry, now, force) then
             if force then
                 return true
             end
-            local at = entry.at or 0
+            local at = math.max(entry.at or 0, since or 0)
             newest = math.max(newest or at, at)
             oldest = math.min(oldest or at, at)
         end

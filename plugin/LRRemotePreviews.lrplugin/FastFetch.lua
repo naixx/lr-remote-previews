@@ -90,6 +90,7 @@ local previews = PreviewWatch.new() -- the wait for Lightroom's previews once th
 local progress = FetchProgress.new()
 local scope -- the progress bar (LrProgressScope) while it is shown
 local dealt, failedCount = 0, 0 -- items dealt with (placed or left out) in this session, and of those left out
+local sessionStart -- os.time() of the first step of this session (RegisterQueue.due counts no photo placed earlier)
 
 local function idText(id)
     return string.format('%d', id)
@@ -753,8 +754,9 @@ function FastFetch.resume(store)
     end
 end
 
--- Shows, updates or ends the progress bar (FetchProgress); a cancel of the bar pauses the automatic fetch.
-local function showProgress(store, holding, nextTry)
+-- Shows, updates or ends the progress bar (FetchProgress); a cancel of the bar pauses the automatic fetch. waiting:
+-- what the fetch waits for (FetchProgress's facts.waiting), or nil.
+local function showProgress(store, waiting, nextTry)
     local ready, coming = 0, 0
     for _, n in pairs(open) do
         ready = ready + n
@@ -764,7 +766,7 @@ local function showProgress(store, holding, nextTry)
             coming = coming + (w.coming or 0)
         end
     end
-    local action, caption, done, total = FetchProgress.step(progress, { waiting = holding, ready = ready,
+    local action, caption, done, total = FetchProgress.step(progress, { waiting = waiting, ready = ready,
         coming = coming, dealt = dealt, failed = failedCount, nextTry = nextTry })
     if action == 'start' then
         local ok, made = LrTasks.pcall(function()
@@ -861,8 +863,15 @@ end
 
 -- The fetch in one go around an import (FetchGo): logs its start and end, takes queued downloads back when an import
 -- begins. Returns true while nothing may be downloaded or placed (an import in progress).
-local function followImport(importing, settings)
+local function followImport(importing, settings, serverWait)
+    -- Done only when every followed job has been read to the end (more pages may follow an answer), unless the server
+    -- does not answer: what is left then comes later.
     local idle = #inbox == 0 and (queue == nil or queue:isIdle())
+    for _, w in pairs(watchers) do
+        if not serverWait and not w.stop and not (w.answer and w.answer.drained) then
+            idle = false
+        end
+    end
     local event = FetchGo.step(goState, importing, idle, AutoSend.clock(), #inbox + #retries)
     if event == 'begin' then
         if goState.go then
@@ -879,17 +888,38 @@ local function followImport(importing, settings)
     elseif event == 'finish' then
         Log.info('automatic fetch: the fetch in one go is done: %s', FetchGo.totals(goState.last))
         forceRegister = true
+    elseif event == nil and #inbox >= FetchProgress.THRESHOLD
+        and FetchGo.begin(goState, AutoSend.clock(), #inbox + #retries) then
+        -- Many ready at once outside an import (a restart with files left over): one go too, so that the photos are
+        -- registered with one call when it is done.
+        Log.info('automatic fetch: fetching the %d smart preview(s) ready in one go (%d download(s) at once)',
+            goState.go.ready, settings.downloadConcurrency)
     end
     return goState.holding
 end
 
+-- What the fetch waits for, for the caption of the progress bar: the import (WatchMode.waiting, from the loop) or
+-- Lightroom's previews (PreviewWatch), each with the latest time it waits; nil when it waits for nothing.
+local function waitingFacts(importing, waiting, waitPreviews)
+    if importing then
+        waiting = waiting or {}
+        return { kind = waiting.kind or 'photos', untilText = waiting.untilAt and os.date('%H:%M', waiting.untilAt) }
+    elseif waitPreviews then
+        return { kind = 'previews', count = previews.count, total = previews.total,
+            untilText = os.date('%H:%M', previews.photosOverAt + PreviewWatch.LIMIT_SECONDS) }
+    end
+    return nil
+end
+
 -- One step of the automatic fetch for the byId jobs. importing: an import is in progress (nothing is downloaded, placed
--- or registered); shouldStop() -> true when the loop must end. Returns a short text for the log (or nil), and the
+-- or registered); waiting: what the fast mode of the automatic send waits for and until when (WatchMode.waiting);
+-- shouldStop() -> true when the loop must end. Returns a short text for the log (or nil), and the
 -- seconds to the next step when it should come sooner than the loop's step: BUSY_STEP while files are on their way or
 -- to be registered, WAIT_STEP while a waiting request is open (so that a ready file is picked up within a moment),
 -- else nil.
-function FastFetch.step(importing, shouldStop)
+function FastFetch.step(importing, shouldStop, waiting)
     local store = prefs()
+    sessionStart = sessionStart or os.time()
     local settings = Settings.read(store)
     local catalog = LrApplication.activeCatalog()
     local catalogPath = catalog:getPath()
@@ -952,15 +982,24 @@ function FastFetch.step(importing, shouldStop)
     end
 
     local waitPreviews = previewsPending(importing, settings, catalogPath)
-    local holding = followImport(importing or waitPreviews, settings)
+    local holding = followImport(importing or waitPreviews, settings, serverWait)
+    -- Before the received items are dealt with, so that a bar for a backlog counts them: «836 of 1384 fetched».
+    showProgress(store, waitingFacts(importing, waiting, waitPreviews), serverWait and os.date('%H:%M', retryAt) or nil)
     if not holding and not serverWait then
         resolveInbox(settings, catalogPath)
         retryDue(settings)
     end
     local q = queue
+    -- Idle: nothing on its way, and every followed job has answered in this session (after a restart, the photos placed
+    -- before wait for the rest of their job; RegisterQueue.MAX_WAIT counts from the start of the session).
     local idle = #inbox == 0 and (q == nil or q:isIdle())
+    for _, w in pairs(watchers) do
+        if not w.stop and w.answer == nil then
+            idle = false
+        end
+    end
     local registerDue = not holding and goState.go == nil
-        and RegisterQueue.due(registerList, os.time(), forceRegister, idle)
+        and RegisterQueue.due(registerList, os.time(), forceRegister, idle, sessionStart)
     if forceRegister and not holding and goState.go == nil and not registerDue then
         forceRegister = false -- nothing to register after that fetch in one go
     end
@@ -1005,7 +1044,6 @@ function FastFetch.step(importing, shouldStop)
         end
     end
     saveRegister(store, catalogPath)
-    showProgress(store, holding, serverWait and os.date('%H:%M', retryAt) or nil)
     if text == nil then
         if next(byId) ~= nil and settings.serverUrl == '' then
             text = 'no server URL is set; nothing done'
@@ -1026,7 +1064,7 @@ function FastFetch.step(importing, shouldStop)
     end
     local nextStep
     local busy = (not holding and not serverWait and #inbox > 0) or (queue ~= nil and not queue:isIdle())
-        or (not holding and RegisterQueue.due(registerList, os.time(), forceRegister, false))
+        or (not holding and RegisterQueue.due(registerList, os.time(), forceRegister, false, sessionStart))
     if busy then
         nextStep = FastFetch.BUSY_STEP
     else

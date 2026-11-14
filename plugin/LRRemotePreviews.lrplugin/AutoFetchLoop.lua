@@ -13,8 +13,9 @@
 --   triggered()  -> the time (os.time) «Import a folder without the dialog...» last started an import, or nil
 --   send()       -> text (or nil: nothing to log), found (new photos found), imports (import records read above the
 --                   mark: { { id, date } }); one look of the automatic send (only called when sendEnabled)
---   fetch(importing, sweepDue) -> text (or nil), nextStep; one step of the automatic fetch. importing: an import is
---                   taken to be in progress (WatchMode); sweepDue: the slow interval has passed since the last sweep;
+--   fetch(importing, sweepDue, waiting) -> text (or nil), nextStep; one step of the automatic fetch. importing: an
+--                   import is taken to be in progress (WatchMode); waiting: what the fast mode waits for and until
+--                   when (WatchMode.waiting); sweepDue: the slow interval has passed since the last sweep;
 --                   nextStep: seconds to the next step when the fetch wants it sooner than step (files on their way,
 --                   waiting requests open), or nil
 --   sleep(seconds), now() -> seconds, log(format, ...)
@@ -116,7 +117,8 @@ function AutoFetchLoop.run(env, options)
             local now2 = env.now()
             local sweepDue = now2 >= nextSweep
             local text
-            text, nextStep = env.fetch(sendEnabled and WatchMode.fast(watch, now2), sweepDue)
+            local importing = sendEnabled and WatchMode.fast(watch, now2)
+            text, nextStep = env.fetch(importing, sweepDue, importing and WatchMode.waiting(watch, now2) or nil)
             report('fetch', text)
             if sweepDue then
                 nextSweep = env.now() + interval

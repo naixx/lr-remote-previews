@@ -119,8 +119,8 @@ end
 
 -- One step of the automatic fetch: FastFetch for the jobs with catalog ids as refs; when the slow interval has passed
 -- and no import is in progress, fetchOnce for jobs sent by older versions (only when there are such).
-local function fetchStep(importing, sweepDue, shouldStop)
-    local text, nextStep = FastFetch.step(importing, shouldStop)
+local function fetchStep(importing, sweepDue, shouldStop, waiting)
+    local text, nextStep = FastFetch.step(importing, shouldStop, waiting)
     if sweepDue and not importing then
         local catalogPath = LrApplication.activeCatalog():getPath()
         for _, job in ipairs(PendingJobs.list(prefs(), catalogPath, os.time())) do
@@ -164,9 +164,9 @@ function AutoFetch.startIfEnabled(reason)
             triggered = function()
                 return tonumber(prefs()[AutoFetch.TRIGGER_KEY])
             end,
-            fetch = function(importing, sweepDue)
+            fetch = function(importing, sweepDue, waiting)
                 AutoFetch.heartbeat = os.time()
-                local fetched, text, nextStep = LrTasks.pcall(fetchStep, importing, sweepDue, shouldStop)
+                local fetched, text, nextStep = LrTasks.pcall(fetchStep, importing, sweepDue, shouldStop, waiting)
                 if not fetched then
                     return 'failed: ' .. tostring(text)
                 end
@@ -176,7 +176,7 @@ function AutoFetch.startIfEnabled(reason)
                 AutoFetch.heartbeat = os.time()
                 local sent, text, found, imports = LrTasks.pcall(AutoSend.sendOnce, shouldStop)
                 if not sent then
-                    return 'failed: ' .. tostring(text), 0, {}
+                    return 'failed: ' .. tostring(text), 0, nil
                 end
                 return text, found, imports
             end,
