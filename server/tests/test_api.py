@@ -30,7 +30,7 @@ def test_info_without_a_token_configured(make_client: MakeClient) -> None:
     assert response.status_code == 200
     assert response.json() == {
         "name": "LR Remote Previews",
-        "version": "0.4.0",
+        "version": "0.5.0",
         "api": 1,
         "auth": "none",
         "converter": {"installed": False, "path": DEFAULT_CONVERTER_EXE, "version": None},
@@ -201,6 +201,19 @@ def test_stage_3_calls_need_the_token(make_client: MakeClient, token: str) -> No
         ]:
             response = client.request(method, path)
             assert response.status_code == 401, (method, path)
+            assert response.json() == {"detail": "Missing bearer token"}
+
+
+def test_stage_4_calls_are_described_and_need_the_token(
+    make_client: MakeClient, token: str
+) -> None:
+    paths = make_client().get("/openapi.json").json()["paths"]
+    for path in ["/api/v1/autoscan/run", "/api/v1/cache/clean"]:
+        assert "post" in paths[path]
+    with make_client(LRRP_TOKEN=token) as client:
+        for path in ["/api/v1/autoscan/run", "/api/v1/cache/clean"]:
+            response = client.post(path)
+            assert response.status_code == 401, path
             assert response.json() == {"detail": "Missing bearer token"}
 
 

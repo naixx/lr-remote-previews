@@ -3,7 +3,10 @@
 One thread for the whole server, so the event loop never waits for the converter. A wave:
 
 1. take up to ``workers * batch_size`` distinct files from the head of the queue (two jobs that
-   ask for the same file share one build); a file already in the cache becomes ready at once;
+   ask for the same file share one build): first the files of ``normal`` jobs, then those of
+   ``background`` jobs (``Store.queued_candidates``); a file already in the cache becomes ready
+   at once. A wave that runs is never interrupted: a ``normal`` job that arrives meanwhile is
+   at the head of the next one;
 2. make sure the converter can run (``Runner.prepare``: display, warm-up of a fresh prefix);
 3. check every source again (changed or gone: ``source_changed``), plan the batches, mark the
    items ``building`` and run the batches together;
@@ -177,7 +180,8 @@ class Scheduler:
             keys = [c.key for c in waiting]
             self._store.mark_building(keys, self._clock())
             for key in keys:
-                self._store.fail(key, "converter_failed", problem, self._clock())
+                # The server's failure, not the file's: the automatic scan may queue it again.
+                self._store.fail(key, "converter_failed", problem, self._clock(), remember=False)
             return True
 
         files, changed = self._check_sources(waiting)
@@ -264,6 +268,7 @@ class Scheduler:
                             "converter_failed",
                             "The server could not store the DNG in its cache",
                             self._clock(),
+                            remember=False,
                         )
                         continue
                     self._store.complete(key, entry, self._clock())
@@ -279,9 +284,11 @@ class Scheduler:
         return retry
 
     def _fail_changed(self, key: str) -> None:
+        # Not remembered for the automatic scan: the file as it is now has another key anyway.
         self._store.fail(
             key,
             "source_changed",
             "The file changed or disappeared after it was requested",
             self._clock(),
+            remember=False,
         )

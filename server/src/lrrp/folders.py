@@ -1,5 +1,5 @@
-"""The contents of folders under a root: browsing (``GET /api/v1/browse``) and the raw files of a
-folder to queue (``POST /api/v1/folders``).
+"""The contents of folders under a root: browsing (``GET /api/v1/browse``), the raw files of a
+folder to queue (``POST /api/v1/folders``) and the walk of the automatic scan (``walk``).
 
 The same rules everywhere:
 
@@ -17,7 +17,7 @@ everything else comes from the directory listing itself.
 
 import logging
 import os
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -75,6 +75,25 @@ def find_raw_files(
     the folder itself cannot be listed. A sub-folder that cannot be listed is skipped.
     """
     found: list[RawFile] = []
+    for _path, listing in walk(folder, extensions):
+        found.extend(listing.raw)
+        if len(found) > limit:
+            raise TooManyFiles
+        if not recursive:
+            break
+    return found
+
+
+def walk(
+    folder: Folder, extensions: Sequence[str] = RAW_EXTENSIONS
+) -> Iterator[tuple[str, Listing]]:
+    """Every folder of a tree, one at a time: the folder itself first, then the tree of each
+    sub-folder in name order. Yields each folder's path (relative to the root) and what is
+    directly in it; only one folder's listing is held at a time.
+
+    Raises ``FolderUnreadable`` when the folder itself cannot be listed. A sub-folder that cannot
+    be listed is logged and skipped.
+    """
     pending: list[tuple[Path, str]] = [(folder.folder, folder.path)]
     first = True
     while pending:
@@ -87,13 +106,9 @@ def find_raw_files(
             log.warning("cannot list the folder %r under its root: %s", path, exc.strerror or exc)
             continue
         first = False
-        found.extend(listing.raw)
-        if len(found) > limit:
-            raise TooManyFiles
-        if recursive:
-            for name in reversed(listing.dirs):
-                pending.append((directory / name, f"{path}/{name}" if path else name))
-    return found
+        for name in reversed(listing.dirs):
+            pending.append((directory / name, f"{path}/{name}" if path else name))
+        yield path, listing
 
 
 def _scan(directory: Path, path: str, extensions: Sequence[str]) -> Listing:

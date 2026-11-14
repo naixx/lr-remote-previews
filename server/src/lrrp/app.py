@@ -11,7 +11,7 @@ import mimetypes
 import re
 import secrets
 import time
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Iterable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -25,7 +25,9 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import AfterValidator, BaseModel, Field, ValidationInfo, field_validator
 
 from lrrp import __version__, converter, folders, runtime, sensors, sources
+from lrrp.autoscan import AutoScanner, ScanBusy
 from lrrp.cache import CACHE_KEY, Cache, CacheEntry
+from lrrp.cleanup import CacheCleaner, CleanBusy
 from lrrp.display import Display, Xvfb
 from lrrp.logring import LogRing
 from lrrp.peversion import VersionCache
@@ -34,7 +36,16 @@ from lrrp.runtime import Controls
 from lrrp.scheduler import Scheduler
 from lrrp.selftest import SelfTest, SelfTestBusy
 from lrrp.settings import Settings
-from lrrp.store import DATABASE_NAME, ITEM_STATES, Item, Job, NewItem, NewJob, Store
+from lrrp.store import (
+    DATABASE_NAME,
+    ITEM_STATES,
+    USE_RESOLUTION,
+    Item,
+    Job,
+    NewItem,
+    NewJob,
+    Store,
+)
 
 log = logging.getLogger(__name__)
 
@@ -69,6 +80,7 @@ for _media_type, _extension in (
 
 ItemState = Literal["queued", "building", "ready", "failed", "rejected", "cancelled"]
 JobState = Literal["active", "done", "cancelled"]
+Priority = Literal["normal", "background"]
 
 
 # --- Errors ----------------------------------------------------------------------------------
@@ -180,6 +192,9 @@ class JobRequest(BaseModel):
     client: ShortText | None = None
     client_id: Ref | None = Field(default=None, alias="clientId")
     label: ShortText | None = None
+    priority: Priority | None = Field(
+        default=None, description='"normal" (default) or "background"'
+    )
     items: list[ItemRequest] = Field(min_length=1)
 
 
@@ -227,6 +242,7 @@ class JobOut(BaseModel):
     label: str | None
     client: str | None
     client_id: str | None = Field(serialization_alias="clientId")
+    priority: Priority
     state: JobState
     created: str
     finished: str | None
@@ -293,6 +309,13 @@ class JobsStatus(BaseModel):
     active: int
 
 
+class AutoScanStatus(BaseModel):
+    running: bool
+    last_run: str | None = Field(serialization_alias="lastRun")
+    last_queued: int = Field(serialization_alias="lastQueued")
+    next_run: str | None = Field(serialization_alias="nextRun")
+
+
 ServerState = Literal["running", "idle", "paused", "waiting"]
 
 
@@ -306,6 +329,7 @@ class Status(BaseModel):
     cache: CacheStatus
     jobs: JobsStatus
     cpu_temperature: float | None = Field(serialization_alias="cpuTemperature")
+    auto_scan: AutoScanStatus = Field(serialization_alias="autoScan")
 
 
 class WorkingHoursOut(BaseModel):
@@ -314,12 +338,27 @@ class WorkingHoursOut(BaseModel):
     end: str = Field(serialization_alias="to")
 
 
+class AutoScanOut(BaseModel):
+    enabled: bool
+    roots: list[str]
+    interval_minutes: int = Field(serialization_alias="intervalMinutes")
+    settle_minutes: int = Field(serialization_alias="settleMinutes")
+    max_files_per_run: int = Field(serialization_alias="maxFilesPerRun")
+
+
+class CacheLimitsOut(BaseModel):
+    max_bytes: int | None = Field(serialization_alias="maxBytes")
+    max_age_days: int | None = Field(serialization_alias="maxAgeDays")
+
+
 class SettingsOut(BaseModel):
     workers: Literal["auto"] | int
     effective_workers: int = Field(serialization_alias="effectiveWorkers")
     batch_size: int = Field(serialization_alias="batchSize")
     paused: bool
     working_hours: WorkingHoursOut = Field(serialization_alias="workingHours")
+    auto_scan: AutoScanOut = Field(serialization_alias="autoScan")
+    cache: CacheLimitsOut
 
 
 class SettingsPatch(BaseModel):
@@ -333,8 +372,18 @@ class SettingsPatch(BaseModel):
         alias="workingHours",
         description='{"enabled": bool, "from": "HH:MM", "to": "HH:MM"}, from != to',
     )
+    auto_scan: Any = Field(
+        default=None,
+        alias="autoScan",
+        description='{"enabled": bool, "roots": [root ids], "intervalMinutes": 5 to 1440,'
+        ' "settleMinutes": 0 to 1440, "maxFilesPerRun": 1 to 50000}',
+    )
+    cache: Any = Field(
+        default=None,
+        description='{"maxBytes": null or at least 104857600, "maxAgeDays": null or 1 to 3650}',
+    )
 
-    @field_validator("workers", "batch_size", "paused", "working_hours")
+    @field_validator("workers", "batch_size", "paused", "working_hours", "auto_scan", "cache")
     @classmethod
     def _check(cls, value: Any, info: ValidationInfo) -> Any:
         assert info.field_name is not None
@@ -370,12 +419,40 @@ class FolderRequest(BaseModel):
     path: Text | None = None
     recursive: bool = False
     label: ShortText | None = None
+    priority: Priority | None = Field(
+        default=None, description='"normal" (default) or "background"'
+    )
 
 
 class FolderQueued(BaseModel):
     files: int
     already_built: int = Field(serialization_alias="alreadyBuilt")
     jobs: list[JobOut]
+
+
+class ScanRequest(BaseModel):
+    roots: list[Text] | None = None
+
+
+class ScanStarted(BaseModel):
+    started: bool
+
+
+class CleanRequest(BaseModel):
+    # Strict: a value that only looks like a boolean must not turn a dry run into a real one.
+    dry_run: bool = Field(default=False, alias="dryRun", strict=True)
+
+
+class CleanRemoved(BaseModel):
+    original_gone: int = Field(serialization_alias="originalGone")
+    expired: int
+    over_limit: int = Field(serialization_alias="overLimit")
+
+
+class CleanAnswer(BaseModel):
+    dry_run: bool = Field(serialization_alias="dryRun")
+    removed: CleanRemoved
+    bytes_freed: int = Field(serialization_alias="bytesFreed")
 
 
 class SelfTestRequest(BaseModel):
@@ -411,7 +488,7 @@ class LogAnswer(BaseModel):
 @dataclass
 class Services:
     """What runs behind the API: the database, the cache, the converter runner, the scheduler,
-    the runtime settings and the self-test."""
+    the runtime settings, the self-test, the automatic scan and the cache clean-up."""
 
     store: Store
     cache: Cache
@@ -420,6 +497,10 @@ class Services:
     display: Display
     controls: Controls
     selftest: SelfTest
+    autoscan: AutoScanner
+    cleaner: CacheCleaner
+    clock: Callable[[], float]
+    """The time (seconds since the epoch) of everything the server records."""
     sysfs: Path | None
     """Where sysfs is for the CPU temperature; None: ``/sys`` on Linux, nothing elsewhere."""
 
@@ -432,13 +513,15 @@ class Services:
         *,
         converter_version: Callable[[], str | None],
         local_clock: Callable[[], datetime] | None = None,
+        clock: Callable[[], float] | None = None,
         sysfs: Path | None = None,
     ) -> "Services":
+        clock = clock or time.time
         settings.data_dir.mkdir(parents=True, exist_ok=True)
         cache = Cache(settings.cache_dir)
         cache.prepare()
         store = Store(settings.data_dir / DATABASE_NAME)
-        recovered = store.recover(time.time())
+        recovered = store.recover(clock())
         if recovered:
             log.info("put %d item(s) left building by the last run back into the queue", recovered)
         controls = Controls.from_settings(settings, store, local_clock)
@@ -461,10 +544,25 @@ class Services:
             settings.roots,
             settings.workers,
             settings.batch_size,
+            clock=clock,
             job_retention_days=settings.job_retention_days,
             controls=controls,
         )
         scheduler.start()
+        autoscan = AutoScanner(
+            store,
+            settings.roots,
+            controls,
+            converter_installed=lambda: converter.is_installed(
+                settings.wineprefix, settings.converter_exe
+            ),
+            on_queued=scheduler.wake,
+            max_items_per_job=MAX_ITEMS_PER_JOB,
+            clock=clock,
+        )
+        autoscan.start()
+        cleaner = CacheCleaner(store, cache, settings.roots, controls, clock)
+        cleaner.start()
         return cls(
             store=store,
             cache=cache,
@@ -473,13 +571,26 @@ class Services:
             display=display,
             controls=controls,
             selftest=SelfTest(settings, runner, scheduler, converter_version),
+            autoscan=autoscan,
+            cleaner=cleaner,
+            clock=clock,
             sysfs=sysfs,
         )
 
     def close(self) -> None:
+        self.autoscan.stop()
+        self.cleaner.stop()
         self.scheduler.stop()
         self.display.stop()
         self.store.close()
+
+    def touch(self, entries: Iterable[CacheEntry]) -> None:
+        """Record a use of these cache entries (found by a job or a lookup, downloaded): written
+        only for those whose last recorded use is ``USE_RESOLUTION`` or more ago."""
+        now = self.clock()
+        stale = [e.key for e in entries if e.used is None or e.used <= now - USE_RESOLUTION]
+        if stale:
+            self.store.touch(stale, now)
 
     def state(self, queued: int, building: int) -> ServerState:
         """``status.state``: a wave in progress (or a self-test's converter) is ``running`` even
@@ -614,10 +725,12 @@ def create_job(body: JobRequest, settings: SettingsDep, services: ServicesDep) -
         body.client or None,
         body.label or None,
         new_items,
-        time.time(),
+        services.clock(),
         client_id=body.client_id or None,
+        priority=body.priority or "normal",
     )
-    if to_build:
+    services.touch(item.result for item in items if item.result is not None)
+    if job.state == "active":
         services.scheduler.wake()
     return JobCreated(job=_job_out(job), items=_items_out(items))
 
@@ -668,7 +781,7 @@ def retry_job(job_id: int, settings: SettingsDep, services: ServicesDep) -> JobE
         for item, found, key in zip(failed, checked, keys, strict=True)
         if isinstance(found, sources.Source) and key is not None
     }
-    outcome = services.store.retry_job(job_id, identities, time.time())
+    outcome = services.store.retry_job(job_id, identities, services.clock())
     if outcome == "unknown":
         raise _no_job()
     if outcome == "cancelled":
@@ -680,7 +793,7 @@ def retry_job(job_id: int, settings: SettingsDep, services: ServicesDep) -> JobE
 
 @api.delete("/v1/jobs/{job_id}")
 def cancel_job(job_id: int, services: ServicesDep) -> JobEnvelope:
-    if not services.store.cancel_job(job_id, time.time()):
+    if not services.store.cancel_job(job_id, services.clock()):
         raise _no_job()
     return JobEnvelope(job=_job_out(_existing_job(services, job_id)))
 
@@ -690,9 +803,12 @@ def get_item_file(item_id: int, services: ServicesDep) -> FileResponse:
     item = services.store.get_item(item_id)
     if item is None:
         raise ApiError(404, "No such item")
-    if item.state != "ready" or item.result is None:
+    if item.state != "ready":
         raise ApiError(409, f"The item is {item.state}, not ready", "not_ready")
     entry = item.result
+    if entry is None:
+        # The clean-up removed its DNG (and the index entry) after the job had finished.
+        raise _not_in_cache()
     if not services.cache.has(entry.key, entry.size):
         log.error(
             "item %d is ready, but its DNG %s is missing or has another size",
@@ -700,6 +816,7 @@ def get_item_file(item_id: int, services: ServicesDep) -> FileResponse:
             services.cache.path(entry.key),
         )
         raise _not_in_cache()
+    services.touch([entry])
     return _dng_response(services, entry, PurePosixPath(item.path).stem)
 
 
@@ -710,6 +827,7 @@ def lookup(body: LookupRequest, settings: SettingsDep, services: ServicesDep) ->
     wanted = [key for key in keys if key is not None]
     entries = services.store.cache_entries(wanted)
     ready = {key for key, entry in entries.items() if services.cache.has(key, entry.size)}
+    services.touch(entries[key] for key in ready)
     pending = services.store.pending_keys(key for key in wanted if key not in ready)
     answers: list[LookupItem] = []
     for item, found, key in zip(body.items, checked, keys, strict=True):
@@ -732,6 +850,7 @@ def get_file(key: str, services: ServicesDep) -> FileResponse:
     entry = services.store.cache_entry(key)
     if entry is None or not services.cache.has(key, entry.size):
         raise _not_in_cache()
+    services.touch([entry])
     # The DNG records its original's name (checked against the request when it was built).
     original = re.split(r"[\\/]", entry.original_name or "")[-1]
     return _dng_response(services, entry, PurePosixPath(original).stem or key)
@@ -739,8 +858,10 @@ def get_file(key: str, services: ServicesDep) -> FileResponse:
 
 @api.get("/v1/status")
 def get_status(services: ServicesDep) -> Status:
-    now = time.time()
-    midnight = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+    now = services.clock()
+    midnight = (
+        datetime.fromtimestamp(now).astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+    )
     status = services.store.status(now - RATE_WINDOW_SECONDS, midnight.timestamp())
     state = services.state(status.queued, status.building)
     per_minute = status.built_recently * 60 / RATE_WINDOW_SECONDS
@@ -748,6 +869,7 @@ def get_status(services: ServicesDep) -> Status:
     if state == "running" and per_minute > 0 and status.pending_files > 0:
         # Files, not items: two jobs that ask for one file share its build.
         eta = math.ceil(status.pending_files * 60 / per_minute)
+    scan = services.autoscan.status()
     return Status(
         state=state,
         queue=QueueStatus(queued=status.queued, building=status.building),
@@ -760,6 +882,12 @@ def get_status(services: ServicesDep) -> Status:
         cache=CacheStatus(entries=status.cache_entries, bytes=status.cache_bytes),
         jobs=JobsStatus(active=status.active_jobs),
         cpu_temperature=sensors.cpu_temperature(services.sysfs),
+        auto_scan=AutoScanStatus(
+            running=scan.running,
+            last_run=None if scan.last_run is None else _iso(scan.last_run),
+            last_queued=scan.last_queued,
+            next_run=None if scan.next_run is None else _iso(scan.next_run),
+        ),
     )
 
 
@@ -773,21 +901,43 @@ def get_runtime_settings(services: ServicesDep) -> SettingsOut:
 
 @api.patch("/v1/settings")
 def patch_runtime_settings(body: SettingsPatch, services: ServicesDep) -> SettingsOut:
-    services.controls.update(body.changes())
+    changes = body.changes()
+    auto_scan = changes.get("autoScan")
+    if auto_scan is not None:
+        unknown = services.controls.unknown_roots(auto_scan.roots)
+        if unknown:
+            raise ApiError(422, f"autoScan: the server has no root {_listed(unknown)}")
+    services.controls.update(changes)
     services.scheduler.wake()
+    services.autoscan.wake()
     return _settings_out(services.controls)
 
 
 def _settings_out(controls: Controls) -> SettingsOut:
     current = controls.current()
     hours = current.working_hours
+    scan = current.auto_scan
     return SettingsOut(
         workers="auto" if current.workers is None else current.workers,
         effective_workers=controls.effective_workers(current),
         batch_size=current.batch_size,
         paused=current.paused,
         working_hours=WorkingHoursOut(enabled=hours.enabled, start=hours.start, end=hours.end),
+        auto_scan=AutoScanOut(
+            enabled=scan.enabled,
+            roots=list(scan.roots),
+            interval_minutes=scan.interval_minutes,
+            settle_minutes=scan.settle_minutes,
+            max_files_per_run=scan.max_files_per_run,
+        ),
+        cache=CacheLimitsOut(
+            max_bytes=current.cache.max_bytes, max_age_days=current.cache.max_age_days
+        ),
     )
+
+
+def _listed(values: Sequence[str]) -> str:
+    return ", ".join(repr(value) for value in values)
 
 
 # --- Browsing and queueing folders -----------------------------------------------------------
@@ -800,7 +950,7 @@ def browse(settings: SettingsDep, services: ServicesDep, root: str, path: str = 
         listing = folders.list_folder(folder)
     except folders.FolderUnreadable:
         raise ApiError(404, "The folder cannot be read", "not_found") from None
-    built = len(_built_keys(services, folder.root, listing.raw))
+    built = len(_built(services, folder.root, listing.raw))
     shown = listing.dirs[:MAX_LISTED_FOLDERS]
     return BrowseAnswer(
         root=folder.root,
@@ -837,7 +987,7 @@ def queue_folder(body: FolderRequest, settings: SettingsDep, services: ServicesD
         sources.cache_key(folder.root, file.path, file.size, file.mtime_ns, recipe)
         for file in files
     ]
-    built = _built_keys(services, folder.root, files, keys)
+    built = _built(services, folder.root, files, keys)
     to_build = len(files) - sum(key in built for key in keys)
     if to_build and not converter.is_installed(settings.wineprefix, settings.converter_exe):
         raise _converter_not_installed()
@@ -855,14 +1005,21 @@ def queue_folder(body: FolderRequest, settings: SettingsDep, services: ServicesD
         for index, (file, key) in enumerate(zip(files, keys, strict=True), start=1)
     ]
     per_job = MAX_ITEMS_PER_JOB
+    priority = body.priority or "normal"
     jobs = services.store.create_jobs(
         [
-            NewJob(client=FOLDER_CLIENT, label=label, items=items[start : start + per_job])
+            NewJob(
+                client=FOLDER_CLIENT,
+                label=label,
+                items=items[start : start + per_job],
+                priority=priority,
+            )
             for start in range(0, len(items), per_job)
         ],
-        time.time(),
+        services.clock(),
     )
-    if to_build:
+    services.touch(built.values())
+    if any(job.state == "active" for job in jobs):
         services.scheduler.wake()
     log.info(
         "queued the folder %r of root %r%s: %d raw file(s), %d already built, in %d job(s)",
@@ -886,24 +1043,69 @@ def _existing_folder(settings: Settings, root: str, path: str) -> sources.Folder
     return found
 
 
-def _built_keys(
+def _built(
     services: Services,
     root: str,
     files: Sequence[folders.RawFile],
     keys: Sequence[str] | None = None,
-) -> set[str]:
-    """The cache keys of these files whose DNG is in the cache now."""
+) -> dict[str, CacheEntry]:
+    """The cache entries of these files whose DNG is in the cache now, by key."""
     if keys is None:
         recipe = converter.recipe()
         keys = [sources.cache_key(root, f.path, f.size, f.mtime_ns, recipe) for f in files]
     entries = services.store.cache_entries(keys)
-    return {key for key, entry in entries.items() if services.cache.has(key, entry.size)}
+    return {key: e for key, e in entries.items() if services.cache.has(key, e.size)}
 
 
 def _folder_label(folder: sources.Folder) -> str:
     label = folder.path or folder.root
     limit = 100
     return label if len(label) <= limit else "…" + label[-(limit - 1) :]
+
+
+# --- The automatic scan and the cache clean-up -----------------------------------------------
+
+
+@api.post("/v1/autoscan/run", status_code=202)
+def run_auto_scan(
+    settings: SettingsDep, services: ServicesDep, body: ScanRequest | None = None
+) -> ScanStarted:
+    roots = list(dict.fromkeys(body.roots)) if body is not None and body.roots else []
+    if not roots:
+        roots = list(services.controls.current().auto_scan.roots)
+        if not roots:
+            raise ApiError(
+                422, "No root to scan: name one, or choose the roots of the automatic scan"
+            )
+    unknown = services.controls.unknown_roots(roots)
+    if unknown:
+        raise ApiError(422, f"The server has no root {_listed(unknown)}", "unknown_root")
+    if not converter.is_installed(settings.wineprefix, settings.converter_exe):
+        raise _converter_not_installed()
+    try:
+        services.autoscan.request(roots)
+    except ScanBusy:
+        raise ApiError(409, "A scan is running", "busy") from None
+    log.info("automatic scan of %s asked for", _listed(roots))
+    return ScanStarted(started=True)
+
+
+@api.post("/v1/cache/clean")
+def clean_cache(services: ServicesDep, body: CleanRequest | None = None) -> CleanAnswer:
+    dry_run = body is not None and body.dry_run
+    try:
+        result = services.cleaner.clean(dry_run)
+    except CleanBusy:
+        raise ApiError(409, "A cache clean-up is running", "busy") from None
+    return CleanAnswer(
+        dry_run=result.dry_run,
+        removed=CleanRemoved(
+            original_gone=result.original_gone,
+            expired=result.expired,
+            over_limit=result.over_limit,
+        ),
+        bytes_freed=result.bytes_freed,
+    )
 
 
 # --- The converter self-test and the log -----------------------------------------------------
@@ -1046,6 +1248,7 @@ def _job_out(job: Job) -> JobOut:
         label=job.label,
         client=job.client,
         client_id=job.client_id,
+        priority=job.priority,
         state=job.state,
         created=_iso(job.created),
         finished=None if job.finished is None else _iso(job.finished),
@@ -1156,11 +1359,14 @@ def create_app(
     runner_config: RunnerConfig | None = None,
     display: Display | None = None,
     local_clock: Callable[[], datetime] | None = None,
+    clock: Callable[[], float] | None = None,
     sysfs: Path | None = None,
 ) -> FastAPI:
     """Build the application. ``runner_config`` and ``display`` replace Wine and Xvfb in tests,
-    ``local_clock`` the local time the working hours are checked against, and ``sysfs`` the
-    folder the CPU temperature is read from (default: ``/sys`` on Linux, nothing elsewhere)."""
+    ``local_clock`` the local time the working hours are checked against, ``clock`` the time
+    (seconds since the epoch) of what the server records and schedules (jobs, the cache's last
+    uses, the automatic scan, the clean-up), and ``sysfs`` the folder the CPU temperature is read
+    from (default: ``/sys`` on Linux, nothing elsewhere)."""
     versions = VersionCache()
     ring = LogRing(secret=settings.token)
 
@@ -1179,6 +1385,7 @@ def create_app(
                 display or Xvfb(),
                 converter_version=lambda: _converter_version(settings, versions),
                 local_clock=local_clock,
+                clock=clock,
                 sysfs=sysfs,
             )
             app.state.services = services

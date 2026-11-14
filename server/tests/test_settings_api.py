@@ -44,6 +44,14 @@ def counts(client: TestClient, job_id: int) -> dict[str, int]:
 
 
 DEFAULT_HOURS = {"enabled": False, "from": "22:00", "to": "07:00"}
+DEFAULT_SCAN = {
+    "enabled": False,
+    "roots": [],
+    "intervalMinutes": 60,
+    "settleMinutes": 15,
+    "maxFilesPerRun": 2000,
+}
+DEFAULT_CACHE = {"maxBytes": None, "maxAgeDays": None}
 
 
 def test_settings_start_from_the_environment_and_round_trip(harness: Harness) -> None:
@@ -54,6 +62,8 @@ def test_settings_start_from_the_environment_and_round_trip(harness: Harness) ->
             "batchSize": 8,
             "paused": False,
             "workingHours": DEFAULT_HOURS,
+            "autoScan": DEFAULT_SCAN,
+            "cache": DEFAULT_CACHE,
         }
         changed = patch(
             client,
@@ -70,6 +80,8 @@ def test_settings_start_from_the_environment_and_round_trip(harness: Harness) ->
             "batchSize": 2,
             "paused": True,
             "workingHours": {"enabled": True, "from": "23:30", "to": "06:15"},
+            "autoScan": DEFAULT_SCAN,
+            "cache": DEFAULT_CACHE,
         }
         assert get_settings(client) == changed
         assert status(client)["workers"]["configured"] == 3
@@ -135,6 +147,33 @@ def test_auto_from_the_environment(harness: Harness) -> None:
         ({"paused": True, "batchSize": 4, "workers": 2}, "workers: 2 is not allowed"),
         ([], "Input should be a valid dictionary"),
         ("paused", "Input should be a valid dictionary"),
+        ({"autoScan": None}, 'autoScan: must be an object with "enabled"'),
+        (
+            {"autoScan": {"enabled": True}},
+            "autoScan: 'roots', 'intervalMinutes', 'settleMinutes', 'maxFilesPerRun' missing",
+        ),
+        (
+            {"autoScan": {**DEFAULT_SCAN, "intervalMinutes": 1}},
+            'autoScan: "intervalMinutes" must be a whole number from 5 to 1440',
+        ),
+        (
+            {"autoScan": {**DEFAULT_SCAN, "roots": ["archive", "nowhere", "elsewhere"]}},
+            "autoScan: the server has no root 'nowhere', 'elsewhere'",
+        ),
+        (
+            {"paused": True, "autoScan": {**DEFAULT_SCAN, "roots": ["nowhere"]}},
+            "autoScan: the server has no root 'nowhere'",
+        ),
+        ({"cache": None}, 'cache: must be an object with "maxBytes" and "maxAgeDays"'),
+        ({"cache": {"maxBytes": None}}, "cache: 'maxAgeDays' missing"),
+        (
+            {"cache": {"maxBytes": 1000, "maxAgeDays": None}},
+            'cache: "maxBytes" must be null or a whole number of at least 104857600',
+        ),
+        (
+            {"cache": {"maxBytes": None, "maxAgeDays": 0}},
+            'cache: "maxAgeDays" must be null or a whole number from 1 to 3650',
+        ),
     ],
 )
 def test_every_bad_value_is_refused_and_changes_nothing(
@@ -149,6 +188,29 @@ def test_every_bad_value_is_refused_and_changes_nothing(
         assert fragment in detail, detail
         assert "Value error" not in detail
         assert get_settings(client) == before
+
+
+def test_scan_and_cache_settings_round_trip_and_survive_a_restart(harness: Harness) -> None:
+    scan = {
+        "enabled": True,
+        "roots": ["offline", "archive"],
+        "intervalMinutes": 5,
+        "settleMinutes": 0,
+        "maxFilesPerRun": 10,
+    }
+    cache = {"maxBytes": 104857600, "maxAgeDays": 30}
+    with harness.client() as client:
+        changed = patch(client, {"autoScan": {**scan, "roots": [*scan["roots"], "archive"]}})
+        assert changed["autoScan"] == scan, "a root named twice counts once"
+        assert patch(client, {"cache": cache})["cache"] == cache
+        assert status(client)["autoScan"]["nextRun"] is not None
+    with harness.client() as client:
+        settings = get_settings(client)
+        assert (settings["autoScan"], settings["cache"]) == (scan, cache)
+        off = patch(client, {"autoScan": {**scan, "enabled": False}, "cache": DEFAULT_CACHE})
+        assert off["autoScan"] == {**scan, "enabled": False}
+        assert off["cache"] == DEFAULT_CACHE
+        assert status(client)["autoScan"]["nextRun"] is None
 
 
 def test_a_body_that_is_not_json_is_refused(harness: Harness) -> None:
@@ -173,6 +235,8 @@ def test_changed_settings_survive_a_restart(harness: Harness) -> None:
             "batchSize": 3,
             "paused": True,
             "workingHours": hours,
+            "autoScan": DEFAULT_SCAN,
+            "cache": DEFAULT_CACHE,
         }
         patch(client, {"workers": 1})
     with harness.client(workers=6, batch_size=16) as client:

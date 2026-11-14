@@ -2,6 +2,7 @@
 
 import sqlite3
 import sys
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -144,7 +145,7 @@ def test_a_0_2_0_database_is_migrated_in_place(tmp_path: Path) -> None:
         assert [j.id for j in store.list_jobs(10)] == [2, 1]
     finally:
         store.close()
-    assert user_version(path) == SCHEMA_VERSION == 3
+    assert user_version(path) == SCHEMA_VERSION == 4
     assert "client_id" in columns(path, "jobs")
 
     # Opening it again changes nothing.
@@ -219,7 +220,7 @@ def test_a_0_3_0_database_is_migrated_in_place(tmp_path: Path) -> None:
         assert store.settings() == {"paused": True, "workers": "auto"}
     finally:
         store.close()
-    assert user_version(path) == SCHEMA_VERSION == 3
+    assert user_version(path) == SCHEMA_VERSION == 4
     assert "settings" in tables(path)
 
     store = Store(path)
@@ -297,6 +298,121 @@ def test_the_server_starts_on_a_0_2_0_database(harness: Harness) -> None:
         assert new["id"] == 3
         listed = client.get("/api/v1/jobs", params={"clientId": "mine"}).json()["jobs"]
         assert [job["id"] for job in listed] == [3]
+    assert user_version(harness.database) == SCHEMA_VERSION
+
+
+# The schema of server 0.4.0 (schema version 3), as it created a new database.
+SCHEMA_0_4_0 = (
+    SCHEMA_0_3_0
+    + """
+CREATE TABLE IF NOT EXISTS settings (
+    name TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+"""
+)
+
+ROWS_0_4_0: list[tuple[str, tuple[object, ...]]] = [
+    *ROWS_0_3_0,
+    # A DNG whose job has expired: nothing says which original it was built from.
+    (
+        "INSERT INTO cache (key, size, sha256, original_name, original_width, original_height,"
+        " created) VALUES (?, 2000, ?, 'IMG_0002.ARW', 6000, 4000, ?)",
+        (KEY_B, "d" * 64, T0 + 1),
+    ),
+    ("INSERT INTO settings (name, value) VALUES ('paused', 'true')", ()),
+]
+
+
+def create_0_4_0_database(path: Path, rows: list[tuple[str, tuple[object, ...]]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    db = sqlite3.connect(path)
+    db.executescript(f"BEGIN; {SCHEMA_0_4_0} PRAGMA user_version = 3; COMMIT;")
+    with db:
+        for sql, params in rows:
+            db.execute(sql, params)
+    db.close()
+
+
+def test_a_0_4_0_database_is_migrated_in_place(tmp_path: Path) -> None:
+    path = tmp_path / "lrrp.sqlite3"
+    create_0_4_0_database(path, ROWS_0_4_0)
+    assert "priority" not in columns(path, "jobs")
+    assert {"used", "root", "path"}.isdisjoint(columns(path, "cache"))
+
+    before = time.time()
+    store = Store(path)
+    after = time.time()
+    try:
+        job = store.get_job(1)
+        assert job is not None
+        assert (job.client_id, job.priority, job.state, job.seq) == (
+            "catalog-1",
+            "normal",
+            "done",
+            3,
+        )
+        # The original of an entry comes from an item that points to it; its use, which the
+        # older server did not record, counts from the upgrade.
+        [known] = store.cache_rows("a")
+        assert (known.key, known.size) == (KEY_A, 1234)
+        assert (known.root, known.path, known.source_size, known.source_mtime_ns) == (
+            "archive",
+            "IMG_0001.ARW",
+            10,
+            20,
+        )
+        assert before <= known.used <= after
+        [unknown] = store.cache_rows("b")
+        assert (unknown.root, unknown.path, unknown.source_size) == (None, None, None)
+        assert before <= unknown.used <= after
+        entry = store.cache_entry(KEY_A)
+        assert entry is not None and entry.used == known.used
+        assert store.settings() == {"paused": True}
+        assert store.state("anything") is None
+        assert store.failed_scan_keys([KEY_A, KEY_B]) == set()
+        new, _ = store.create_job("x", None, [], T0 + 10, priority="background")
+        assert (new.id, new.priority) == (2, "background")
+        store.save_state("record", {"n": 1})
+    finally:
+        store.close()
+    assert user_version(path) == SCHEMA_VERSION == 4
+    assert {"priority"} <= columns(path, "jobs")
+    assert {"root", "path", "source_size", "source_mtime_ns", "used"} <= columns(path, "cache")
+    assert {"scan_failures", "state"} <= tables(path)
+
+    # Opening it again changes nothing.
+    store = Store(path)
+    try:
+        assert [(j.id, j.priority) for j in store.list_jobs(10)] == [
+            (2, "background"),
+            (1, "normal"),
+        ]
+        assert store.cache_rows("a") == [known]
+        assert store.state("record") == {"n": 1}
+    finally:
+        store.close()
+
+
+def test_the_server_starts_on_a_0_4_0_database(harness: Harness) -> None:
+    create_0_4_0_database(harness.database, ROWS_0_4_0)
+    with harness.client() as client:
+        job = client.get("/api/v1/jobs/1").json()["job"]
+        assert (job["priority"], job["clientId"]) == ("normal", "catalog-1")
+        settings = client.get("/api/v1/settings").json()
+        assert settings["paused"] is True
+        assert settings["autoScan"]["enabled"] is False
+        assert settings["cache"] == {"maxBytes": None, "maxAgeDays": None}
+        status = client.get("/api/v1/status").json()
+        assert status["cache"] == {"entries": 2, "bytes": 3234}
+        assert status["autoScan"] == {
+            "running": False,
+            "lastRun": None,
+            "lastQueued": 0,
+            "nextRun": None,
+        }
+        new = post_job(client, ["photo.jpg"], priority="background")["job"]
+        assert new["priority"] == "background"
     assert user_version(harness.database) == SCHEMA_VERSION
 
 

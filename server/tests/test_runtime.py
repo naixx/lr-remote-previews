@@ -8,10 +8,14 @@ from typing import Any
 import pytest
 
 from lrrp.runtime import (
+    AutoScan,
+    CacheLimits,
     Controls,
     RuntimeSettings,
     WorkingHours,
+    parse_auto_scan,
     parse_batch_size,
+    parse_cache_limits,
     parse_paused,
     parse_workers,
     parse_working_hours,
@@ -170,6 +174,101 @@ def test_defaults_from_the_environment() -> None:
         Settings.from_env({"LRRP_WORKERS": "3", "LRRP_BATCH_SIZE": "5"}, cpu_count=8), None
     )
     assert fixed.current() == RuntimeSettings(workers=3, batch_size=5)
+
+
+SCAN = {
+    "enabled": True,
+    "roots": ["archive"],
+    "intervalMinutes": 60,
+    "settleMinutes": 15,
+    "maxFilesPerRun": 2000,
+}
+
+
+def test_auto_scan_values() -> None:
+    assert parse_auto_scan(SCAN) == AutoScan(True, ("archive",), 60, 15, 2000)
+    value = {
+        "enabled": False,
+        "roots": ["scans", "archive", "scans"],
+        "intervalMinutes": 5,
+        "settleMinutes": 0,
+        "maxFilesPerRun": 1,
+        "unknown": 1,
+    }
+    assert parse_auto_scan(value) == AutoScan(False, ("scans", "archive"), 5, 0, 1)
+    top = {**SCAN, "roots": [], "intervalMinutes": 1440, "settleMinutes": 1440}
+    assert parse_auto_scan({**top, "maxFilesPerRun": 50000}) == AutoScan(
+        True, (), 1440, 1440, 50000
+    )
+    assert AutoScan().to_json() == {
+        "enabled": False,
+        "roots": [],
+        "intervalMinutes": 60,
+        "settleMinutes": 15,
+        "maxFilesPerRun": 2000,
+    }
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        (None, 'must be an object with "enabled", "roots"'),
+        ([], "must be an object"),
+        ({}, "'enabled', 'roots', 'intervalMinutes', 'settleMinutes', 'maxFilesPerRun' missing"),
+        ({**SCAN, "enabled": "yes"}, '"enabled" must be true or false'),
+        ({**SCAN, "roots": "archive"}, '"roots" must be a list of root ids'),
+        ({**SCAN, "roots": [1]}, '"roots" must be a list of root ids'),
+        ({**SCAN, "intervalMinutes": 4}, '"intervalMinutes" must be a whole number from 5 to 1440'),
+        ({**SCAN, "intervalMinutes": 1441}, '"intervalMinutes" must be'),
+        ({**SCAN, "intervalMinutes": 60.0}, '"intervalMinutes" must be'),
+        ({**SCAN, "intervalMinutes": True}, '"intervalMinutes" must be'),
+        ({**SCAN, "settleMinutes": -1}, '"settleMinutes" must be a whole number from 0 to 1440'),
+        ({**SCAN, "settleMinutes": None}, '"settleMinutes" must be'),
+        ({**SCAN, "maxFilesPerRun": 0}, '"maxFilesPerRun" must be a whole number from 1 to 50000'),
+        ({**SCAN, "maxFilesPerRun": 50001}, '"maxFilesPerRun" must be'),
+    ],
+)
+def test_bad_auto_scan(value: Any, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        parse_auto_scan(value)
+
+
+def test_cache_limit_values() -> None:
+    assert parse_cache_limits({"maxBytes": None, "maxAgeDays": None}) == CacheLimits()
+    assert parse_cache_limits({"maxBytes": 104857600, "maxAgeDays": 1}) == CacheLimits(104857600, 1)
+    assert parse_cache_limits({"maxBytes": 10**13, "maxAgeDays": 3650}) == CacheLimits(10**13, 3650)
+    assert CacheLimits().to_json() == {"maxBytes": None, "maxAgeDays": None}
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        (None, 'must be an object with "maxBytes" and "maxAgeDays"'),
+        ({"maxBytes": None}, "'maxAgeDays' missing"),
+        ({"maxBytes": 104857599, "maxAgeDays": None}, "at least 104857600 \\(100 MiB\\)"),
+        ({"maxBytes": 1e9, "maxAgeDays": None}, '"maxBytes" must be null or a whole number'),
+        ({"maxBytes": True, "maxAgeDays": None}, '"maxBytes" must be'),
+        ({"maxBytes": "1000000000", "maxAgeDays": None}, '"maxBytes" must be'),
+        ({"maxBytes": None, "maxAgeDays": 0}, '"maxAgeDays" must be null or a whole number'),
+        ({"maxBytes": None, "maxAgeDays": 3651}, "from 1 to 3650"),
+        ({"maxBytes": None, "maxAgeDays": 1.0}, '"maxAgeDays" must be'),
+    ],
+)
+def test_bad_cache_limits(value: Any, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        parse_cache_limits(value)
+
+
+def test_a_saved_scan_keeps_only_the_roots_the_server_still_has(store: Store) -> None:
+    store.save_settings({"autoScan": {**SCAN, "roots": ["archive", "gone"]}})
+    defaults = RuntimeSettings(workers=1, batch_size=1)
+    controls = Controls(defaults, cpu_count=1, store=store, root_ids=["archive", "scans"])
+    assert controls.current().auto_scan == AutoScan(True, ("archive",), 60, 15, 2000)
+    assert controls.unknown_roots(["scans", "x", "archive", "y"]) == ["x", "y"]
+    # Without a list of roots, every id is accepted.
+    anything = Controls(defaults, cpu_count=1, store=store)
+    assert anything.current().auto_scan.roots == ("archive", "gone")
+    assert anything.unknown_roots(["x"]) == []
 
 
 def test_the_gate() -> None:

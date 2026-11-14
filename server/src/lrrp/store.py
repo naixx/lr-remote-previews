@@ -1,36 +1,52 @@
-"""The server's state in SQLite (WAL): jobs, their items, the cache index, a log of builds and
-the settings changed through the API.
+"""The server's state in SQLite (WAL): jobs, their items, the cache index, a log of builds, the
+settings changed through the API, the files the automatic scan leaves alone because they failed,
+and a few records of the background work (``state``).
 
-One connection, used from the API threads and the scheduler thread, serialised by a lock. Every
-change runs in one ``BEGIN IMMEDIATE`` transaction.
+One connection, used from the API threads and the background threads, serialised by a lock.
+Every change runs in one ``BEGIN IMMEDIATE`` transaction.
 
 The change counter (``seq``, ``docs/protocol.md``): every state change of an item, including its
 creation, adds one to its job's ``seq`` and gives the item the new value. So the items of a job
 have distinct ``seq`` values, and a client that asks for ``seq > since`` sees every change once.
 The counter lives in the database, so a restart of the server never sets it back.
 
+A cache entry records the original it was built from (root, path, size, modification time), for
+the clean-up, and when it was last used (built, found by a job or a lookup, downloaded), at most
+once per ``USE_RESOLUTION``, so that reading it costs no write most of the time.
+
 Schema versions (``PRAGMA user_version``): 1 is server 0.2.0; 2 (server 0.3.0) adds
-``jobs.client_id``; 3 (server 0.4.0) adds the ``settings`` table. An older database is brought up
-to date in place when it is opened; nothing is dropped.
+``jobs.client_id``; 3 (server 0.4.0) adds the ``settings`` table; 4 (server 0.5.0) adds
+``jobs.priority``, the original and the last use of each cache entry, and the ``scan_failures``
+and ``state`` tables. An older database is brought up to date in place when it is opened;
+nothing is dropped. Cache entries of an older database get their original from an item that
+points to them (unknown when their jobs have expired) and count as used at the upgrade.
 """
 
 import json
 import sqlite3
 import threading
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+import time
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
 from lrrp.cache import CacheEntry
 
 DATABASE_NAME = "lrrp.sqlite3"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 ITEM_STATES = ("queued", "building", "ready", "failed", "rejected", "cancelled")
 JOB_STATES = ("active", "done", "cancelled")
 PENDING_STATES = ("queued", "building")
+
+AUTO_SCAN_CLIENT = "auto-scan"
+"""The ``client`` of the jobs the automatic scan makes. A file that fails in such a job is
+remembered (``scan_failures``) so that the scan does not queue it again until it changes."""
+
+USE_RESOLUTION = 24 * 3600.0
+"""The last use of a cache entry is written again only when it is at least this old."""
 
 RetryOutcome = Literal["unknown", "cancelled", "unchanged", "retried"]
 
@@ -43,7 +59,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     created REAL NOT NULL,
     finished REAL,
     seq INTEGER NOT NULL DEFAULT 0,
-    client_id TEXT
+    client_id TEXT,
+    priority TEXT NOT NULL DEFAULT 'normal'
 );
 CREATE TABLE IF NOT EXISTS items (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -68,7 +85,12 @@ CREATE TABLE IF NOT EXISTS cache (
     original_name TEXT,
     original_width INTEGER,
     original_height INTEGER,
-    created REAL NOT NULL
+    created REAL NOT NULL,
+    root TEXT,
+    path TEXT,
+    source_size INTEGER,
+    source_mtime_ns INTEGER,
+    used REAL NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS builds (
     id INTEGER PRIMARY KEY,
@@ -79,9 +101,28 @@ CREATE TABLE IF NOT EXISTS settings (
     name TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS scan_failures (
+    root TEXT NOT NULL,
+    path TEXT NOT NULL,
+    key TEXT NOT NULL,
+    failed REAL NOT NULL,
+    PRIMARY KEY (root, path)
+);
+CREATE TABLE IF NOT EXISTS state (
+    name TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
-_ADDED_COLUMNS = (("jobs", "client_id", "TEXT"),)
+_ADDED_COLUMNS = (
+    ("jobs", "client_id", "TEXT"),
+    ("jobs", "priority", "TEXT NOT NULL DEFAULT 'normal'"),
+    ("cache", "root", "TEXT"),
+    ("cache", "path", "TEXT"),
+    ("cache", "source_size", "INTEGER"),
+    ("cache", "source_mtime_ns", "INTEGER"),
+    ("cache", "used", "REAL NOT NULL DEFAULT 0"),
+)
 """Columns added after schema 1: (table, column, type). Added to an older database in place."""
 
 _INDEXES = """
@@ -91,15 +132,24 @@ CREATE INDEX IF NOT EXISTS items_by_key ON items (cache_key, state);
 CREATE INDEX IF NOT EXISTS builds_by_time ON builds (finished);
 CREATE INDEX IF NOT EXISTS jobs_by_client ON jobs (client_id, id);
 CREATE INDEX IF NOT EXISTS jobs_by_finished ON jobs (finished);
+CREATE INDEX IF NOT EXISTS items_by_job_state ON items (job_id, state);
+CREATE INDEX IF NOT EXISTS cache_by_use ON cache (used, key);
+CREATE INDEX IF NOT EXISTS scan_failures_by_key ON scan_failures (key);
 """
 
 _ITEM_COLUMNS = """
     i.id, i.job_id, i.ref, i.root, i.path, i.state, i.seq, i.error_code, i.error_message,
     i.cache_key, c.key AS c_key, c.size AS c_size, c.sha256 AS c_sha256,
     c.original_name AS c_name, c.original_width AS c_width, c.original_height AS c_height,
-    c.created AS c_created
+    c.created AS c_created, c.used AS c_used
 FROM items i LEFT JOIN cache c ON c.key = i.cache_key AND i.state = 'ready'
 """
+
+_ENTRY_COLUMNS = "key, size, sha256, original_name, original_width, original_height, created, used"
+"""The columns of the cache index that make a ``CacheEntry``, in its order."""
+
+_ROW_COLUMNS = "key, size, used, root, path, source_size, source_mtime_ns"
+"""The columns of the cache index that make a ``CacheRow``, in its order."""
 
 _CHUNK = 500
 
@@ -128,6 +178,7 @@ class Job:
     seq: int
     counts: dict[str, int] = field(default_factory=dict)
     client_id: str | None = None
+    priority: str = "normal"
 
 
 @dataclass(frozen=True)
@@ -162,6 +213,22 @@ class NewJob:
     label: str | None
     items: Sequence[NewItem]
     client_id: str | None = None
+    priority: str = "normal"
+
+
+@dataclass(frozen=True)
+class CacheRow:
+    """A cache entry as the clean-up sees it: its DNG, its last use and its original."""
+
+    key: str
+    size: int
+    used: float
+    root: str | None
+    """The original's root id, path, size and modification time; None when unknown (an entry of
+    a server before 0.5.0 whose jobs had expired)."""
+    path: str | None
+    source_size: int | None
+    source_mtime_ns: int | None
 
 
 @dataclass(frozen=True)
@@ -208,10 +275,21 @@ class Store:
         with self._transaction() as db:
             for statement in _statements(_TABLES):
                 db.execute(statement)
+            added: set[tuple[str, str]] = set()
             for table, column, kind in _ADDED_COLUMNS:
                 present = {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
                 if column not in present:
                     db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
+                    added.add((table, column))
+            if ("cache", "used") in added:
+                # Entries of an older server: their original from an item that points to them,
+                # and their use, which nobody recorded, counts from now.
+                db.execute(
+                    "UPDATE cache SET used = ?, (root, path, source_size, source_mtime_ns) = ("
+                    " SELECT root, path, size, mtime_ns FROM items"
+                    " WHERE items.cache_key = cache.key ORDER BY id DESC LIMIT 1)",
+                    (time.time(),),
+                )
             for statement in _statements(_INDEXES):
                 db.execute(statement)
             db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -231,6 +309,12 @@ class Store:
                 raise
             self._db.execute("COMMIT")
 
+    @contextmanager
+    def _reading(self) -> Iterator[sqlite3.Connection]:
+        """The connection under the lock, for reads that need no transaction."""
+        with self._lock:
+            yield self._db
+
     def _query(self, sql: str, params: Sequence[object] = ()) -> list[sqlite3.Row]:
         with self._lock:
             return self._db.execute(sql, params).fetchall()
@@ -244,11 +328,16 @@ class Store:
         items: Sequence[NewItem],
         now: float,
         client_id: str | None = None,
+        priority: str = "normal",
     ) -> tuple[Job, list[Item]]:
-        """Add a job; return it and its items as created, before the scheduler can touch them."""
+        """Add a job; return it and its items as created, before the scheduler can touch them.
+
+        An item given as ``ready`` whose cache entry is gone by now (removed by the clean-up
+        since the caller looked) is queued instead.
+        """
         with self._lock:
             with self._transaction() as db:
-                job_id = _insert_job(db, NewJob(client, label, items, client_id), now)
+                job_id = _insert_job(db, NewJob(client, label, items, client_id, priority), now)
             job = self.get_job(job_id)
             assert job is not None
             return job, self.items_of_job(job_id)
@@ -307,6 +396,7 @@ class Store:
                 seq=row["seq"],
                 counts=counts[row["id"]],
                 client_id=row["client_id"],
+                priority=row["priority"],
             )
             for row in rows
         ]
@@ -416,15 +506,41 @@ class Store:
         return len(rows)
 
     def queued_candidates(self, limit: int) -> list[Candidate]:
-        """Up to ``limit`` distinct files waiting to be built, oldest request first."""
-        rows = self._query(
-            "SELECT i.cache_key, i.root, i.path, i.size, i.mtime_ns FROM ("
-            " SELECT cache_key, MIN(id) AS first FROM items WHERE state = 'queued'"
-            " GROUP BY cache_key ORDER BY first LIMIT ?"
-            ") q JOIN items i ON i.id = q.first ORDER BY q.first",
-            (limit,),
-        )
-        return [Candidate(*row) for row in rows]
+        """Up to ``limit`` distinct files waiting to be built: first those a ``normal`` job wants,
+        then the others; within a priority, oldest request first.
+
+        A file is placed by its first request in a ``normal`` job if it has one, so a file wanted
+        by a ``background`` and a ``normal`` job is built as ``normal``.
+
+        Items are numbered in the order they were requested and a job's items are numbered
+        together, so reading the queued items of the active jobs one job after the other, oldest
+        job first and each job's items in order, gives the requests in order. The reading stops
+        once ``limit`` files are found, so a wave reads about as many items as it takes, however
+        long the queue (index ``items_by_job_state``).
+        """
+        found: dict[str, Candidate] = {}
+        with self._lock:
+            jobs = self._db.execute(
+                "SELECT id, priority FROM jobs WHERE state = 'active' ORDER BY id"
+            ).fetchall()
+            for normal in (True, False):
+                for job_id, priority in jobs:
+                    if (priority == "normal") != normal:
+                        continue
+                    cursor = self._db.execute(
+                        "SELECT cache_key, root, path, size, mtime_ns FROM items"
+                        " WHERE job_id = ? AND state = 'queued' ORDER BY id",
+                        (job_id,),
+                    )
+                    try:
+                        for row in cursor:
+                            if row[0] not in found:
+                                found[row[0]] = Candidate(*row)
+                                if len(found) == limit:
+                                    return list(found.values())
+                    finally:
+                        cursor.close()
+        return list(found.values())
 
     def mark_building(self, keys: Iterable[str], now: float) -> None:
         """Every queued item of these cache keys becomes ``building``."""
@@ -441,14 +557,21 @@ class Store:
     def complete(self, key: str, entry: CacheEntry | None, now: float) -> None:
         """The DNG for ``key`` is in the cache: its pending items become ``ready``.
 
-        ``entry`` is a new build to add to the index (and to the build log); None when the cache
-        already had it.
+        ``entry`` is a new build to add to the index (and to the build log), with the original
+        its items name; None when the cache already had it, which counts as a use of it. Either
+        way the automatic scan forgets an earlier failure of the file.
         """
         with self._transaction() as db:
+            source = db.execute(
+                "SELECT root, path, size, mtime_ns FROM items"
+                " WHERE cache_key = ? AND state IN ('queued', 'building') ORDER BY id LIMIT 1",
+                (key,),
+            ).fetchone()
             if entry is not None:
                 db.execute(
                     "INSERT OR REPLACE INTO cache (key, size, sha256, original_name,"
-                    " original_width, original_height, created) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    " original_width, original_height, created, root, path, source_size,"
+                    " source_mtime_ns, used) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         entry.key,
                         entry.size,
@@ -457,9 +580,21 @@ class Store:
                         entry.original_width,
                         entry.original_height,
                         entry.created,
+                        *(tuple(source) if source is not None else (None,) * 4),
+                        now,
                     ),
                 )
                 db.execute("INSERT INTO builds (finished, ok) VALUES (?, 1)", (now,))
+            else:
+                db.execute(
+                    "UPDATE cache SET used = ? WHERE key = ? AND used <= ?",
+                    (now, key, now - USE_RESOLUTION),
+                )
+            if source is not None:
+                db.execute(
+                    "DELETE FROM scan_failures WHERE key = ? OR (root = ? AND path = ?)",
+                    (key, source["root"], source["path"]),
+                )
             rows = db.execute(
                 "SELECT id, job_id FROM items"
                 " WHERE cache_key = ? AND state IN ('queued', 'building')",
@@ -467,10 +602,23 @@ class Store:
             ).fetchall()
             _change(db, rows, "ready", now)
 
-    def fail(self, key: str, code: str, message: str, now: float) -> None:
-        """Building the DNG for ``key`` failed: its ``building`` items become ``failed``."""
+    def fail(self, key: str, code: str, message: str, now: float, *, remember: bool = True) -> None:
+        """Building the DNG for ``key`` failed: its ``building`` items become ``failed``.
+
+        ``remember``: the failure is the file's (not the server's, such as a converter that
+        cannot start, or a source that changed), so if an automatic job wanted it, the automatic
+        scan leaves the file alone until it changes.
+        """
         with self._transaction() as db:
             db.execute("INSERT INTO builds (finished, ok) VALUES (?, 0)", (now,))
+            if remember:
+                db.execute(
+                    "INSERT OR REPLACE INTO scan_failures (root, path, key, failed)"
+                    " SELECT i.root, i.path, i.cache_key, ? FROM items i"
+                    " JOIN jobs j ON j.id = i.job_id"
+                    " WHERE i.cache_key = ? AND i.state = 'building' AND j.client = ? LIMIT 1",
+                    (now, key, AUTO_SCAN_CLIENT),
+                )
             rows = db.execute(
                 "SELECT id, job_id FROM items WHERE cache_key = ? AND state = 'building'", (key,)
             ).fetchall()
@@ -496,18 +644,148 @@ class Store:
                 [(name, json.dumps(value)) for name, value in values.items()],
             )
 
+    def state(self, name: str) -> Any:
+        """A record the background work keeps (a JSON value), or None."""
+        rows = self._query("SELECT value FROM state WHERE name = ?", (name,))
+        if not rows:
+            return None
+        try:
+            return json.loads(rows[0]["value"])
+        except ValueError:
+            return None
+
+    def save_state(self, name: str, value: Any) -> None:
+        with self._transaction() as db:
+            db.execute(
+                "INSERT OR REPLACE INTO state (name, value) VALUES (?, ?)",
+                (name, json.dumps(value)),
+            )
+
     # --- The cache index and the status ---------------------------------------------------------
 
     def cache_entries(self, keys: Iterable[str]) -> dict[str, CacheEntry]:
         found: dict[str, CacheEntry] = {}
         for chunk in _chunks(list(set(keys))):
             marks = ",".join("?" * len(chunk))
-            for row in self._query(f"SELECT * FROM cache WHERE key IN ({marks})", chunk):
+            for row in self._query(
+                f"SELECT {_ENTRY_COLUMNS} FROM cache WHERE key IN ({marks})", chunk
+            ):
                 found[row["key"]] = CacheEntry(*row)
         return found
 
     def cache_entry(self, key: str) -> CacheEntry | None:
         return self.cache_entries([key]).get(key)
+
+    def cached_keys(self, keys: Iterable[str]) -> set[str]:
+        """The keys among ``keys`` that the cache index has (the DNG files are not looked at)."""
+        found: set[str] = set()
+        for chunk in _chunks(list(set(keys))):
+            marks = ",".join("?" * len(chunk))
+            for (key,) in self._query(f"SELECT key FROM cache WHERE key IN ({marks})", chunk):
+                found.add(key)
+        return found
+
+    def failed_scan_keys(self, keys: Iterable[str]) -> set[str]:
+        """The keys among ``keys`` of files that failed in an automatic job, as they are now."""
+        found: set[str] = set()
+        for chunk in _chunks(list(set(keys))):
+            marks = ",".join("?" * len(chunk))
+            for (key,) in self._query(
+                f"SELECT key FROM scan_failures WHERE key IN ({marks})", chunk
+            ):
+                found.add(key)
+        return found
+
+    def touch(self, keys: Iterable[str], now: float) -> None:
+        """These cache entries were used now."""
+        with self._transaction() as db:
+            for chunk in _chunks(list(set(keys))):
+                marks = ",".join("?" * len(chunk))
+                db.execute(f"UPDATE cache SET used = ? WHERE key IN ({marks})", [now, *chunk])
+
+    def cache_rows(self, prefix: str) -> list[CacheRow]:
+        """The cache entries whose key starts with ``prefix``, by key."""
+        rows = self._query(
+            f"SELECT {_ROW_COLUMNS} FROM cache WHERE key >= ? AND key < ? ORDER BY key",
+            (prefix, prefix + "￿"),
+        )
+        return [CacheRow(*row) for row in rows]
+
+    def cache_rows_by_use(
+        self, after: tuple[float, str] | None, limit: int, used_before: float | None = None
+    ) -> list[CacheRow]:
+        """Up to ``limit`` cache entries, least recently used first, after ``(used, key)``;
+        only those last used before ``used_before``, when given."""
+        conditions: list[str] = []
+        params: list[object] = []
+        if after is not None:
+            conditions.append("(used, key) > (?, ?)")
+            params.extend(after)
+        if used_before is not None:
+            conditions.append("used < ?")
+            params.append(used_before)
+        where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+        rows = self._query(
+            f"SELECT {_ROW_COLUMNS} FROM cache{where} ORDER BY used, key LIMIT ?",
+            [*params, limit],
+        )
+        return [CacheRow(*row) for row in rows]
+
+    def cache_bytes(self) -> int:
+        """The size of every DNG the cache index has."""
+        (size,) = self._query("SELECT COALESCE(SUM(size), 0) FROM cache")[0]
+        return size
+
+    def remove_cache_entries(
+        self,
+        keys: Sequence[str],
+        remove_file: Callable[[str], bool],
+        *,
+        dry_run: bool = False,
+        need_bytes: int | None = None,
+    ) -> list[tuple[str, int]]:
+        """Remove these cache entries in this order; return the (key, size) of those removed.
+
+        An entry that an item of an active job points to is kept, and so is one whose file
+        ``remove_file`` could not delete (it returns False; a file that was gone already is
+        True). The check, the file and the index row go together, under the lock, so a job
+        created meanwhile never points to a removed entry. ``need_bytes``: stop once that much
+        is freed. ``dry_run``: only say what would be removed.
+        """
+        removed: list[tuple[str, int]] = []
+        if not keys:
+            return removed
+        freed = 0
+        with self._reading() if dry_run else self._transaction() as db:
+            for chunk in _chunks(list(keys)):
+                marks = ",".join("?" * len(chunk))
+                protected = {
+                    key
+                    for (key,) in db.execute(
+                        "SELECT DISTINCT i.cache_key FROM items i JOIN jobs j ON j.id = i.job_id"
+                        f" WHERE j.state = 'active' AND i.cache_key IN ({marks})",
+                        chunk,
+                    )
+                }
+                sizes = dict(
+                    db.execute(f"SELECT key, size FROM cache WHERE key IN ({marks})", chunk)
+                )
+                gone: list[tuple[str]] = []
+                for key in chunk:
+                    if need_bytes is not None and freed >= need_bytes:
+                        break
+                    if key in protected or key not in sizes:
+                        continue
+                    if not dry_run and not remove_file(key):
+                        continue
+                    removed.append((key, sizes[key]))
+                    gone.append((key,))
+                    freed += sizes[key]
+                if not dry_run:
+                    db.executemany("DELETE FROM cache WHERE key = ?", gone)
+                if need_bytes is not None and freed >= need_bytes:
+                    break
+        return removed
 
     def pending_keys(self, keys: Iterable[str]) -> set[str]:
         """The cache keys among ``keys`` that an item of any job is queued or building for."""
@@ -563,11 +841,24 @@ class Store:
 
 def _insert_job(db: sqlite3.Connection, job: NewJob, now: float) -> int:
     cursor = db.execute(
-        "INSERT INTO jobs (client, label, client_id, state, created, seq)"
-        " VALUES (?, ?, ?, 'active', ?, 0)",
-        (job.client, job.label, job.client_id, now),
+        "INSERT INTO jobs (client, label, client_id, priority, state, created, seq)"
+        " VALUES (?, ?, ?, ?, 'active', ?, 0)",
+        (job.client, job.label, job.client_id, job.priority, now),
     )
     job_id = cursor.lastrowid or 0
+    cached = {item.cache_key for item in job.items if item.state == "ready" and item.cache_key}
+    present: set[str] = set()
+    for chunk in _chunks(list(cached)):
+        marks = ",".join("?" * len(chunk))
+        present.update(
+            key for (key,) in db.execute(f"SELECT key FROM cache WHERE key IN ({marks})", chunk)
+        )
+    items = [
+        replace(item, state="queued")
+        if item.state == "ready" and item.cache_key not in present
+        else item
+        for item in job.items
+    ]
     db.executemany(
         "INSERT INTO items (job_id, ref, root, path, state, seq, error_code, error_message,"
         " cache_key, size, mtime_ns, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -586,10 +877,10 @@ def _insert_job(db: sqlite3.Connection, job: NewJob, now: float) -> int:
                 item.mtime_ns,
                 now,
             )
-            for seq, item in enumerate(job.items, start=1)
+            for seq, item in enumerate(items, start=1)
         ],
     )
-    db.execute("UPDATE jobs SET seq = ? WHERE id = ?", (len(job.items), job_id))
+    db.execute("UPDATE jobs SET seq = ? WHERE id = ?", (len(items), job_id))
     _settle(db, [job_id], now)
     return job_id
 
@@ -642,6 +933,7 @@ def _item(row: sqlite3.Row) -> Item:
             original_width=row["c_width"],
             original_height=row["c_height"],
             created=row["c_created"],
+            used=row["c_used"],
         )
     return Item(
         id=row["id"],
