@@ -144,6 +144,11 @@ function SqliteCommand.readScript(database, sql)
     return script(database, sql, "[%w _.,=()'>]")
 end
 
+-- The same for the SELECTs of PreviewWatch on Lightroom's preview index: quoted file UUIDs, which hold dashes.
+function SqliteCommand.previewScript(database, sql)
+    return script(database, sql, "[%w _.,=()'%-]")
+end
+
 -- The command line that runs a lookup script. spec: { tool, script, output, errors, windows }.
 -- tool is a path or a bare name looked up on the PATH; script is the file with lookupScript's text;
 -- output/errors are the files stdout/stderr go to.

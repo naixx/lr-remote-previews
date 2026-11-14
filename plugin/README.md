@@ -12,11 +12,13 @@ without the dialog...** starts Lightroom's own import of a folder without its di
 import (only when that was «Add»), and leaves the sending to the automatic send. It replaces 0.5.0's «Add a folder
 without previews...», which ran once and was far too slow (see «What has been tried in Lightroom»).
 
-Status: **version 0.8.2, which has not been run in Lightroom** (nor has 0.8.1). Version 0.7.0 ran end to end in
-Lightroom Classic 15.6 on Windows: the import of 1384 raw files from a NAS, the automatic send and the automatic fetch
-placed and registered all 1384 smart previews, in 16.5 minutes. 0.8.0 rebuilt that automatic path for speed; in its run
-the fast path worked but sent only 650 of 1384 photos, and 0.8.1 fixes that; 0.8.2 downloads nothing while an import
-is in progress and registers the placed photos with one call (see the tables at the end). Before that, 0.2.0's build command ran on 157 photos, 0.3.0's send and «Fetch ready smart previews» for the
+Status: **version 0.8.3, which has not been run in Lightroom.** Version 0.7.0 ran end to end in Lightroom Classic
+15.6 on Windows: the import of 1384 raw files from a NAS, the automatic send and the automatic fetch placed and
+registered all 1384 smart previews, in 16.5 minutes. 0.8.0 rebuilt that automatic path for speed; in its run the fast
+path worked but sent only 650 of 1384 photos, and 0.8.1 fixed that. 0.8.2 ran once: every photo sent into one job,
+nothing downloaded during the import, but the user closed Lightroom in the middle of the fetch because nothing on the
+screen showed it. 0.8.3 shows a progress bar and starts the fetch after Lightroom's own preview task (see the tables at
+the end). Before that, 0.2.0's build command ran on 157 photos, 0.3.0's send and «Fetch ready smart previews» for the
 selection on 143 photos from a NAS, 0.5.0's «Add a folder without previews...» once and 0.6.0's «Import a folder
 without the dialog...» once. Everything else is checked only by the unit tests and by runs with stand-in Lightroom
 functions (cooperative tasks, a virtual clock) against a fake server that follows the protocol, and the plug-in's
@@ -56,8 +58,11 @@ used:
   (`AgLibraryFolder`, `AgLibraryRootFolder`), file name and file UUID (`AgLibraryFile`), import
   (`AgLibraryImportImage`), pixel size, whether they are videos or virtual copies (`Adobe_images`) and whether
   Lightroom has a smart preview for them (`AgDNGProxyInfo`), plus the import records above that id
-  (`AgLibraryImport`). Nothing else is ever passed (the script builder refuses anything but one plain `SELECT`), and
-  nothing writes.
+  (`AgLibraryImport`). Since 0.8.3 also, for the automatic fetch, a second Lightroom database: the preview index
+  `<catalog name> Previews.lrdata\previews.db` next to the catalog, opened the same read-only way, with one `SELECT`
+  per 500 photos (`PreviewWatch.lua`): how many of the file UUIDs the session sent have a row in `Pyramid` whose
+  `quality` is not `thumbnail`. Nothing else is ever passed (the script builder refuses anything but one plain
+  `SELECT`), and nothing writes.
 - The catalog path goes into the script, not onto the command line, because some Windows builds of sqlite3 read their
   arguments in the ANSI code page and then cannot open a path with other characters (seen with 3.50.6 from Android's
   platform-tools: a catalog under a folder with Cyrillic letters failed on the command line and worked through the
@@ -377,10 +382,31 @@ awake:
 NAS it reads the originals over the same link, so the plug-in only sends (small requests; the server builds meanwhile)
 and downloads nothing. «In progress» is the fast period of the automatic send (below: new photos still coming, or an
 import seen whose first photos are still to come). The waiting requests go on during it: they cost nothing on the link
-and tell which smart previews are ready. When the import is over (2 minutes without a new photo), everything ready is
-fetched **in one go**, with «Downloads at once» downloads at the same time; what becomes ready later is fetched as it
-comes. A job sent while no import is in progress (**Build smart previews on the server** on a selection) is fetched as
-its files become ready. Downloads already under way when an import begins are taken back until it is over.
+and tell which smart previews are ready. When the import is over, everything ready is fetched **in one go**, with
+«Downloads at once» downloads at the same time; what becomes ready later is fetched as it comes. A job sent while no
+import is in progress (**Build smart previews on the server** on a selection) is fetched as its files become ready.
+Downloads already under way when an import begins are taken back until it is over.
+
+**When the import is over** (since 0.8.3, `PreviewWatch.lua`). In the run of 0.8.2, Lightroom's own task «Fetching
+Initial Previews» (it reads the previews embedded in the originals, over the same link) went on for 3.5 minutes after
+the last photo was added, at 0.34 s per photo, and the user took the end of that task for the end of the import. So
+the import is over when no new photo has come for 2 minutes **and** Lightroom's previews of the import's photos have
+stopped coming: the number of them with a preview better than the 160-pixel placeholder has not grown for 30 seconds,
+or all have one. The plug-in reads that from Lightroom's preview index (below, «The sqlite3 tool») every 10 seconds.
+At most 15 minutes after the photos stopped, the fetch begins anyway (a preview task the user cancelled, photos that
+never get a preview; at Lightroom's pace that covers imports of about 5000 photos); when the index cannot be read, or
+after a restart (when the session no longer knows which photos it sent), it begins as before 0.8.3.
+
+**The progress bar** (since 0.8.3, `FetchProgress.lua`). While the automatic fetch has at least 20 smart previews to
+bring in (received and not yet placed, or still being built on the server), Lightroom's activity area shows one bar,
+`LRRP: smart previews`, advancing per file: during the import `Waiting for Lightroom's import to end: 600 ready on the
+server, 784 being built`, then `836 of 1384 fetched`, with `; 184 still being built on the server` while the server
+builds, or `; the server does not answer (next try at 21:58)`. It ends when nothing is left to bring in; while the
+server still builds it stays and says so, so that it never sits still without saying why. A trickle of a few files
+shows no bar. The registration call afterwards shows Lightroom's own bar. **Cancelling the bar pauses the automatic
+fetch** for the rest of the session (the run of its loop): nothing is downloaded, placed or registered until **Fetch
+ready smart previews** is run or Lightroom starts again; the automatic send goes on. The bar has no function context
+and is ended with `done()`.
 
 **Placing without calling into the catalog.** Plug-in calls into the catalog are very slow while Lightroom imports (in
 the run of 0.7.0, 4.7 minutes passed in one fetch before its lookup; in 0.6.0's, `findPhotoByPath` for 425 photos took
@@ -431,7 +457,12 @@ says how many are placed and not registered yet.
 
 **Log lines to measure with.** For each photo sent: `IMG_0001.ARW: sent (job 12, queued; first seen in the catalog ->
 sent 2.1 s)`. When an import begins: `automatic fetch: an import is in progress; nothing is downloaded until it is
-over`; when it is judged over: `automatic fetch: the import is taken as over; fetching the 1384 smart preview(s) ready so
+over`; when the photos stopped: `automatic send: no new photo for 120 s; ...` and `automatic fetch: the photos stopped
+coming; waiting for Lightroom's previews of them before fetching (at most 15 minutes)`; when the previews stopped:
+`automatic fetch: the previews stopped coming: 1384 of 1384 photos of the import have a preview` (or `...; none new for
+30 s`, `...; still more to come after 15 minutes, fetching anyway`, `the preview index cannot be read (...)`); the bar:
+`automatic fetch: progress bar shown (...)` and `automatic fetch: progress bar ended (1384 of 1384 fetched)`; when it
+is judged over: `automatic fetch: the import is taken as over; fetching the 1384 smart preview(s) ready so
 far in one go (4 download(s) at once)`; when that is done: `automatic fetch: the fetch in one go is done: 1384 placed, 0
 left out, 0 to be tried again later; 2071.3 MB in 95.2 s (21.76 MB/s)`. For the registration: `automatic fetch: one
 registration call (catalog:buildSmartPreviews) for 1384 photo(s) took 12.3 s: 1384 existed, 0 created, 0 failed, 0 not
@@ -628,6 +659,8 @@ Lua 5.1:
 | `AutoSend.lua` | no | One look of the automatic send: reading the catalog with sqlite3, sending the new photos into the job of their import |
 | `FastFetch.lua` | no | The automatic fetch of jobs sent since 0.8.0: a waiting request per job, nothing downloaded during an import and a fetch in one go after it, placing without calls into the catalog, registration afterwards with one call |
 | `FetchGo.lua` | yes | When the automatic fetch downloads: nothing during an import, everything ready in one go when it is over; the totals of that go |
+| `PreviewWatch.lua` | yes | When an import counts as over: Lightroom's previews of its photos have stopped coming (the preview index, read with sqlite3) |
+| `FetchProgress.lua` | yes | The automatic fetch's progress bar: when it is shown, its caption and portion, when it ends |
 | `PluginInfoProvider.lua` | no | The Plug-in Manager section |
 | `ImportFolder.lua`, `BuildSmartPreviews.lua`, `FetchSmartPreviews.lua`, `ServerStatus.lua`, `CheckServer.lua`, `Diagnostics*.lua` | no | The menu commands |
 | `InitPlugin.lua`, `EnablePlugin.lua`, `DisablePlugin.lua`, `ShutdownPlugin.lua` | no | Start and stop the automatic loop |
@@ -809,18 +842,28 @@ the import. What to look at in Lightroom:
 | The watchdog (a loop that took no step for 10 minutes) | not tried |
 | Against a server before 0.6.0: new jobs per look, asking at the interval | not tried |
 
-Version 0.8.2: nothing has been tried in Lightroom yet. While an import is in progress it only sends; when the import
-is judged over it fetches everything ready in one go and registers the placed photos with one
-`catalog:buildSmartPreviews` call, which has never been called in Lightroom. In the stand-in run of an import of 600
-photos: no download and no placing before the import was judged over, all 600 ready by then, fetched in one go and
-registered with one call; an interrupted fetch (Lightroom quitting, the server away for 10 minutes, smart previews
-built late, failed downloads and checks, a temporary file of a crash) finished without any action. What to look at in
-Lightroom:
+Version 0.8.2, Lightroom Classic 15.6 on Windows: an import of 1384 raw files from the NAS with «Import a folder
+without the dialog...», the automatic send on, server 0.6.0.
 
 | What | Result |
 |---|---|
-| No download while Lightroom imports; the log line when the import is judged over; the time and MB/s of the fetch in one go | not tried |
-| `catalog:buildSmartPreviews` exists in Lightroom Classic 15.6, takes 1384 photos in one call, answers `existed` for placed files, shows one progress bar; how long it takes | not tried |
-| Its answer when the user cancels the progress bar (the photos not reached are expected in no list) | not tried |
-| Quitting Lightroom during the fetch in one go: at the next start nothing placed is downloaded again, all registered | not tried |
-| The import confirmation and **Server status...** at a normal width (their text in lines of at most 90 characters) | not tried |
+| Photos sent | all 1384, in one job |
+| First seen in the catalog -> sent | median 0.1 s, max 17 s (photos waiting for their import link) |
+| How often it looked while Lightroom imported | every 4 s on average, the longest gap 9 s |
+| Downloads during the import | none; no warning in the log |
+| Timeline | trigger 21:41:47; photos added 21:44:11-21:48:27; Lightroom's «Fetching Initial Previews» (quality `embedded` in the preview index) wrote from 21:44:15 to 21:51:52, 0.34 s per photo, 3.5 minutes longer than the adding; the plug-in judged the import over at 21:50:30 and began the fetch in one go; 836 of 1384 files placed by 21:52:24 (about 7 per second) |
+| **The user closed Lightroom at 21:52:30, in the middle of the fetch** | nothing on the screen said that anything was still going on; he watched Lightroom's bar finish and took the import for done. So the registration call and the continuation at the next start were not reached in this run |
+| The import confirmation and **Server status...** at a normal width | not tried |
+
+Version 0.8.3: nothing has been tried in Lightroom yet. In the stand-in run of an import of 600 photos whose stand-in
+preview task ended 3 minutes after the last photo: the fetch began 0 to 10 s after that task ended, the bar showed
+`Waiting for Lightroom's import to end: ...` from the first photos on, then `N of 600 fetched`, and ended when all were
+in; a cancel of the bar paused the fetch until the next start (which showed the bar again) or until **Fetch ready
+smart previews**. What to look at in Lightroom:
+
+| What | Result |
+|---|---|
+| The bar `LRRP: smart previews` in the activity area, its captions, its cancel button; that a bar without a function context shows and ends | not tried |
+| The preview index read while Lightroom writes it: the log lines `the photos stopped coming` and `the previews stopped coming`, and the fetch beginning after «Fetching Initial Previews» ends | not tried |
+| `catalog:buildSmartPreviews` for 1384 photos (exists, answers `existed`, one progress bar, how long it takes) | not tried |
+| Quitting Lightroom during the fetch: at the next start the bar shows again, nothing placed is downloaded again, all registered | not tried |

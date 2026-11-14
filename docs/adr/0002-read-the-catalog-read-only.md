@@ -10,7 +10,11 @@ Lightroom imports): one plain `SELECT` per look gives the photos above a mark, o
 (`AgLibraryFolder`, `AgLibraryRootFolder`), file name and file UUID (`AgLibraryFile`), import
 (`AgLibraryImportImage`), pixel size, video and virtual copy flags (`Adobe_images`) and whether Lightroom knows a smart
 preview for them (`AgDNGProxyInfo`, any status but `D`), plus the import records above the mark (`AgLibraryImport`);
-see `CatalogRead.lua`. It still writes nothing.
+see `CatalogRead.lua`. It still writes nothing. Since plug-in 0.8.3 the automatic fetch also reads a second Lightroom
+database, the preview index `<catalog name> Previews.lrdata/previews.db` next to the catalog, the same read-only way
+(`sqlite3 -readonly`, `.open --readonly`, one plain `SELECT`): how many of the file UUIDs it sent have a row in
+`Pyramid` with a `quality` other than `thumbnail`, so that it starts fetching after Lightroom's own preview task for an
+import; see `PreviewWatch.lua`. It writes nothing there either.
 
 ## Context
 

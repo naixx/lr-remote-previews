@@ -19,6 +19,11 @@
 -- file by itself; the placed photos are registered afterwards with one catalog:buildSmartPreviews(photos) call
 -- (RegisterQueue), never while an import is in progress. The log tells the two steps apart («placed», «registered»).
 --
+-- Since 0.8.3 the import counts as over only when Lightroom's own preview task for it has ended too (PreviewWatch:
+-- the preview index, read with sqlite3), and while there are at least FetchProgress.THRESHOLD smart previews to bring
+-- in, a progress bar says so (FetchProgress). Cancelling that bar pauses the automatic fetch until «Fetch ready smart
+-- previews» or the next start (FastFetch.PAUSE_KEY, tied to the loop's run token).
+--
 -- An interrupted fetch finishes by itself: what is placed but not registered is kept in the preferences
 -- (RegisterQueue); a job stays pending until every ready item is dealt with, so after a restart its task reads the
 -- ready items again and a file already placed is not downloaded again; a download the server could not serve (NAS
@@ -28,6 +33,7 @@ local LrApplication = import 'LrApplication'
 local LrDialogs = import 'LrDialogs'
 local LrFileUtils = import 'LrFileUtils'
 local LrPrefs = import 'LrPrefs'
+local LrProgressScope = import 'LrProgressScope'
 local LrTasks = import 'LrTasks'
 
 local AutoSend = require 'AutoSend'
@@ -36,17 +42,20 @@ local CatalogState = require 'CatalogState'
 local DownloadQueue = require 'DownloadQueue'
 local FastState = require 'FastState'
 local FetchGo = require 'FetchGo'
+local FetchProgress = require 'FetchProgress'
 local JobStats = require 'JobStats'
 local Log = require 'Log'
 local PendingJobs = require 'PendingJobs'
 local PhotoAccess = require 'PhotoAccess'
 local Pipeline = require 'Pipeline'
+local PreviewWatch = require 'PreviewWatch'
 local RegisterQueue = require 'RegisterQueue'
 local RunSummary = require 'RunSummary'
 local ServerClient = require 'ServerClient'
 local Settings = require 'Settings'
 local SmartPreviewPath = require 'SmartPreviewPath'
 local SqliteCommand = require 'SqliteCommand'
+local SqliteRunner = require 'SqliteRunner'
 local WaitPlan = require 'WaitPlan'
 
 local FastFetch = {}
@@ -58,6 +67,8 @@ FastFetch.MAX_TRIES = 3
 FastFetch.CAPABILITIES_SECONDS = 3600 -- what the server can do is asked again after this, while something is pending
 FastFetch.BUSY_STEP = 0.2 -- seconds between two steps of the loop while files are on their way
 FastFetch.WAIT_STEP = 0.5 -- the same while a waiting request is open
+FastFetch.PAUSE_KEY = 'fetchPaused' -- the run token of the loop whose progress bar the user cancelled
+FastFetch.RUN_KEY = 'autoFetchRun' -- AutoFetch.RUN_KEY: the run token of the loop
 
 local watchers = {} -- [job id text] = { id, key, since, sent, shortened, answer, jobSeq, running, stop, gone, failing,
 --                                       lowestFailed }
@@ -75,6 +86,10 @@ local forceRegister = false -- a fetch in one go has ended: register what it pla
 local backoffHit = false -- a download found the server away: take the queued downloads back
 local batchUsable -- false once catalog:buildSmartPreviews is missing or raised an error (this session)
 local tempsChecked = false -- the temporary file of an interrupted placing has been looked for
+local previews = PreviewWatch.new() -- the wait for Lightroom's previews once the photos stopped coming
+local progress = FetchProgress.new()
+local scope -- the progress bar (LrProgressScope) while it is shown
+local dealt, failedCount = 0, 0 -- items dealt with (placed or left out) in this session, and of those left out
 
 local function idText(id)
     return string.format('%d', id)
@@ -135,6 +150,8 @@ local function watch(w, catalogPath, shouldStop)
                     open[w.key] = (open[w.key] or 0) + 1
                 end
                 w.since, w.answer, w.jobSeq = answer.since, answer, page.job.seq
+                local counts = page.job.counts or {}
+                w.coming = (counts.queued or 0) + (counts.building or 0)
                 local seconds = WaitPlan.pause(answer, wait ~= nil, settings.autoFetchInterval, readyAt - asked)
                 if seconds > 0 then
                     pause(w, shouldStop, seconds)
@@ -187,6 +204,7 @@ end
 -- An item of a job that needs nothing more in this session.
 local function settleItem(jobId)
     local key = idText(jobId)
+    dealt = dealt + 1
     open[key] = math.max(0, (open[key] or 1) - 1)
 end
 
@@ -200,6 +218,7 @@ local function leaveOut(jobId, seq, fileName, outcome, detail, failed)
     Log.info('%s', RunSummary.photoLine(fileName, outcome, detail))
     if failed then
         JobStats.fail(FastState.stats, jobId)
+        failedCount = failedCount + 1
     end
     local w = watchers[idText(jobId)]
     if RETRYABLE[outcome] and w and seq and (w.lowestFailed == nil or seq < w.lowestFailed) then
@@ -701,11 +720,138 @@ local function knowCapabilities(store, settings, catalogPath)
     return true
 end
 
+local function endBar(why)
+    if scope then
+        LrTasks.pcall(function()
+            scope:done()
+        end)
+        scope = nil
+        Log.info('automatic fetch: progress bar ended (%s)', why)
+    end
+    progress = FetchProgress.new()
+end
+
 -- Stops every job task (the loop ends).
 function FastFetch.stopAll()
     for _, w in pairs(watchers) do
         w.stop = true
     end
+    endBar('the loop ended')
+end
+
+-- True while the user's cancel of the progress bar holds the automatic fetch back (this run of the loop).
+function FastFetch.paused(store)
+    local paused = store[FastFetch.PAUSE_KEY]
+    return type(paused) == 'string' and paused ~= '' and paused == store[FastFetch.RUN_KEY]
+end
+
+-- Lets the automatic fetch go on after a cancel of its progress bar («Fetch ready smart previews» calls it).
+function FastFetch.resume(store)
+    if store[FastFetch.PAUSE_KEY] ~= nil then
+        store[FastFetch.PAUSE_KEY] = nil
+        Log.info('automatic fetch: goes on again')
+    end
+end
+
+-- Shows, updates or ends the progress bar (FetchProgress); a cancel of the bar pauses the automatic fetch.
+local function showProgress(store, holding, nextTry)
+    local ready, coming = 0, 0
+    for _, n in pairs(open) do
+        ready = ready + n
+    end
+    for _, w in pairs(watchers) do
+        if not w.stop then
+            coming = coming + (w.coming or 0)
+        end
+    end
+    local action, caption, done, total = FetchProgress.step(progress, { waiting = holding, ready = ready,
+        coming = coming, dealt = dealt, failed = failedCount, nextTry = nextTry })
+    if action == 'start' then
+        local ok, made = LrTasks.pcall(function()
+            return LrProgressScope { title = FetchProgress.TITLE }
+        end)
+        if not ok then
+            Log.warn('automatic fetch: no progress bar: %s', tostring(made))
+            return
+        end
+        scope = made
+        PhotoAccess.try('progress:setCancelable', function()
+            scope:setCancelable(true)
+        end)
+        Log.info('automatic fetch: progress bar shown (%s)', caption)
+    end
+    if not scope then
+        return
+    end
+    local cancelled = PhotoAccess.try('progress:isCanceled', function()
+        return scope:isCanceled()
+    end)
+    if cancelled then
+        store[FastFetch.PAUSE_KEY] = store[FastFetch.RUN_KEY]
+        endBar('cancelled: ' .. caption)
+        Log.info('automatic fetch: paused, because its progress bar was cancelled; «Fetch ready smart previews» or the '
+            .. 'next start of Lightroom goes on')
+    elseif action == 'finish' then
+        endBar(caption)
+    else
+        LrTasks.pcall(function()
+            scope:setCaption(caption)
+            scope:setPortionComplete(done, math.max(total, 1))
+        end)
+    end
+end
+
+-- Reads how many of the photos this session sent have a preview better than the placeholder in Lightroom's preview
+-- index. Returns count, total, or nil, nil plus a message.
+local function readPreviews(settings, catalogPath)
+    local statements, total = PreviewWatch.countSql(FastState.sentUuids())
+    if total == 0 then
+        return 0, 0
+    end
+    local path = PreviewWatch.indexPath(catalogPath)
+    if not path or not LrFileUtils.exists(path) then
+        return nil, nil, 'no preview index at ' .. tostring(path)
+    end
+    local tool, problem = AutoSend.tool(settings)
+    if not tool then
+        return nil, nil, problem
+    end
+    local count = 0
+    for _, sql in ipairs(statements) do
+        local text, err = SqliteRunner.query(tool.tool, path, sql, true, true)
+        local n = text and PreviewWatch.parseCount(text)
+        if not n then
+            return nil, nil, err or ('unexpected answer: ' .. tostring(text))
+        end
+        count = count + n
+    end
+    return count, total
+end
+
+-- After the photos of an import stopped coming: true while Lightroom's previews of them are still coming
+-- (PreviewWatch), so that the fetch in one go waits for Lightroom's own preview task.
+local function previewsPending(importing, settings, catalogPath)
+    if importing or not goState.holding then
+        PreviewWatch.reset(previews)
+        return false
+    end
+    local now = os.time()
+    if not previews.photosOverAt then
+        PreviewWatch.photosOver(previews, now)
+        Log.info('automatic fetch: the photos stopped coming; waiting for Lightroom\'s previews of them before '
+            .. 'fetching (at most %d minutes)', math.floor(PreviewWatch.LIMIT_SECONDS / 60))
+    end
+    if PreviewWatch.readDue(previews, now) then
+        local count, total, problem = readPreviews(settings, catalogPath)
+        PreviewWatch.observe(previews, count, total, now, problem)
+    end
+    local over, why = PreviewWatch.over(previews, now)
+    if over then
+        Log.info('automatic fetch: the previews stopped coming: %s', PreviewWatch.text(previews, why, now))
+        PreviewWatch.reset(previews)
+        return false
+    end
+    return true
 end
 
 -- The number of placed files not yet registered (for the status dialog), from the stored queue.
@@ -764,6 +910,14 @@ function FastFetch.step(importing, shouldStop)
             end
         end
     end
+    if FastFetch.paused(store) then
+        for _, w in pairs(watchers) do
+            w.stop = true
+        end
+        takeBackQueue(false, 0)
+        endBar('paused')
+        return 'paused (its progress bar was cancelled); «Fetch ready smart previews» or the next start goes on'
+    end
     local text
     local decision, retryAt = PendingJobs.decide(store, catalogPath, now)
     local serverWait = decision == 'wait'
@@ -797,7 +951,8 @@ function FastFetch.step(importing, shouldStop)
         end
     end
 
-    local holding = followImport(importing, settings)
+    local waitPreviews = previewsPending(importing, settings, catalogPath)
+    local holding = followImport(importing or waitPreviews, settings)
     if not holding and not serverWait then
         resolveInbox(settings, catalogPath)
         retryDue(settings)
@@ -850,6 +1005,7 @@ function FastFetch.step(importing, shouldStop)
         end
     end
     saveRegister(store, catalogPath)
+    showProgress(store, holding, serverWait and os.date('%H:%M', retryAt) or nil)
     if text == nil then
         if next(byId) ~= nil and settings.serverUrl == '' then
             text = 'no server URL is set; nothing done'
@@ -863,6 +1019,10 @@ function FastFetch.step(importing, shouldStop)
     if holding and #inbox > 0 then
         text = string.format('%s; %d smart preview(s) ready, fetched when the import is over', text or 'an import is '
             .. 'in progress', #inbox)
+    end
+    if previews.photosOverAt and previews.count then
+        text = string.format('%s; waiting for Lightroom\'s previews: %d of %d', text or 'an import is in progress',
+            previews.count, previews.total or 0)
     end
     local nextStep
     local busy = (not holding and not serverWait and #inbox > 0) or (queue ~= nil and not queue:isIdle())

@@ -47,6 +47,22 @@ function FastState.label(jobId)
     return FastState.labels[idText(jobId)]
 end
 
+-- The file UUIDs of the photos this session sent and whose jobs are still followed (for PreviewWatch), each once.
+function FastState.sentUuids()
+    local uuids, seen = {}, {}
+    for _, refs in pairs(FastState.placement) do
+        for _, data in pairs(refs) do
+            local uuid = type(data) == 'table' and data.fileUuid
+            if type(uuid) == 'string' and not seen[uuid] then
+                seen[uuid] = true
+                uuids[#uuids + 1] = uuid
+            end
+        end
+    end
+    table.sort(uuids)
+    return uuids
+end
+
 -- Forgets the placement data of a job (its fetch is done).
 function FastState.forgetJob(jobId)
     FastState.placement[idText(jobId)] = nil

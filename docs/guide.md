@@ -4,7 +4,7 @@ This guide takes you from nothing to a first smart preview that was built on you
 Lightroom Classic catalog. It assumes that you are comfortable with a NAS, Docker and a command line, and that you
 have never seen this project. When something does not work, see [troubleshooting.md](troubleshooting.md).
 
-> **State of the project: server 0.6.0, plug-in 0.8.2.** Verified with Lightroom Classic 15.6 on Windows and Adobe
+> **State of the project: server 0.6.0, plug-in 0.8.3.** Verified with Lightroom Classic 15.6 on Windows and Adobe
 > DNG Converter 17.2 under Wine 8.0 on a TrueNAS SCALE machine: the server builds smart previews (0.26–0.35 s per
 > 24 MP photo on a 14-core desktop CPU) and survives a restart in the middle of a job; its dashboard, the folder
 > queue, the automatic scan and the cache clean-up ran there with the real converter. In Lightroom, «Build smart
@@ -51,8 +51,9 @@ for a test job without Lightroom.
 
 ### What it never does
 
-- **It never writes to your catalog itself.** The plug-in reads the catalog with `sqlite3` in read-only mode and puts
-  files into the smart preview folder next to the catalog. Lightroom changes its catalog itself, through its own
+- **It never writes to your catalog itself.** The plug-in reads the catalog, and (since plug-in 0.8.3) Lightroom's
+  preview index `<catalog name> Previews.lrdata\previews.db` next to it, with `sqlite3` in read-only mode, and puts
+  files into the smart preview folder next to the catalog. It writes neither database. Lightroom changes its catalog itself, through its own
   plug-in interface: it registers those files, and, when you run **Import a folder without the dialog...**, it
   imports the folder you chose. The plug-in starts that import only after checking that your previous import was
   «Add», so the import only adds references to the files where they are
@@ -594,8 +595,9 @@ checks every DNG as a manual fetch does.
 With server 0.6.0 or newer, the plug-in keeps one request per job open that the server answers as soon as a smart
 preview is ready (at most 25 seconds, then the next one). An older server is asked at the chosen interval instead.
 **While an import is in progress, nothing is downloaded** (Lightroom reads the originals over the same link): the
-plug-in only sends, and the server builds meanwhile. When the import is over (two minutes without a new photo),
-everything ready is fetched in one go, «Downloads at once» files at a time; what becomes ready later, and the jobs of
+plug-in only sends, and the server builds meanwhile. The import counts as over when no new photo has come for two
+minutes and Lightroom's own previews of the new photos («Fetching Initial Previews») have stopped coming too (at most 15
+minutes later); then everything ready is fetched in one go, «Downloads at once» files at a time; what becomes ready later, and the jobs of
 **Build smart previews on the server** while no import runs, are fetched as they become ready. The files are placed
 without asking Lightroom anything; then Lightroom is asked to register them, with one call for all the photos of the
 go (one progress bar in Lightroom). Lightroom does not take a placed file by itself, so until then **Server status...**
@@ -603,6 +605,11 @@ counts it as placed and not registered. The log has a line per photo with the ti
 catalog -> sent 2.1 s)`, `placed (... ready -> placed 0.8 s; not registered yet)`, `registered (... ready ->
 registered 152 s)`, the totals per job, and lines for the import judged over, the fetch in one go (files, MB, seconds)
 and the registration call (seconds, answer).
+
+While there are more than a few smart previews to bring in, a progress bar **LRRP: smart previews** in Lightroom's
+activity area says how many are fetched, how many are still being built, or that the plug-in waits for Lightroom's
+import to end. Cancelling it pauses the automatic fetch until **Fetch ready smart previews** or the next start of
+Lightroom.
 
 An interrupted fetch finishes by itself; **nothing needs to be done** after one. When Lightroom quits in the middle,
 the next start goes on with what is missing, without downloading again what is already placed, and registers what

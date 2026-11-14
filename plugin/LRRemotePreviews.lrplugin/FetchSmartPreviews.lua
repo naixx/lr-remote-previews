@@ -1,14 +1,16 @@
 -- Library > Plug-in Extras > Fetch ready smart previews.
 --
 -- Asks which photos (the selected ones, or everything this catalog sent; the latter when nothing is selected), then
--- brings in what the server has finished: checked, written under a temporary name and renamed, never over an
--- existing file, registered with photo:buildSmartPreview(). The work is Fetcher's; this file asks for the scope.
+-- brings in what the server has finished: checked, written under a temporary name and renamed, never over an existing
+-- file, registered with photo:buildSmartPreview(). The work is Fetcher's; this file asks for the scope. It also lets
+-- the automatic fetch go on when a cancel of its progress bar paused it.
 local LrApplication = import 'LrApplication'
 local LrDialogs = import 'LrDialogs'
 local LrFunctionContext = import 'LrFunctionContext'
 local LrPrefs = import 'LrPrefs'
 local LrTasks = import 'LrTasks'
 
+local FastFetch = require 'FastFetch'
 local Fetcher = require 'Fetcher'
 local Log = require 'Log'
 local PhotoAccess = require 'PhotoAccess'
@@ -44,6 +46,7 @@ local function run(context)
         return
     end
     Log.info('fetch: scope %s', scope)
+    FastFetch.resume(LrPrefs.prefsForPlugin()) -- the automatic fetch goes on, if a cancel of its progress bar paused it
     Fetcher.runInteractive(context, TITLE, catalog, scope, photos)
 end
 

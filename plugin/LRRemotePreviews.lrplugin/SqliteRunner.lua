@@ -172,9 +172,10 @@ function SqliteRunner.locate(configured, pluginPath)
 end
 
 -- Runs one SELECT that SqliteCommand.readScript accepts (ImportQuery's, CatalogRead's) against the catalog, read-only.
--- Returns the output text, or nil plus a message. quiet: see run.
-function SqliteRunner.query(tool, catalogPath, sql, quiet)
-    local script, scriptError = SqliteCommand.readScript(catalogPath, sql)
+-- Returns the output text, or nil plus a message. quiet: see run. preview: the database is Lightroom's preview index
+-- and the SELECT one of PreviewWatch's (SqliteCommand.previewScript).
+function SqliteRunner.query(tool, catalogPath, sql, quiet, preview)
+    local script, scriptError = (preview and SqliteCommand.previewScript or SqliteCommand.readScript)(catalogPath, sql)
     if not script then
         return nil, scriptError
     end

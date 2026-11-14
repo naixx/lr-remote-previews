@@ -368,8 +368,11 @@ Also:
   newer from this catalog, at most 7 days ago, not yet done). The log says `automatic fetch: nothing pending for this
   catalog; the server is not asked` when there is none. Older jobs: **Fetch ready smart previews**.
 - **Nothing arrives while Lightroom imports** (plug-in 0.8.2): on purpose. While an import is in progress the
-  automatic fetch only sends; when no new photo has come for 2 minutes it fetches everything ready in one go (log:
-  `the import is taken as over`, then `the fetch in one go is done: ...`).
+  automatic fetch only sends; when no new photo has come for 2 minutes and (since 0.8.3) Lightroom's own previews of
+  them have stopped coming (at most 15 minutes later), it fetches everything ready in one go (log: `the photos stopped
+  coming`, `the previews stopped coming: ...`, `the import is taken as over`, then `the fetch in one go is done: ...`).
+- **The automatic fetch stopped after its progress bar was cancelled** (0.8.3): on purpose; the log says `paused,
+  because its progress bar was cancelled`. Run **Fetch ready smart previews**, or start Lightroom again.
 - **Smart previews are placed but Lightroom does not show them yet**: the automatic fetch places the files first (log:
   `placed (...; not registered yet)`) and then asks Lightroom to register them, since 0.8.2 with one call for all (log:
   `one registration call (catalog:buildSmartPreviews) for ... photo(s) took ...`, then `registered (...)` per photo).
