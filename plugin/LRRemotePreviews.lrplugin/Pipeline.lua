@@ -17,6 +17,7 @@ local FileIds = require 'FileIds'
 local Jobs = require 'Jobs'
 local Lease = require 'Lease'
 local Log = require 'Log'
+local PendingJobs = require 'PendingJobs'
 local PhotoAccess = require 'PhotoAccess'
 local RunSummary = require 'RunSummary'
 local Selection = require 'Selection'
@@ -29,8 +30,9 @@ local Pipeline = {}
 
 Pipeline.LOG_HINT = 'Every photo is listed in LRRemotePreviews.log in Lightroom\'s log folder (Lightroom Classic '
     .. '15.6 on Windows: %LOCALAPPDATA%\\Adobe\\Lightroom\\Logs\\LrClassicLogs).'
-Pipeline.FETCH_HINT = 'When they are ready, use Library > Plug-in Extras > Fetch ready smart previews, or turn on '
-    .. 'the automatic fetch in File > Plug-in Manager > LR Remote Previews.'
+Pipeline.FETCH_HINT = 'The automatic fetch brings their smart previews in by itself when they are ready (it is set in '
+    .. 'File > Plug-in Manager > LR Remote Previews); Library > Plug-in Extras > Fetch ready smart previews does it at '
+    .. 'once.'
 Pipeline.LOOKUP_CHUNK = 1000 -- files per lookup request (at most maxItemsPerJob)
 
 local counter = 0
@@ -115,8 +117,8 @@ function Pipeline.resolveFileIds(settings, catalogPath, photos, summary, ui)
     return assigned.entries
 end
 
--- The first steps of sending (shared by «Send to the server» and «Build smart previews on the server»): ask the
--- server whether it can build, sort the photos, read their file UUIDs. photos: LrPhoto objects.
+-- The first steps of «Build smart previews on the server»: ask the server whether it can build, sort the photos, read
+-- their file UUIDs. photos: LrPhoto objects.
 -- Returns { info, entries }, or nil plus { message, style } to show, or nil plus { cancelled = true }.
 function Pipeline.prepareSend(settings, catalog, photos, summary, ui)
     local mappings = Settings.mappings(settings)
@@ -162,10 +164,10 @@ function Pipeline.prepareSend(settings, catalog, photos, summary, ui)
     return { info = info, entries = entries }
 end
 
--- The last step of sending (shared by «Send to the server» and «Import a folder without the dialog...»): one job per
--- maxItemsPerJob photos of prepared (Pipeline.prepareSend's result), each with this catalog's clientId. Records every
--- photo in summary and the log, and stops at the first job the server does not create. label: the jobs' label (nil:
--- Jobs.LABEL); a run of several jobs adds '(part i of n)'.
+-- The last step of «Build smart previews on the server»: one job per maxItemsPerJob photos of prepared
+-- (Pipeline.prepareSend's result), each with this catalog's clientId and marked pending (PendingJobs), so that the
+-- background fetch asks for it until its files are in. Records every photo in summary and the log, and stops at the
+-- first job the server does not create. label: the jobs' label (nil: Jobs.LABEL); several jobs add '(part i of n)'.
 -- Returns { jobIds = { id, ... }, ready = n (built already), rejected = n, failedParts = message | nil }.
 function Pipeline.sendJobs(settings, catalogPath, prepared, summary, ui, label)
     local entries = prepared.entries
@@ -203,6 +205,7 @@ function Pipeline.sendJobs(settings, catalogPath, prepared, summary, ui, label)
         end
         local jobId = created.job.id
         result.jobIds[#result.jobIds + 1] = jobId
+        PendingJobs.add(LrPrefs.prefsForPlugin(), catalogPath, { jobId }, os.time())
         summary.sent = summary.sent + #part
         local byRef = {}
         for _, entry in ipairs(part) do

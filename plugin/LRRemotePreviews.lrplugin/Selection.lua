@@ -92,21 +92,23 @@ local function reasonFor(photo, options)
         return 'hasSmartPreview'
     end
     local extension = Selection.extension(photo.path)
-    if not extension or not options.extensionSet[extension] then
+    if not extension or not (options.anyExtension or options.extensionSet[extension]) then
         return 'unsupportedFormat', extension or '(none)'
     end
     local mapped, why = PathMap.map(photo.path, options.mappings)
     if not mapped then
         return 'noMapping', why
     end
-    if not options.availableRoots[mapped.rootId] then
+    if not options.anyRoot and not options.availableRoots[mapped.rootId] then
         return 'rootUnavailable', mapped.rootId
     end
     return nil, mapped
 end
 
 -- Sorts the photos. options: { extensions = { '.arw', ... } (lower case), mappings = { ... },
--- availableRoots = { [id] = true } }.
+-- availableRoots = { [id] = true } }. With anyExtension = true and anyRoot = true instead of extensions and
+-- availableRoots, only what is known without the server is checked (the automatic send does that first, so that a
+-- round whose new photos all fail those checks does not contact the server).
 -- Returns { eligible = { photo, ... }, skipped = { { photo = ..., reason = ..., detail = ... }, ... },
 --           counts = { [reason] = n } }.
 -- An eligible photo gets rootId and relativePath. Photos keep their order. Of several photos with the same
@@ -119,8 +121,10 @@ function Selection.classify(photos, options)
     end
     local settings = {
         extensionSet = extensionSet,
+        anyExtension = options.anyExtension == true,
         mappings = options.mappings or {},
         availableRoots = options.availableRoots or {},
+        anyRoot = options.anyRoot == true,
     }
 
     local result = { eligible = {}, skipped = {}, counts = {} }

@@ -3,6 +3,7 @@
 Status: accepted (2026-11-14). It makes the wording of 0001 and 0005 about catalog writes exact; their decisions
 stand. Amended the same day for plug-in 0.6.0: photos now enter the catalog through Lightroom's own import, not
 through `catalog:addPhoto` (see «Amendment» at the end; the sections before it are the decision of plug-in 0.5.0).
+Since plug-in 0.7.0 the command no longer waits for the import or sends anything itself (marked in the amendment).
 
 ## Context
 
@@ -80,11 +81,14 @@ and a folder on a NAS reached over Wi-Fi that held 1384 raw files and 1384 JPEGs
   name), it starts nothing. The dialog shows the preview mode and whether smart previews are on.
 - With «Add», the import only adds references to the files where they are. The plug-in still writes nothing to the
   catalog itself and never opens, changes, moves or deletes a file; it does not even list the folder. After the
-  trigger it only waits: `LrTasks.sleep` between reads of the catalog by `sqlite3` processes (`LrTasks.execute`).
+  trigger it shows a short notice and ends (0.7.0; 0.6.0 waited for the import, reading the catalog every few seconds,
+  and then sent the new photos itself).
 - `addPhoto`, the listing and the batches of 0.5.0 are removed.
-- This widens what 0002 reads: besides file UUIDs, the plug-in reads the import settings above and, while it waits,
-  the photos and imports added since the start (`Adobe_images`, `AgLibraryFile`, `AgLibraryFolder`,
-  `AgLibraryRootFolder`, `AgLibraryImport`), read-only and one plain `SELECT` per run, as in 0002.
+- This widens what 0002 reads: besides file UUIDs, the plug-in reads the import settings above and the largest photo
+  and import ids (`Adobe_images`, `AgLibraryImport`), so that the automatic send counts every photo of the import as
+  new, read-only and one plain `SELECT` per run, as in 0002.
+- Sending the photos of the import is left to the automatic send (one checkbox in the dialog shows and sets it). It
+  sends what is new in each of its rounds, however long the import takes (0.7.0).
 - The documentation says it this way: the plug-in never writes to your catalog itself; Lightroom changes it through
   its own plug-in interface when it registers a smart preview the plug-in placed, and when it imports a folder with
   the plug-in's command after the plug-in checked that the previous import was «Add».
@@ -96,9 +100,11 @@ and a folder on a NAS reached over Wi-Fi that held 1384 raw files and 1384 JPEGs
   with files of the folder that are in the catalog already, and which previews it builds for a preview setting other
   than «Embedded & Sidecar» (code `bthm`; the meaning of other codes such as `sbig` was not established). A develop or
   metadata preset of the previous import is applied again; the dialog says so (catalog settings only).
-- The plug-in does not know when Lightroom's import has finished; it takes it as finished when the count of new
-  photos under the folder has not changed for 20 seconds. An import that pauses longer is sent in part; the rest can
-  be sent with «Send to the server».
-- Whether the trigger returns at once, and whether Lightroom commits photos to the database as it imports them (so
-  that the reads see them come), is not known; the command logs each step with its time to find out.
+- The plug-in does not know when Lightroom's import has finished. 0.6.0 took it as finished when the count of new
+  photos had not changed for 20 seconds; its one run (Lightroom Classic 15.6, a network folder of 1384 raw files and
+  1384 JPEGs, 9 photos in the catalog already) showed why that fails: the trigger returned after 0.16 s, Lightroom
+  scanned the folder for about 2 min 20 s and then committed photos in bursts of about a hundred every 22–26 s (1375
+  in 288 s), so the wait ended between two bursts at 425 photos. Preparing the send of those 425 took 226 s
+  (`findPhotoByPath` alone 45.8 s) because Lightroom was importing meanwhile. The JPEGs were recorded as sidecars and
+  the 9 photos were left alone. 0.7.0 therefore waits for nothing and lets the automatic send pick up each burst.
 - Taking the photos out stays Lightroom's job, as after any import: Photo > Remove Photos, «Remove from Lightroom».

@@ -5,6 +5,11 @@
 -- The decisions are AutoSendPlan's (pure, tested); this file connects them to the SDK. Every SDK call is protected:
 -- a failure ends the round with a text for the log, and the next round tries again.
 --
+-- It finds work in the catalog itself and contacts the server only when it has photos to send: a round with no new
+-- photo makes no request, and neither does one whose new photos all fail the checks that need no server (virtual
+-- copies, videos, smart preview present, no path mapping, a file type the server did not take when last asked).
+-- A job it creates is pending (PendingJobs), so the background fetch asks for it until its files are in.
+--
 -- Finding new photos. The SDK has no import event, findPhotos has no criterion for the import date or for smart
 -- previews, and the «Previous Import» collection (catalog.kPreviousImport) can only be reached by making it the
 -- user's active source (catalog:setActiveSources), which a background task must not do. So:
@@ -20,6 +25,7 @@ local LrTasks = import 'LrTasks'
 local AutoSendPlan = require 'AutoSendPlan'
 local FileIds = require 'FileIds'
 local Jobs = require 'Jobs'
+local PendingJobs = require 'PendingJobs'
 local PhotoAccess = require 'PhotoAccess'
 local Pipeline = require 'Pipeline'
 local Selection = require 'Selection'
@@ -108,42 +114,57 @@ local function saveState(prefs, catalogPath, state)
     end
 end
 
--- Sends what the round picked; returns the text for the log. Holds the fetch lock (the caller took it).
-local function sendPicked(settings, catalogPath, state, picked, isCanceled)
-    local prefs = LrPrefs.prefsForPlugin()
-    local info, infoProblem = ServerClient.fetchInfo(settings)
-    if not info then
-        return 'not done: ' .. infoProblem.message
+-- The photos of a pick, read, without the virtual copies (they are no new files): candidates, the reasons left out.
+local function readPicked(picked, count)
+    local photos, ids = {}, {}
+    for i = 1, count do
+        photos[i], ids[i] = picked.photos[i].photo, picked.photos[i].id
     end
-    local mappings = Settings.mappings(settings)
-    local serverProblem = Selection.serverProblem(info, mappings)
-    if serverProblem then
-        return 'not done: ' .. serverProblem
-    end
-    local maxItems = info.capabilities.maxItemsPerJob
-    picked = AutoSendPlan.limit(picked, maxItems)
-
-    -- The photos, in ascending id order; virtual copies are not new files. Photos that «Import a folder without the
-    -- dialog...» sent itself are left out (AutoSendPlan.recordSent) and not read further.
-    local sentByCommand = AutoSendPlan.sentByCommand(prefs, catalogPath)
-    local leftOut, photos, photoIds, ids = {}, {}, {}, {}
-    for i, entry in ipairs(picked.photos) do
-        ids[i] = entry.id
-        if sentByCommand[entry.id] then
-            add(leftOut, 'sentByCommand')
-        else
-            photos[#photos + 1], photoIds[#photoIds + 1] = entry.photo, entry.id
-        end
-    end
-    local described = PhotoAccess.describeAll(photos)
-    local candidates = {}
-    for i, photo in ipairs(described) do
-        photo.autoId = photoIds[i]
+    local leftOut, candidates = {}, {}
+    for i, photo in ipairs(PhotoAccess.describeAll(photos)) do
+        photo.autoId = ids[i]
         if photo.isVirtualCopy then
             add(leftOut, 'virtualCopy')
         else
             candidates[#candidates + 1] = photo
         end
+    end
+    return ids, candidates, leftOut
+end
+
+-- Sends what the round picked; returns the text for the log. Holds the fetch lock (the caller took it).
+local function sendPicked(settings, catalogPath, state, picked, isCanceled)
+    local prefs = LrPrefs.prefsForPlugin()
+    local mappings = Settings.mappings(settings)
+
+    -- First what can be told without the server (the photo itself, the path mappings, and the file types the server
+    -- took when it was last asked; any type when it never was). When that leaves nothing, the server is not asked.
+    local ids, candidates, leftOut = readPicked(picked, #picked.photos)
+    local known = AutoSendPlan.knownExtensions(prefs)
+    local locally = Selection.classify(candidates, { extensions = known, anyExtension = known == nil,
+        mappings = mappings, anyRoot = true })
+    if #locally.eligible == 0 then
+        for _, skipped in ipairs(locally.skipped) do
+            add(leftOut, skipped.reason)
+        end
+        saveState(prefs, catalogPath, AutoSendPlan.settle(state, ids, {}, picked.seen, os.time()))
+        return AutoSendPlan.roundText({ leftOut = leftOut, more = picked.more, waiting = picked.waiting })
+            .. ' (the server was not asked)'
+    end
+
+    local info, infoProblem = ServerClient.fetchInfo(settings)
+    if not info then
+        return 'not done: ' .. infoProblem.message
+    end
+    local serverProblem = Selection.serverProblem(info, mappings)
+    if serverProblem then
+        return 'not done: ' .. serverProblem
+    end
+    AutoSendPlan.rememberExtensions(prefs, info.capabilities.extensions)
+    local maxItems = info.capabilities.maxItemsPerJob
+    if maxItems and #picked.photos > maxItems then
+        picked = AutoSendPlan.limit(picked, maxItems)
+        ids, candidates, leftOut = readPicked(picked, #picked.photos)
     end
     local sorted = Selection.classify(candidates, { extensions = info.capabilities.extensions, mappings = mappings,
         availableRoots = Selection.availableRoots(info) })
@@ -207,6 +228,8 @@ local function sendPicked(settings, catalogPath, state, picked, isCanceled)
                 .. created.job.id .. ' was cancelled'
         end
         -- One log line per round (the loop writes it); the job's items can be looked up on the server by its id.
+        -- The job is pending now: the background fetch asks the server for it until its files are in.
+        PendingJobs.add(prefs, catalogPath, { created.job.id }, os.time())
         outcome.sent, outcome.jobId, outcome.ready = #send, created.job.id, 0
         for _, item in ipairs(created.items) do
             if item.state == 'ready' then

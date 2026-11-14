@@ -1,5 +1,5 @@
--- Counts what happened to every photo in one run of a command (send, fetch, build and wait), and writes the
--- dialog texts and the per-photo log lines. Pure Lua 5.1: no Lightroom imports.
+-- Counts what happened to every photo in one run of a command (send, fetch), and writes the dialog texts, the short
+-- notices and the per-photo log lines. Pure Lua 5.1: no Lightroom imports.
 local RunSummary = {}
 RunSummary.__index = RunSummary
 
@@ -195,9 +195,9 @@ function RunSummary:text(context)
     return table.concat(lines, '\n')
 end
 
--- The text after «Send to the server». context: { jobIds = { n, ... }, ready = n (items the server had built
--- already), rejected = n (with codes recorded as outcome 'rejected'), failedParts = message | nil (some jobs could
--- not be created), fetchHint = text, logHint = text }.
+-- The text after «Build smart previews on the server». context: { jobIds = { n, ... }, ready = n (items the server
+-- had built already), rejected = n (with codes recorded as outcome 'rejected'), failedParts = message | nil (some
+-- jobs could not be created), fetchHint = text, logHint = text }.
 function RunSummary:sendText(context)
     local lines = {}
     local function add(line)
@@ -241,6 +241,20 @@ function RunSummary:sendText(context)
         add(context.logHint)
     end
     return table.concat(lines, '\n')
+end
+
+-- True when a send left something the user should see in a dialog: photos left out, refused by the server, or a part
+-- not sent. context: as for sendText.
+function RunSummary:sendNeedsAttention(context)
+    local skipped = self:skipLines()
+    return skipped > 0 or (context.rejected or 0) > 0 or context.failedParts ~= nil
+end
+
+-- The short notice after a send that needs no dialog. autoFetch: whether the automatic fetch is on.
+function RunSummary:sentNotice(autoFetch)
+    return plural(self.sent, 'photo', 'photos') .. ' sent to the server; '
+        .. (autoFetch and 'their smart previews arrive by themselves'
+            or 'fetch their smart previews with «Fetch ready smart previews» when they are ready')
 end
 
 -- One log line for a photo: 'IMG_0001.ARW: delivered (DNG 1.7.0.0, <path>)' (Pipeline.place puts the path into the

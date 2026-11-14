@@ -1,4 +1,4 @@
--- Library > Plug-in Extras > Diagnostics: smart preview report (all photos).
+-- Help > Plug-in Extras > Diagnostics: smart preview report (all photos).
 -- Writes what Lightroom itself says about every photo's smart preview to a tab-separated file next to the
 -- catalog: file name, the SDK's "uuid" (the image id, not the file UUID that names the DNG), smart preview
 -- size and path (empty when Lightroom sees no smart preview). Read-only: it only asks for metadata.

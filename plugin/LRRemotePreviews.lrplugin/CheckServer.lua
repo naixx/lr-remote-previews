@@ -1,4 +1,4 @@
--- Library > Plug-in Extras > Check the server against Lightroom.
+-- Help > Plug-in Extras > Check the server against Lightroom.
 --
 -- For ONE selected raw photo that already has a smart preview built by Lightroom itself: reads that smart preview,
 -- gets the server's DNG for the same raw file (looked up; built by a one-item job when the server does not have it,

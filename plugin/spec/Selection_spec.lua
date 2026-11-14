@@ -130,4 +130,19 @@ describe('Selection.classify', function()
     it('copes with an empty selection', function()
         assert.are.same({ eligible = {}, skipped = {}, counts = {} }, Selection.classify({}, options))
     end)
+
+    it('checks only what needs no server with anyExtension and anyRoot', function()
+        local result = Selection.classify({
+            photo('a.jpg', 'Z:\\s\\a.jpg'),
+            photo('b.arw', 'Y:\\Offline\\b.arw'),
+            photo('c.arw', 'C:\\Other\\c.arw'),
+            photo('d.arw', 'Z:\\s\\d.arw', { smartPreviewPath = 'x' }),
+            photo('README', 'Z:\\s\\README'),
+        }, { anyExtension = true, anyRoot = true, mappings = MAPPINGS })
+        assert.are.same({ 'a.jpg', 'b.arw' }, { result.eligible[1].fileName, result.eligible[2].fileName })
+        assert.are.same({ noMapping = 1, hasSmartPreview = 1, unsupportedFormat = 1 }, result.counts)
+        result = Selection.classify({ photo('a.jpg', 'Z:\\s\\a.jpg') }, { extensions = { '.arw' }, anyRoot = true,
+            mappings = MAPPINGS })
+        assert.are.same({ unsupportedFormat = 1 }, result.counts)
+    end)
 end)

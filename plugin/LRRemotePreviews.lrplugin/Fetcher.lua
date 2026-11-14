@@ -11,6 +11,7 @@ local CatalogState = require 'CatalogState'
 local FetchPlan = require 'FetchPlan'
 local Log = require 'Log'
 local PathMap = require 'PathMap'
+local PendingJobs = require 'PendingJobs'
 local PhotoAccess = require 'PhotoAccess'
 local Pipeline = require 'Pipeline'
 local RunSummary = require 'RunSummary'
@@ -132,17 +133,16 @@ local function photoForItem(catalog, item, mappings, cache)
 end
 
 -- For everything this catalog sent. getInfo() -> info | nil, problem is called only when there is something to
--- fetch (the automatic fetch asks every minute, mostly for nothing). Returns
---   { summary, text, troubled, cancelled, nothingNew = bool } or { problem = message }.
+-- fetch. Afterwards the pending jobs (PendingJobs) that are done are taken off that list. Returns
+--   { summary, text, troubled, cancelled, nothingNew = bool, pending = jobs still pending } or { problem = message }.
 function Fetcher.everything(settings, getInfo, catalog, ui, quiet)
     PhotoAccess.resetWarnings()
     local prefs = LrPrefs.prefsForPlugin()
     local catalogPath = catalog:getPath()
     local clientId = CatalogState.clientId(prefs, catalogPath)
     if not clientId then
-        return { problem = 'This catalog has not sent anything to the server yet (only «Send to the server» and '
-            .. '«Build smart previews on the server» of version 0.3.0 or newer mark a job as this catalog\'s).',
-            nothingNew = true }
+        return { problem = 'This catalog has not sent anything to the server yet (only jobs sent by plug-in 0.3.0 or '
+            .. 'newer are marked as this catalog\'s).', nothingNew = true }
     end
     ui.caption('Asking the server for this catalog\'s jobs')
     local jobs, listProblem = ServerClient.listJobs(settings, clientId, quiet)
@@ -178,6 +178,19 @@ function Fetcher.everything(settings, getInfo, catalog, ui, quiet)
     local function finish(result)
         result.summary = summary
         CatalogState.saveJobs(prefs, catalogPath, records)
+        -- Pending jobs that are done (no longer active, every ready item dealt with) or no longer listed stop
+        -- being pending; the background fetch then stops asking for them.
+        local listedIds, doneIds = {}, {}
+        for _, job in ipairs(jobs) do
+            if job.clientId == clientId then
+                local id = string.format('%d', job.id)
+                local record = records[id]
+                listedIds[id] = true
+                doneIds[id] = job.state ~= 'active' and record ~= nil and record.doneSeq ~= nil
+                    and record.doneSeq == job.seq or nil
+            end
+        end
+        result.pending = PendingJobs.settle(prefs, catalogPath, listedIds, doneIds, os.time())
         local header = string.format('This catalog\'s jobs on the server: %d (%d read now, %d fully fetched '
             .. 'before, %d with nothing ready yet). %d finished file(s) looked at.', listed, #plan.read, plan.done,
             plan.waiting, summary.selected)

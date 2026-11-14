@@ -1,4 +1,4 @@
--- Library > Plug-in Extras > Diagnostics: try buildSmartPreview on selected photos.
+-- Help > Plug-in Extras > Diagnostics: try buildSmartPreview on selected photos.
 -- Calls photo:buildSmartPreview() on the selected photos (1 to 20) and writes what it returned ('created',
 -- 'existed' or 'failed') with the smart preview info before and after to a tab-separated file next to the
 -- catalog. In a real catalog it does what Library > Previews > Build Smart Previews does for those photos.

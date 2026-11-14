@@ -200,7 +200,8 @@ function provider.sectionsForTopOfDialog(f, propertyTable)
         f:checkbox { title = 'Fetch ready smart previews while Lightroom runs, every', value = bind 'autoFetch' },
         f:popup_menu { items = intervalItems, value = bind 'autoFetchInterval' },
     }
-    rows[#rows + 1] = note('Quietly, for everything this catalog sent: no dialogs, a line in the log. Off by default.')
+    rows[#rows + 1] = note('Quietly: no dialogs, a line in the log. On by default. It asks the server only while this')
+    rows[#rows + 1] = note('catalog waits for smart previews it sent; otherwise it makes no request at all.')
     rows[#rows + 1] = f:row {
         label 'Automatic send:',
         f:checkbox { title = 'Send new photos to the server by themselves, at the same interval',

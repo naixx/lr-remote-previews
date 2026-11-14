@@ -18,7 +18,8 @@ guide), so some of the plug-in messages below have only been seen in tests.
 | The dashboard | Whether the converter is installed, whether each root is available, the queue, processes busy, the rate, today's failures | `http://nas.local:8787/` (only the Overview page in 0.3.0) |
 | The API | The items of a job with their paths and error messages | See below |
 
-The items of a job with their errors (the job id is in the summary, «job 7», and in **Server status...**):
+The items of a job with their errors (the job id is in the plug-in's log, `send: job 7 created with 40 item(s)`, in
+the dialog after a send when it shows one, and in **Server status...**):
 
 ```sh
 curl -H "Authorization: Bearer <token>" "http://nas.local:8787/api/v1/jobs?limit=5"
@@ -217,7 +218,7 @@ the message `No such file` or `The file cannot be read`.
 
 ## `converter_not_installed`
 
-**Send to the server** and **Build smart previews on the server** stop at once with `Adobe DNG Converter is not
+**Build smart previews on the server** stops at once with `Adobe DNG Converter is not
 installed on the server, so it cannot build smart previews. See the server documentation for how to install it.` If
 the converter disappears between that check and the job, the job is refused: `The server cannot build smart previews:
 Adobe DNG Converter is not installed there. The server answered HTTP 409. Server says: Adobe DNG Converter is not
@@ -319,7 +320,7 @@ Go through these in order.
    - `checkFailed (…)`: nothing was placed; see [the next section](#discarded-the-file-did-not-pass-the-check).
 2. **Is the file there?** The log line names it:
    `C:\Photos\Main\Main Smart Previews.lrdata\6\6282\62823DFE-E7D3-40FF-938C-518FDECC6CF6.dng`.
-3. **What does Lightroom report?** Run **Library > Plug-in Extras > Diagnostics: smart preview report (all photos)**.
+3. **What does Lightroom report?** Run **Help > Plug-in Extras > Diagnostics: smart preview report (all photos)**.
    It writes `smart-preview-report-<time>.txt` next to the catalog. An empty path for the photo means Lightroom sees
    no smart preview for it.
 4. **Is it the right catalog?** The plug-in writes into `<catalog name> Smart Previews.lrdata` next to the catalog that
@@ -348,7 +349,7 @@ and never written; the log line says why:
 
 | Message | Cause, and what to do |
 |---|---|
-| `This catalog has not sent anything to the server yet (only «Send to the server» and «Build smart previews on the server» of version 0.3.0 or newer mark a job as this catalog's).` | Jobs sent by plug-in 0.2.0 or by `tools/submit_job.py` belong to no catalog. Fetch **Selected photos** instead |
+| `This catalog has not sent anything to the server yet (only jobs sent by plug-in 0.3.0 or newer are marked as this catalog's).` | Jobs sent by plug-in 0.2.0 or by `tools/submit_job.py` belong to no catalog. Fetch **Selected photos** instead |
 | `Nothing new to fetch.` | Everything this catalog sent was fetched already, or nothing is ready yet. The note `On the server: <n> photo(s) of this catalog queued or being built, <m> failed (Server status can retry failed ones).` tells which |
 | `Still being built on the server` | Wait, and fetch again |
 | `Not on the server (never sent, or the original changed since; send them again)` | The server has no DNG for the file as it is now. It was never sent, it was sent under another root or path, or the file changed since ([source_changed](#items-fail-with-source_changed)). Send it again |
@@ -361,7 +362,11 @@ Also:
 - The server deletes jobs 30 days after they finished. Their DNGs stay in the cache: **Selected photos** still finds
   them.
 - Only the newest 200 jobs of a catalog are looked at.
-- **Server status...** says how many smart previews are ready and not fetched by this catalog yet.
+- **Server status...** (Help > Plug-in Extras) says how many smart previews are ready and not fetched by this catalog
+  yet.
+- **The automatic fetch brings nothing**: it asks the server only for jobs it waits for (sent by plug-in 0.7.0 or
+  newer from this catalog, at most 7 days ago, not yet done). The log says `automatic fetch: nothing pending for this
+  catalog; the server is not asked` when there is none. Older jobs: **Fetch ready smart previews**.
 
 ## Builds are slow
 
@@ -395,19 +400,19 @@ After you change `LRRP_WORKERS` or `LRRP_BATCH_SIZE` in `compose.yaml`, run `doc
 - **Nothing is lost by a restart.** Jobs and items are kept in the server's database; after a restart, the items that
   were being built go back into the queue and are built again (tested). What happens to a converter run during a
   sleep of the machine has not been tested.
-- **Build smart previews on the server** stops after ten failed requests in a row and says
-  `Stopped: Cannot reach the server: <network error>. Job 7 was left on the server; what it builds stays in its
-  cache, so «Fetch ready smart previews» brings those files later.`
-- **The automatic fetch** logs `automatic fetch: not done: …` and tries again at the next interval.
+- **The automatic fetch** logs `automatic fetch: not done: … (next try at 14:05)` and waits 1, 2, 5, 10, 30 minutes,
+  then an hour between tries; it shows no dialog. With nothing pending it makes no request at all, so it neither
+  wakes a sleeping NAS nor keeps it awake.
 - **Keeping the NAS awake.** Server 0.3.0 has no signal for that. Stage 3 adds `"busy": true` to `GET /healthz` while
   the queue runs. Until then the dashboard's Queue card says «Working» or «Idle», and `GET /api/v1/status` (with the
   token) has the counts `queue.queued` and `queue.building`; keep the NAS awake by its own means while they are not 0.
 
 ## Import a folder without the dialog
 
-The command is new in plug-in 0.6.0 and has not been run in Lightroom yet. Its log lines start with `import folder:`;
-they record when the import was started and when the call returned, every read of the catalog with its count, every
-photo as it appeared, and when the import was taken as finished.
+Plug-in 0.6.0's version ran once in Lightroom; 0.7.0's shorter one has not. Its log lines start with
+`import folder:`; they record the settings of the previous import, the automatic send's setting, when Lightroom's
+import was started and when the call returned. The command does not wait for the import: Lightroom imports with its
+own progress bars, and the automatic send sends the new photos, if it is on.
 
 - **It refuses to start: «The previous import in this catalog was not «Add»»** (or «… made a second copy», «… no
   record of a previous import», «… incomplete»). The command starts Lightroom's import with the settings of the
@@ -418,19 +423,12 @@ photo as it appeared, and when the import was taken as finished.
   be read; see «sqlite3 is not found or fails» above. Without that check the plug-in starts no import.
 - **«The settings of the previous import changed since the dialog»**: an import ran between the dialog and the start.
   Run the command again.
-- **«No photo of this folder appeared in the catalog within 5 minutes»**: Lightroom found nothing to import (for
-  example when every file is in the catalog already), the import has not started, or Lightroom writes the photos to
-  the catalog only at the end of a long import (not known yet; the log's reads show what the catalog held). Look at
-  Lightroom's own progress at the top left; send the photos later with **Send to the server** if they arrive.
-- **Fewer photos than expected were sent**: the plug-in takes the import as finished when no new photo came for 20
-  seconds. Photos imported after that were not sent by the command; select them and use **Send to the server** (with
-  the automatic send on, it sends them, since the command did not record them).
-- **«Smart previews are already being fetched by «Import a folder without the dialog»»** in another command: the
-  command holds the fetch lock while it waits for the import and sends, so that the automatic send cannot send the
-  same photos. Wait until it has finished, or cancel its waiting.
-- **Imported, but not sent to the server**: the summary says why (no server set up, the folder under no path mapping,
-  the server could not build, the waiting cancelled or stopped, a file type the server does not take). Select the
-  photos and use **Send to the server**.
+- **Nothing seems to happen after the notice**: in the one run, Lightroom scanned a network folder of 2768 files for
+  about 2 min 20 s before the first photo appeared, then added them in bursts of about a hundred every 22–26 s. Look
+  at Lightroom's own progress at the top left.
+- **Imported, but not sent to the server**: the automatic send was off, or the line under the checkbox named a reason
+  (no server set up, the folder under no path mapping). The automatic send's log lines start with `automatic send:`
+  and say what it sent and what it left out, and why. Select the photos and use **Build smart previews on the server**.
 
 ## After an update of Lightroom
 

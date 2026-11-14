@@ -1,4 +1,4 @@
--- Library > Plug-in Extras > Diagnostics: new photos for the automatic send.
+-- Help > Plug-in Extras > Diagnostics: new photos for the automatic send.
 -- Shows what the automatic send would see now, by both ways it can find new photos (AutoSend.lua), so that what the
 -- SDK does not document can be checked in Lightroom: that photos added by an import get larger catalog ids
 -- (photo.localIdentifier) than every photo before them, how long catalog:getAllPhotos() and the scan take, and

@@ -16,23 +16,19 @@
 --   looked  the time (os.time) the state last changed; the fallback finder looks back from there
 -- The first round for a catalog only records the mark: what is in the catalog when the option is switched on is
 -- never sent. Switching the option off forgets everything (AutoSendPlan.forget), so switching it on again starts
--- afresh.
+-- afresh. «Import a folder without the dialog...» (since version 0.7.0), when its checkbox switches the option on,
+-- records the mark itself before it starts Lightroom's import (AutoSendPlan.prime with the catalog's largest id), so
+-- that the photos of that import are sent however late the first round runs.
 --
--- Photos that «Import a folder without the dialog...» (version 0.6.0; 0.5.0's «Add a folder without previews...»
--- before it) sends itself are left out by the automatic send, so that no photo is sent twice when both are on. While
--- that command waits for Lightroom's import and sends, it holds the fetch lock, so no round of the automatic send can
--- send anything; right before it sends, it records the photos' catalog ids under AutoSendPlan.SENT_KEY
--- (AutoSendPlan.recordSent), and the rounds after it skip them. That record has one writer, the command; it drops the
--- ids the automatic send can no longer take (at or below its mark), and, when the catalog has no state (the automatic
--- send is off or has not had its first round, whose mark will cover every photo there is), the ids of earlier runs.
+-- An import that arrives in bursts over many minutes (seen in Lightroom Classic 15.6: about a hundred photos every
+-- 22-26 seconds) needs nothing special: each round takes what an earlier round saw, at most LIMIT photos.
 local Json = require 'Json'
 local PathMap = require 'PathMap'
 
 local AutoSendPlan = {}
 
 AutoSendPlan.KEY = 'autoSendState'
-AutoSendPlan.SENT_KEY = 'addedAndSent'
-AutoSendPlan.MAX_SENT = 50000 -- catalog ids kept per catalog in that record, at most (the largest are kept)
+AutoSendPlan.EXTENSIONS_KEY = 'serverExtensions' -- the file types the server took when it was last asked (JSON)
 AutoSendPlan.LIMIT = 500 -- photos looked at per round, at most (and at most the server's maxItemsPerJob)
 AutoSendPlan.MAX_TRIES = 3 -- rounds a photo may wait for its file record before it is left out for good
 AutoSendPlan.YIELD_EVERY = 500 -- photos between two yields while scanning the catalog
@@ -53,7 +49,6 @@ AutoSendPlan.LEFT_OUT = {
     { 'sameFile', 'same file as another photo' },
     { 'fileIdMismatch', 'the catalog database names another file' },
     { 'gaveUp', 'no file record in the catalog database after ' .. AutoSendPlan.MAX_TRIES .. ' rounds' },
-    { 'sentByCommand', 'imported and sent by «Import a folder without the dialog»' },
 }
 
 local function isId(value)
@@ -101,78 +96,35 @@ function AutoSendPlan.save(store, catalogPath, state)
     return true
 end
 
--- Forgets the states of all catalogs (the option was switched off), and the photos «Import a folder without the
--- dialog...» sent: when the option is switched on again, its first round's mark covers all of them.
+-- Forgets the states of all catalogs (the option was switched off).
 function AutoSendPlan.forget(store)
     store[AutoSendPlan.KEY] = nil
-    store[AutoSendPlan.SENT_KEY] = nil
 end
 
-local function loadSent(store)
-    local text = store[AutoSendPlan.SENT_KEY]
+-- The file types the server took when it was last asked ({ '.arw', ... }), or nil when it never was (or the record
+-- is unreadable). Lets a round leave out a JPEG-only import without asking the server.
+function AutoSendPlan.knownExtensions(store)
+    local text = store[AutoSendPlan.EXTENSIONS_KEY]
     if type(text) ~= 'string' or text == '' then
-        return {}
+        return nil
     end
     local ok, decoded = pcall(Json.decode, text)
-    if not ok or type(decoded) ~= 'table' then
-        return {}
+    if not ok or type(decoded) ~= 'table' or #decoded == 0 then
+        return nil
+    end
+    for _, extension in ipairs(decoded) do
+        if type(extension) ~= 'string' then
+            return nil
+        end
     end
     return decoded
 end
 
--- Records the catalog ids of photos that «Import a folder without the dialog...» is going to send, so that the
--- automatic send leaves them out. run: a text naming the command's run. Ids the automatic send can no longer take are
--- dropped (see the header). Must be called with no wait between reading and writing (Lightroom switches tasks only
--- where one waits). Returns the number of ids kept for the catalog, or false for a missing catalog path.
-function AutoSendPlan.recordSent(store, catalogPath, ids, run)
-    local key = PathMap.fileKey(catalogPath)
-    if not key then
-        return false
+-- Remembers the file types the server takes (from its info).
+function AutoSendPlan.rememberExtensions(store, extensions)
+    if type(extensions) == 'table' and #extensions > 0 then
+        store[AutoSendPlan.EXTENSIONS_KEY] = Json.encode(extensions)
     end
-    local all = loadSent(store)
-    local entry = type(all[key]) == 'table' and all[key] or {}
-    local state = AutoSendPlan.load(store, catalogPath)
-    local keep, kept = {}, {}
-    local function add(id)
-        if isId(id) and id > 0 and not kept[id] and (not state or id > state.mark) then
-            kept[id] = true
-            keep[#keep + 1] = id
-        end
-    end
-    if state or entry.run == run then
-        for _, id in ipairs(type(entry.ids) == 'table' and entry.ids or {}) do
-            add(id)
-        end
-    end
-    for _, id in ipairs(ids) do
-        add(id)
-    end
-    table.sort(keep)
-    if #keep > AutoSendPlan.MAX_SENT then
-        local largest = {}
-        for i = #keep - AutoSendPlan.MAX_SENT + 1, #keep do
-            largest[#largest + 1] = keep[i]
-        end
-        keep = largest
-    end
-    all[key] = #keep > 0 and { run = run, ids = keep } or nil
-    store[AutoSendPlan.SENT_KEY] = Json.encode(all)
-    return #keep
-end
-
--- The catalog ids «Import a folder without the dialog...» recorded for this catalog: { [id] = true }.
-function AutoSendPlan.sentByCommand(store, catalogPath)
-    local key = PathMap.fileKey(catalogPath)
-    local entry = key and loadSent(store)[key]
-    local ids = {}
-    if type(entry) == 'table' and type(entry.ids) == 'table' then
-        for _, id in ipairs(entry.ids) do
-            if isId(id) then
-                ids[id] = true
-            end
-        end
-    end
-    return ids
 end
 
 -- The state of the first round: everything up to maxId is left alone.

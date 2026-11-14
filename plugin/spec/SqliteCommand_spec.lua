@@ -98,15 +98,16 @@ describe('SqliteCommand.lookupScript', function()
 end)
 
 describe('SqliteCommand.readScript', function()
-    it('takes one SELECT on one line with quoted names and >', function()
-        local select = "SELECT 'v', hex(name) FROM Adobe_variablesTable WHERE name IN ('a_b') AND id_local > 3;"
+    it('takes one SELECT on one line with quoted names', function()
+        local select = "SELECT 'v', hex(name) FROM Adobe_variablesTable WHERE name IN ('a_b', 'c');"
         assert.are.equal('.open --readonly "/a.lrcat"\n.timeout 5000\n.headers off\n.mode list\n' .. select .. '\n',
             SqliteCommand.readScript('/a.lrcat', select))
     end)
 
     it('passes nothing but one SELECT on one line', function()
         for _, bad in ipairs({ 'DELETE FROM Adobe_images;', 'SELECT 1; DROP TABLE x;', "SELECT 'x'",
-            "SELECT 'a'\n.shell calc;", 'SELECT 1;\n.shell calc', 'SELECT a -- x;', 'SELECT "x";', 42 }) do
+            "SELECT 'a'\n.shell calc;", 'SELECT 1;\n.shell calc', 'SELECT a -- x;', 'SELECT "x";',
+            'SELECT a FROM b WHERE c > 3;', 42 }) do
             local script, message = SqliteCommand.readScript('/a.lrcat', bad)
             assert.is_nil(script)
             assert.matches('SELECT', message)

@@ -128,4 +128,21 @@ describe('RunSummary', function()
             failedParts = 'Part 3 failed.' }))
         assert.matches('\n\nPart 3 failed%.$', one:sendText({ jobIds = { 3, 4 }, failedParts = 'Part 3 failed.' }))
     end)
+
+    it('asks for a dialog after a send only when something needs the user', function()
+        local clean = RunSummary.new(3)
+        clean.sent = 3
+        assert.is_false(clean:sendNeedsAttention({ jobIds = { 7 }, ready = 2, rejected = 0 }))
+        assert.is_true(clean:sendNeedsAttention({ jobIds = { 7 }, rejected = 1 }))
+        assert.is_true(clean:sendNeedsAttention({ jobIds = { 7 }, failedParts = 'Part 2 failed.' }))
+        local skipped = RunSummary.new(3)
+        skipped:skip('video')
+        assert.is_true(skipped:sendNeedsAttention({ jobIds = { 7 } }))
+        assert.are.equal('3 photos sent to the server; their smart previews arrive by themselves',
+            clean:sentNotice(true))
+        local single = RunSummary.new(1)
+        single.sent = 1
+        assert.are.equal('1 photo sent to the server; fetch their smart previews with «Fetch ready smart previews» '
+            .. 'when they are ready', single:sentNotice(false))
+    end)
 end)

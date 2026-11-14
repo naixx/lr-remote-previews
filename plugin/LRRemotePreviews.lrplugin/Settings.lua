@@ -23,28 +23,29 @@ Settings.TEXT_KEYS[#Settings.TEXT_KEYS + 1] = 'sqlitePath'
 
 -- Settings that are not text (version 0.3.0):
 -- downloadConcurrency: how many smart previews are downloaded at the same time (placing stays one at a time)
--- autoFetch:           fetch ready smart previews in the background while Lightroom runs
+-- autoFetch:           fetch ready smart previews in the background while Lightroom runs (on by default since
+--                      0.7.0; it asks the server only while this catalog waits for something, see PendingJobs)
 -- autoFetchInterval:   seconds between two rounds of the automatic loop (30 seconds to 30 minutes)
 -- and version 0.4.0:
 -- autoSend:            send raw photos added to the catalog that have no smart preview, in the same loop
 Settings.OPTIONS = {
     downloadConcurrency = { kind = 'integer', default = 4, min = 1, max = 8 },
-    autoFetch = { kind = 'boolean', default = false },
+    autoFetch = { kind = 'boolean', default = true },
     autoFetchInterval = { kind = 'integer', default = 60, min = 30, max = 1800 },
     autoSend = { kind = 'boolean', default = false },
 }
 Settings.OPTION_KEYS = { 'downloadConcurrency', 'autoFetch', 'autoFetchInterval', 'autoSend' }
 
--- The choices of «Import a folder without the dialog...» (version 0.6.0), remembered from one run to the next. They
--- are not part of the Plug-in Manager's section (Settings.KEYS), so that closing the Plug-in Manager never overwrites
--- them. (Version 0.5.0's «Add a folder without previews...» kept addFolder* keys; they are no longer read.)
--- importFolderSend: send the imported photos to the server afterwards (offered when a server and a path mapping are
---                   set up)
--- importFolderLast: (text) the folder chosen last; the folder dialog opens in the folder that holds it
-Settings.IMPORT_FOLDER_OPTIONS = {
-    importFolderSend = { kind = 'boolean', default = true },
-}
-Settings.IMPORT_FOLDER_KEYS = { 'importFolderSend' }
+-- The version of the stored settings (key settingsVersion). Before 0.7.0 the automatic fetch was off by default and
+-- the Plug-in Manager stored that default, so a stored «off» says nothing about a choice; Settings.upgrade switches it
+-- on once.
+Settings.VERSION_KEY = 'settingsVersion'
+Settings.VERSION = 7
+
+-- importFolderLast (text): the folder «Import a folder without the dialog...» was given last; its folder dialog opens
+-- in the folder that holds it. Not part of the Plug-in Manager's section (Settings.KEYS), so that closing the Plug-in
+-- Manager never overwrites it. (0.5.0's addFolder* keys and 0.6.0's importFolderSend are no longer read.)
+Settings.LAST_IMPORT_FOLDER_KEY = 'importFolderLast'
 
 -- The choices the Plug-in Manager offers.
 Settings.CONCURRENCY_CHOICES = { 1, 2, 3, 4, 5, 6, 7, 8 }
@@ -66,8 +67,8 @@ local function trim(value)
     return (value:gsub('^%s+', ''):gsub('%s+$', ''))
 end
 
--- A stored value of an option (an entry of Settings.OPTIONS or Settings.IMPORT_FOLDER_OPTIONS) in its kind, within
--- its bounds; the default when missing or unusable.
+-- A stored value of an option (an entry of Settings.OPTIONS) in its kind, within its bounds; the default when missing
+-- or unusable.
 local function optionValue(option, value)
     if option.kind == 'boolean' then
         if type(value) == 'boolean' then
@@ -88,28 +89,36 @@ function Settings.option(key, value)
     return optionValue(Settings.OPTIONS[key], value)
 end
 
--- The remembered choices of «Import a folder without the dialog...»: the Settings.IMPORT_FOLDER_KEYS in their kind
--- (the default when missing) and importFolderLast as text ('' when missing).
-function Settings.readImportFolder(store)
-    local choices = {}
-    for _, key in ipairs(Settings.IMPORT_FOLDER_KEYS) do
-        choices[key] = optionValue(Settings.IMPORT_FOLDER_OPTIONS[key], store and store[key])
-    end
-    choices.importFolderLast = trim(store and store.importFolderLast)
-    return choices
+-- The folder «Import a folder without the dialog...» was given last ('' when none).
+function Settings.lastImportFolder(store)
+    return trim(store and store[Settings.LAST_IMPORT_FOLDER_KEY])
 end
 
--- Remembers the choices of «Import a folder without the dialog...». Only the keys present in values are written, so
--- a choice the dialog did not offer (sending, when no server is set up) keeps its remembered value.
-function Settings.writeImportFolder(store, values)
-    for _, key in ipairs(Settings.IMPORT_FOLDER_KEYS) do
-        if values[key] ~= nil then
-            store[key] = optionValue(Settings.IMPORT_FOLDER_OPTIONS[key], values[key])
-        end
+-- Remembers the folder «Import a folder without the dialog...» was given.
+function Settings.setLastImportFolder(store, folder)
+    store[Settings.LAST_IMPORT_FOLDER_KEY] = trim(folder)
+end
+
+-- Sets one option of the Plug-in Manager's section from elsewhere (the import command's checkbox for the automatic
+-- send), in its kind and bounds.
+function Settings.setOption(store, key, value)
+    store[key] = optionValue(Settings.OPTIONS[key], value)
+end
+
+-- Brings stored settings up to Settings.VERSION: settings from before 0.7.0 get the automatic fetch switched on (once;
+-- switched off again later, it stays off). Returns a text for the log when it changed something, else nil.
+function Settings.upgrade(store)
+    local version = tonumber(store[Settings.VERSION_KEY]) or 0
+    if version >= Settings.VERSION then
+        return nil
     end
-    if values.importFolderLast ~= nil then
-        store.importFolderLast = trim(values.importFolderLast)
+    store[Settings.VERSION_KEY] = Settings.VERSION
+    if store.autoFetch == false then
+        store.autoFetch = true
+        return 'settings from before 0.7.0: the automatic fetch is now on (it asks the server only while this catalog '
+            .. 'waits for smart previews)'
     end
+    return nil
 end
 
 -- Returns a plain table with every key from Settings.KEYS; missing text values become '', missing options their

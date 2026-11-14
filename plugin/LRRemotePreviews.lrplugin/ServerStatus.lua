@@ -1,4 +1,4 @@
--- Library > Plug-in Extras > Server status...: what the server says about itself (GET /api/v1/info), this
+-- Help > Plug-in Extras > Server status...: what the server says about itself (GET /api/v1/info), this
 -- catalog's jobs that still matter, how many smart previews wait to be fetched, and three actions: «Fetch now»
 -- (everything this catalog sent), retrying the failed items of a job, and opening the dashboard in the browser.
 local LrApplication = import 'LrApplication'
@@ -14,6 +14,7 @@ local CatalogState = require 'CatalogState'
 local FetchPlan = require 'FetchPlan'
 local Fetcher = require 'Fetcher'
 local Log = require 'Log'
+local PendingJobs = require 'PendingJobs'
 local Pipeline = require 'Pipeline'
 local ServerClient = require 'ServerClient'
 local ServerInfo = require 'ServerInfo'
@@ -23,8 +24,9 @@ local StatusReport = require 'StatusReport'
 local TITLE = 'LR Remote Previews: server status'
 local FETCH_TITLE = 'Fetch ready smart previews'
 
--- The «Retry» button: asks the server in a task of its own and shows the answer under the button.
-local function retry(props, settings)
+-- The «Retry» button: asks the server in a task of its own and shows the answer under the button. A retried job is
+-- pending again, so the automatic fetch follows it.
+local function retry(props, settings, catalogPath)
     LrTasks.startAsyncTask(function()
         local jobId = props.retryJob
         if type(jobId) ~= 'number' then
@@ -36,6 +38,7 @@ local function retry(props, settings)
             props.retryResult = 'Retry failed: ' .. tostring(job)
         elseif job then
             props.retryResult = StatusReport.retryText(job)
+            PendingJobs.add(LrPrefs.prefsForPlugin(), catalogPath, { jobId }, os.time())
             Log.info('status: %s', props.retryResult)
         else
             props.retryResult = 'Retry failed: ' .. problem.message
@@ -95,7 +98,7 @@ local function run(context)
             f:push_button {
                 title = 'Retry',
                 action = function()
-                    retry(props, settings)
+                    retry(props, settings, catalogPath)
                 end,
             },
         }

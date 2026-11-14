@@ -5,7 +5,7 @@ package.path = here .. '../LRRemotePreviews.lrplugin/?.lua;' .. package.path
 local Settings = require 'Settings'
 
 local EMPTY = { serverUrl = '', token = '', localPrefix1 = '', rootId1 = '', localPrefix2 = '', rootId2 = '',
-    localPrefix3 = '', rootId3 = '', sqlitePath = '', downloadConcurrency = 4, autoFetch = false,
+    localPrefix3 = '', rootId3 = '', sqlitePath = '', downloadConcurrency = 4, autoFetch = true,
     autoFetchInterval = 60, autoSend = false }
 
 local function with(values)
@@ -46,9 +46,10 @@ describe('Settings', function()
         assert.are.equal(2, read.downloadConcurrency)
         assert.is_true(read.autoFetch)
         assert.are.equal(300, read.autoFetchInterval)
-        read = Settings.read({ downloadConcurrency = '6', autoFetch = 'yes', autoFetchInterval = 5 })
+        read = Settings.read({ downloadConcurrency = '6', autoFetch = 'no', autoFetchInterval = 5 })
         assert.are.equal(6, read.downloadConcurrency)
-        assert.is_false(read.autoFetch)
+        assert.is_true(read.autoFetch)
+        assert.is_false(Settings.read({ autoFetch = false }).autoFetch)
         assert.are.equal(30, read.autoFetchInterval)
         read = Settings.read({ downloadConcurrency = 99, autoFetchInterval = 'often' })
         assert.are.equal(8, read.downloadConcurrency)
@@ -112,25 +113,38 @@ describe('Settings', function()
         assert.are.same({}, Settings.mappings(EMPTY))
     end)
 
-    it('remembers the choices of «Import a folder without the dialog...» apart from the settings', function()
-        assert.are.same({ importFolderSend = true, importFolderLast = '' }, Settings.readImportFolder(nil))
-        assert.are.same({ importFolderSend = true, importFolderLast = '' },
-            Settings.readImportFolder({ importFolderSend = 1, addFolderSend = false }))
-        local store = { serverUrl = 'http://nas:8787' }
-        Settings.writeImportFolder(store, { importFolderSend = false, importFolderLast = ' Z:\\2026\\shoot ' })
-        assert.are.same({ importFolderSend = false, importFolderLast = 'Z:\\2026\\shoot' },
-            Settings.readImportFolder(store))
-        -- a choice the dialog did not offer keeps its remembered value
-        Settings.writeImportFolder(store, { importFolderLast = 'Z:\\2027' })
-        assert.is_false(store.importFolderSend)
-        assert.are.equal('Z:\\2027', store.importFolderLast)
-        -- the Plug-in Manager's section neither shows nor writes them
+    it('remembers the folder of «Import a folder without the dialog...» apart from the settings', function()
+        assert.are.equal('', Settings.lastImportFolder(nil))
+        local store = { serverUrl = 'http://nas:8787', importFolderSend = false }
+        Settings.setLastImportFolder(store, ' Z:\\2026\\shoot ')
+        assert.are.equal('Z:\\2026\\shoot', Settings.lastImportFolder(store))
         for _, key in ipairs(Settings.KEYS) do
-            assert.is_nil(Settings.IMPORT_FOLDER_OPTIONS[key])
-            assert.are_not.equal('importFolderLast', key)
+            assert.are_not.equal(Settings.LAST_IMPORT_FOLDER_KEY, key)
         end
         Settings.write(store, Settings.read(store))
-        assert.are.same({ importFolderSend = false, importFolderLast = 'Z:\\2027' }, Settings.readImportFolder(store))
+        assert.are.equal('Z:\\2026\\shoot', Settings.lastImportFolder(store))
+    end)
+
+    it('sets one option from elsewhere, in its kind', function()
+        local store = {}
+        Settings.setOption(store, 'autoSend', true)
+        assert.is_true(Settings.read(store).autoSend)
+        Settings.setOption(store, 'autoSend', 'yes')
+        assert.is_false(store.autoSend)
+    end)
+
+    it('switches the automatic fetch on once for settings from before 0.7.0', function()
+        local store = { autoFetch = false }
+        assert.matches('the automatic fetch is now on', Settings.upgrade(store))
+        assert.is_true(store.autoFetch)
+        assert.are.equal(Settings.VERSION, store[Settings.VERSION_KEY])
+        store.autoFetch = false -- switched off again afterwards: it stays off
+        assert.is_nil(Settings.upgrade(store))
+        assert.is_false(store.autoFetch)
+        local fresh = {}
+        assert.is_nil(Settings.upgrade(fresh))
+        assert.is_true(Settings.read(fresh).autoFetch)
+        assert.are.equal(Settings.VERSION, fresh[Settings.VERSION_KEY])
     end)
 
     it('names the rows that are half filled in or invalid', function()

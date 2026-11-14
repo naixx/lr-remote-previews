@@ -1,6 +1,10 @@
--- The automatic fetch: a background task that, while Lightroom runs and the setting is on, fetches what the server
--- has finished for this catalog's jobs, quietly (no dialogs, no progress bar; a line in the log; errors go to the
--- log only). The loop itself is AutoFetchLoop (pure, tested); this file connects it to the SDK.
+-- The automatic fetch: a background task that, while Lightroom runs and the setting is on (the default since 0.7.0),
+-- fetches what the server has finished for this catalog's jobs, quietly (no dialogs, no progress bar; a line in the
+-- log, a short notice when it placed something; errors go to the log only). It contacts the server only while this
+-- catalog has a pending job (PendingJobs: sent, not yet all delivered or final, not older than 7 days); with nothing
+-- pending it makes no request at all, so an idle Lightroom never wakes a sleeping NAS. After a failed contact it
+-- waits 1, 2, 5, 10, 30, then 60 minutes before the next one. The loop itself is AutoFetchLoop (pure, tested); this
+-- file connects it to the SDK.
 --
 -- Started by InitPlugin.lua (when the plug-in loads), EnablePlugin.lua, and the Plug-in Manager when the setting is
 -- switched on; it only starts a task when the setting is on, and the loop ends by itself when it is switched off.
@@ -10,21 +14,22 @@
 --   * the run token in the plug-in's preferences (prefs.autoFetchRun): every start writes a new one and the loop
 --     ends as soon as the stored token is not its own. So a reloaded plug-in stops the old loop, and two starts
 --     never leave two loops running.
--- A fetch takes the fetch lock (Pipeline.withLease), so it never runs together with a manual fetch, the build
--- command, or another automatic fetch; when the lock is taken, the round is skipped.
+-- A fetch takes the fetch lock (Pipeline.withLease), so it never runs together with a manual fetch or another
+-- automatic fetch; when the lock is taken, the round is skipped.
 --
 -- Since version 0.4.0 the same loop has a second duty, the automatic send (AutoSend.lua, its own setting, off by
 -- default): when it is on, each round first sends new photos, then fetches (when the automatic fetch is on). The
 -- loop runs while either setting is on. The send takes the fetch lock too, while it talks to the server.
 local LrApplication = import 'LrApplication'
+local LrDialogs = import 'LrDialogs'
 local LrPrefs = import 'LrPrefs'
 local LrTasks = import 'LrTasks'
 
 local AutoFetchLoop = require 'AutoFetchLoop'
 local AutoSend = require 'AutoSend'
-local CatalogState = require 'CatalogState'
 local Fetcher = require 'Fetcher'
 local Log = require 'Log'
+local PendingJobs = require 'PendingJobs'
 local Pipeline = require 'Pipeline'
 local ServerClient = require 'ServerClient'
 local Settings = require 'Settings'
@@ -50,16 +55,30 @@ local function pluginDisabled()
     return ok and enabled == false
 end
 
--- One quiet fetch of everything this catalog sent. Returns a short text for the log.
+-- The short notice when the automatic fetch placed smart previews (protected: it is only a notice).
+local function notice(placed)
+    LrTasks.pcall(function()
+        LrDialogs.showBezel(string.format('%d smart preview%s arrived from the server', placed,
+            placed == 1 and '' or 's'), 3)
+    end)
+end
+
+-- One quiet fetch of everything this catalog sent, only while this catalog has a pending job (PendingJobs) and is
+-- not backing off after a failed contact; otherwise no request at all. Returns a short text for the log (the loop
+-- logs the same text only once in a row).
 function AutoFetch.fetchOnce(shouldStop)
-    local settings = Settings.read(prefs())
+    local store = prefs()
+    local settings = Settings.read(store)
     if settings.serverUrl == '' then
         return 'no server URL is set; nothing done'
     end
     local catalog = LrApplication.activeCatalog()
     local catalogPath = catalog:getPath()
-    if not CatalogState.clientId(prefs(), catalogPath) then
-        return 'this catalog has not sent anything to the server yet; nothing done'
+    local decision, retryAt = PendingJobs.decide(store, catalogPath, os.time())
+    if decision == 'idle' then
+        return 'nothing pending for this catalog; the server is not asked'
+    elseif decision == 'wait' then
+        return string.format('the server did not answer; next try at %s', os.date('%H:%M', retryAt))
     end
     local started, outcome = Pipeline.withLease(AutoFetch.LABEL, function(lease)
         local ui = Pipeline.quietUi(function()
@@ -69,16 +88,21 @@ function AutoFetch.fetchOnce(shouldStop)
             return ServerClient.fetchInfo(settings)
         end, catalog, ui, true)
         if result.problem then
-            return 'not done: ' .. result.problem
+            local nextTry = PendingJobs.contacted(store, catalogPath, false, os.time())
+            return string.format('not done: %s (next try at %s)', result.problem, os.date('%H:%M', nextTry))
         end
-        if result.nothingNew then
-            return 'nothing new to fetch'
+        PendingJobs.contacted(store, catalogPath, true, os.time())
+        local placed = result.summary:placed()
+        if placed > 0 then
+            notice(placed)
         end
-        local text = result.summary:shortText()
+        local text = result.nothingNew and 'nothing new to fetch' or result.summary:shortText()
         if result.cancelled then
             text = text .. ' (stopped before the end; the next fetch continues)'
         end
-        return text
+        local pending = result.pending or 0
+        return text .. (pending > 0 and string.format('; %d job(s) still pending', pending)
+            or '; nothing pending any more')
     end)
     if not started then
         return 'skipped: another fetch holds the lock'
@@ -88,6 +112,10 @@ end
 
 -- Starts the loop when the automatic fetch or the automatic send is on. reason: for the log.
 function AutoFetch.startIfEnabled(reason)
+    local upgraded = Settings.upgrade(prefs())
+    if upgraded then
+        Log.info('%s', upgraded)
+    end
     local settings = Settings.read(prefs())
     if not settings.autoFetch and not settings.autoSend then
         Log.info('automatic fetch: off (%s)', reason)

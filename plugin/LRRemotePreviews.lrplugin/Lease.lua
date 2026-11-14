@@ -1,5 +1,5 @@
 -- A lock that lets only one task of the plug-in at a time fetch and place smart previews (a manual fetch, the
--- automatic fetch, or «Build smart previews on the server» while it waits for its job). It lives in a key-value
+-- automatic fetch, or the automatic send while it talks to the server). It lives in a key-value
 -- store that every script of the plug-in reaches (Lightroom's preferences for the plug-in), as the text
 -- "<owner>|<expiry time>|<label>". The holder refreshes it while it works; a lock left behind by a task that
 -- ended without releasing it (Lightroom closed in the middle of a fetch) expires Lease.TTL seconds after its last

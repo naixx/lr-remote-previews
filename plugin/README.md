@@ -3,22 +3,23 @@
 The plug-in asks an LR Remote Previews server, which runs next to the photo originals (for example on a NAS), to
 build smart previews, and brings them into the catalog. It covers **stage 2** of [the plan](../docs/plan.md)
 (Lightroom does not have to stay open while the server works) and, since version 0.4.0, parts of stages 4 and 5.
-Three commands send and fetch (**Send to the server**, **Fetch ready smart previews**, **Build smart previews on the
-server**), an optional automatic fetch runs while Lightroom is open, **Server status...** shows this catalog's jobs and
-can retry failed ones, **Check the server against Lightroom** compares the server's DNG with a smart preview Lightroom
-built itself (stage 5), and an optional automatic send sends photos added to the catalog (stage 4). Since version
-0.6.0, **Import a folder without the dialog...** starts Lightroom's own import of a folder without its dialog, with
-the settings of the previous import (only when that was «Add»), and can send the imported photos to the server when
-the import has finished. It replaces 0.5.0's «Add a folder without previews...», which ran once and was far too slow
-(see «What has been tried in Lightroom»).
+**Build smart previews on the server** sends the selected photos and returns at once, **Fetch ready smart previews**
+fetches what is ready, and the automatic fetch (on by default) brings the smart previews in while Lightroom is open,
+asking the server only while this catalog waits for something. **Server status...** shows this catalog's jobs and can
+retry failed ones, **Check the server against Lightroom** compares the server's DNG with a smart preview Lightroom
+built itself (stage 5), and an optional automatic send sends photos added to the catalog (stage 4). **Import a folder
+without the dialog...** starts Lightroom's own import of a folder without its dialog, with the settings of the previous
+import (only when that was «Add»), and leaves the sending to the automatic send. It replaces 0.5.0's «Add a folder
+without previews...», which ran once and was far too slow (see «What has been tried in Lightroom»).
 
-Status: **most of 0.3.0, all of 0.4.0 and 0.6.0's new command have not been run in Lightroom.** Version 0.2.0 (the
-build command) was run in Lightroom Classic 15.6 on Windows on 157 photos, of 0.3.0 «Send to the server» and «Fetch
-ready smart previews» for the selection on 143 photos whose originals lie on a NAS, and 0.5.0's «Add a folder without
-previews...» once (see the tables at the end). Everything else that is new in 0.3.0 to 0.6.0 is checked only by the
-unit tests and by runs with stand-in Lightroom functions (cooperative tasks, a virtual clock) against a fake server
-that follows the protocol, and the plug-in's server calls also against the real server without a converter (no
-Lightroom involved in either).
+Status: **version 0.7.0; most of 0.3.0, all of 0.4.0 and everything 0.7.0 changed have not been run in Lightroom.**
+Version 0.2.0 (the build command of that time) was run in Lightroom Classic 15.6 on Windows on 157 photos, of 0.3.0
+«Send to the server» (the sending that 0.7.0's «Build smart previews on the server» does) and «Fetch ready smart
+previews» for the selection on 143 photos whose originals lie on a NAS, 0.5.0's «Add a folder without previews...»
+once and 0.6.0's «Import a folder without the dialog...» once (see the tables at the end). Everything else that is new
+in 0.3.0 to 0.7.0 is checked only by the unit tests and by runs with stand-in Lightroom functions (cooperative tasks, a
+virtual clock) against a fake server that follows the protocol, and the plug-in's server calls also against the real
+server without a converter (no Lightroom involved in either).
 
 ## Install
 
@@ -48,9 +49,9 @@ used:
 - It is started through the shell (`LrTasks.execute`) with the options `-readonly -batch -bail` and a small script on
   standard input: `.open --readonly "<catalog>"`, a 5-second busy timeout, and one `SELECT`: either `id_local`,
   `id_global`, `baseName` and `extension` for the photos concerned (`Adobe_images` joined to `AgLibraryFile`), at most
-  500 photos per run, or, for **Import a folder without the dialog...**, one of the two `SELECT`s of `ImportQuery.lua`
-  (the settings of the previous import and the largest catalog ids; the photos and imports added since). Nothing else
-  is ever passed (the script builder refuses anything but one plain `SELECT`), and nothing writes.
+  500 photos per run, or, for **Import a folder without the dialog...**, the `SELECT` of `ImportQuery.lua` (the
+  settings of the previous import and the largest catalog ids). Nothing else is ever passed (the script builder
+  refuses anything but one plain `SELECT`), and nothing writes.
 - The catalog path goes into the script, not onto the command line, because some Windows builds of sqlite3 read their
   arguments in the ANSI code page and then cannot open a path with other characters (seen with 3.50.6 from Android's
   platform-tools: a catalog under a folder with Cyrillic letters failed on the command line and worked through the
@@ -77,7 +78,7 @@ The plug-in's section in the Plug-in Manager. The values are stored in Lightroom
 | Path mappings 1–3: server root id | `archive` | The id of that folder on the server (the server's status lists its roots) |
 | sqlite3 tool | `C:\Tools\sqlite3.exe` | Optional; see above |
 | Downloads at once | `4` | 1 to 8. How many smart previews are downloaded at the same time while fetching. They are still checked, written and registered one at a time. 1 downloads one file after the other in the command's own task, as version 0.2.0 did |
-| Automatic fetch | off, every 1 minute | Fetch ready smart previews in the background while Lightroom runs (see below). Intervals from 30 seconds to 30 minutes |
+| Automatic fetch | on, every 1 minute | Fetch ready smart previews in the background while Lightroom runs, asking the server only while this catalog waits for something (see below). Intervals from 30 seconds to 30 minutes. 0.7.0 switches it on once in settings of older versions (key `settingsVersion`) |
 | Automatic send | off | Send raw photos added to the catalog after it was switched on, at the same interval, in the same background task (see below) |
 
 Version 0.1.0 had a single mapping; its values appear as mapping 1, and mapping 1 is also saved under the old keys,
@@ -98,28 +99,35 @@ that root id, in the order of the mappings.
 
 Besides the settings, the plug-in keeps four things per catalog in its preferences, keyed by the catalog's path: the
 catalog's `clientId`, how far fetching got for each of the catalog's jobs, how far the automatic send got, and the
-catalog ids of the photos **Import a folder without the dialog...** sent itself, which the automatic send leaves out
-(all as JSON text). It also remembers that command's send choice and the folder chosen last (keys `importFolderSend`,
-`importFolderLast`; 0.5.0's `addFolder*` keys are no longer read). None of this is shown in the Plug-in Manager.
+jobs the automatic fetch still waits for (`pendingJobs`; all as JSON text). It also remembers the file types the
+server took last (`serverExtensions`, so that the automatic send can leave out other files without asking the server)
+and the folder chosen last in **Import a folder without the dialog...** (`importFolderLast`; 0.6.0's
+`importFolderSend`, 0.6.0's list of photos that command sent and 0.5.0's `addFolder*` keys are no longer read). None of
+this is shown in the Plug-in Manager.
 
 ## Commands
 
-All under **Library > Plug-in Extras**.
+**Library > Plug-in Extras** holds the three everyday commands: **Import a folder without the dialog...**, **Build
+smart previews on the server**, **Fetch ready smart previews**. **Help > Plug-in Extras** holds **Server status...**,
+**Check the server against Lightroom** and the three diagnostics. Every title starts with `LRRP: ` (for example
+`LRRP: Server status...`), so that the items stand out next to those of other plug-ins; this document names the
+commands without it. Both are new in 0.7.0 and not seen in Lightroom yet: the Help menu entries come from the key
+`LrHelpMenuItems` in `Info.lua`, which Lightroom Classic 15.6 reads in the same place and with the same fields as
+`LrLibraryMenuItems` (seen in its code).
 
 ### Which command when
 
 | Command | Use it when | Lightroom must stay open |
 |---|---|---|
-| **Send to the server** | You want smart previews for many photos and do not want to wait: send, close Lightroom, fetch later | No |
-| **Fetch ready smart previews** | The server has finished (or partly finished) what was sent, from this catalog or from anywhere else | Only while it fetches |
-| **Build smart previews on the server** | A smaller selection that you want right away: it sends, waits and fetches in one go, as version 0.2.0 did | Yes, until it is done |
+| **Build smart previews on the server** | You want smart previews for the selected photos: it sends them and returns at once; the automatic fetch brings them in | No (only for the automatic fetch) |
+| **Fetch ready smart previews** | You want what the server has finished now, from this catalog or from anywhere else | Only while it fetches |
 | **Check the server against Lightroom** | After an update of Lightroom or of the server's Adobe DNG Converter: is the server's DNG still the file Lightroom builds? | Yes, until it is done |
-| **Import a folder without the dialog...** | A folder on the NAS is not in the catalog yet: Lightroom imports it with the settings of the previous import (which must have been «Add»), without the dialog; the plug-in then optionally sends the photos to the server. Not yet run in Lightroom | Yes, while Lightroom imports and the plug-in sends |
+| **Import a folder without the dialog...** | A folder on the NAS is not in the catalog yet: Lightroom imports it with the settings of the previous import (which must have been «Add»), without the dialog; the automatic send (one checkbox) sends the new photos | Yes, while Lightroom imports and the automatic send sends |
 
-The first three leave out photos that already have a smart preview and never replace a file, so running one of them
-again, or another one after it, is harmless. The check writes nothing at all. What Lightroom's import does with files
-of the folder that are in the catalog already, when **Import a folder without the dialog...** starts it, has not been
-seen yet.
+The first two leave out photos that already have a smart preview and never replace a file, so running one of them
+again, or another one after it, is harmless. The check writes nothing at all. In its one run, Lightroom's import
+started by **Import a folder without the dialog...** left the photos of the folder that were in the catalog already
+alone.
 
 ### The clientId
 
@@ -132,10 +140,11 @@ the processor clock, a counter, `math.random` and the catalog path (`ClientId.lu
 to get the same one. A catalog that is moved or renamed gets a new `clientId`; its old jobs are then no longer found
 by «everything this catalog sent», but fetching by selection still finds their files.
 
-### Send to the server
+### Build smart previews on the server
 
-For the selected photos (Lightroom's target photos: with nothing selected, that is every photo in the filmstrip; the
-confirmation shows the count):
+For the selected photos (Lightroom's target photos: with nothing selected, that is every photo in the filmstrip). Since
+0.7.0 this is the one send command: it does what 0.3.0 to 0.6.0 called «Send to the server», without the
+confirmation; 0.2.0's command of this name, which waited for the job and placed the files itself, is gone.
 
 1. Asks the server for `GET /api/v1/info` and stops with a message when it cannot be used: another API version, no
    Adobe DNG Converter installed, no accepted file types, no path mapping, or no mapped root available.
@@ -143,11 +152,17 @@ confirmation shows the count):
    (Lightroom's `smartPreviewInfo`); files whose extension the server does not accept; files under no local prefix;
    files whose server root is missing or not available; a second photo of the same file (virtual copies: the
    original is preferred).
-3. Reads the file UUIDs from the catalog with sqlite3 (see above), so that the same photos are left out as by the
-   build command (not found in the catalog database, or the database names a different file).
-4. Asks for confirmation, then creates one job per `maxItemsPerJob` photos (`POST /api/v1/jobs`), each with this
-   catalog's `clientId`, and returns: a dialog says how many photos were sent, how many the server had built already,
-   how many it refused (with the reasons), and that Lightroom may be closed. Nothing is downloaded or placed.
+3. Reads the file UUIDs from the catalog with sqlite3 (see above) and leaves out photos that are not found in the
+   catalog database or for which the database names a different file.
+4. Creates one job per `maxItemsPerJob` photos (`POST /api/v1/jobs`), each with this catalog's `clientId`, adds each
+   job to the jobs the automatic fetch waits for (`PendingJobs`), and returns. Nothing is downloaded or placed.
+   - Every selected photo was taken: no dialog, only a short notice that fades by itself (`LrDialogs.showBezel`):
+     `5 photos sent to the server; their smart previews arrive by themselves` (with the automatic fetch off: «fetch
+     their smart previews with «Fetch ready smart previews» when they are ready»).
+   - Photos were left out or refused by the server, or a part could not be created (`RunSummary:sendNeedsAttention`):
+     a dialog says how many photos were sent (job numbers), how many the server had built already, how many it
+     refused (with the reasons), why the others were left out, and that Lightroom may be closed.
+   - A server that cannot be reached, a rejected token or another error: a dialog, as before.
 
 ### Fetch ready smart previews
 
@@ -174,39 +189,21 @@ catalog sent** (the only choice when nothing is selected). Then, in a progress b
   them `jobRetentionDays` after they finished) are forgotten. If a catalog ever has more than 200 jobs on the server,
   only the newest 200 are looked at.
 
-Delivery is the same for both, and the same as in the build command: several downloads at once
-(`GET /api/v1/files/{key}`; the setting "Downloads at once"), then, strictly one at a time and only in the command's
-own task, the checks, writing and registering described under the build command below. A file the server no longer
-has (`404 not_in_cache`) is counted as such and tried again by the next fetch.
+Delivery is the same for both (and for the automatic fetch): several downloads at once (`GET /api/v1/files/{key}`;
+the setting "Downloads at once"), then, strictly one at a time and only in the fetching task, for each file:
 
-Fetching is **resumable**: cancelled, interrupted by an error, or cut off by Lightroom closing, the next fetch simply
-continues, because a photo that already has a smart preview is left out and nothing is ever overwritten. A cancelled
-run remembers what it finished; a run that ended with an error remembers nothing, so the next one reads those items
-again and leaves the placed ones alone.
+- checks the length against the size the server announced;
+- reads `DNGVersion`, `OriginalRawFileName` and `OriginalDefaultFinalSize` from the file itself and requires the
+  original file name to equal the photo's file name (ignoring case) and, when both the file and Lightroom give a
+  pixel size, the two sizes to match in either orientation;
+- writes it as `<UUID>.dng.lrrp-<run tag>-<ref>.tmp` in the destination folder and renames it to `<UUID>.dng`;
+- never replaces a file that is already there;
+- calls `photo:buildSmartPreview()`, which answers `existed` when Lightroom has taken the file.
 
-### Build smart previews on the server
-
-For the selected photos, in one progress bar that can be cancelled: steps 1 to 3 of **Send to the server**, the
-confirmation, then one job (with the `clientId`; more photos than the server's `maxItemsPerJob` are refused with a
-message, use **Send to the server** for those). Then:
-
-1. Polls `GET /api/v1/jobs/{id}/items?since=<largest seq seen>` about once a second, waiting up to 5 seconds when
-   nothing changes. Every item that becomes `ready` goes into the download queue (`GET /api/v1/items/{id}/file`,
-   several at once), and between polls the command delivers what has arrived, one file at a time:
-   - checks the length against `result.size`;
-   - reads `DNGVersion`, `OriginalRawFileName` and `OriginalDefaultFinalSize` from the file itself and requires the
-     original file name to equal the photo's file name (ignoring case) and, when both the file and Lightroom give a
-     pixel size, the two sizes to match in either orientation;
-   - writes it as `<UUID>.dng.lrrp-<run tag>-<ref>.tmp` in the destination folder and renames it to `<UUID>.dng`;
-   - never replaces a file that is already there;
-   - calls `photo:buildSmartPreview()`, which answers `existed` when Lightroom has taken the file.
-2. **Cancel** stops polling and sends `DELETE /api/v1/jobs/{id}`; files already placed stay. Cancelling after the
-   server finished stops only the fetching; **Fetch ready smart previews** brings the rest later.
-3. Shows a summary: placed (and how many Lightroom did not answer `existed` for), already there, discarded by the
-   check, download or write failures, the server's `failed` and `rejected` items with their error codes, not finished,
-   and the reasons for photos that were not sent. The log has one line per photo.
-
-While it waits, the command holds the fetch lock (below), so the automatic fetch does not deliver the same files.
+A file the server no longer has (`404 not_in_cache`) is counted as such and tried again by the next fetch. The
+summary counts placed (and how many Lightroom did not answer `existed` for), already there, discarded by the check,
+download or write failures, the server's `failed` and `rejected` items with their error codes, not finished, and the
+reasons for photos that were left out. The log has one line per photo.
 
 The pixel size the plug-in compares is Lightroom's `dimensions` metadata; with Lightroom Classic 15.6 it matched the
 DNG's `OriginalDefaultFinalSize` for all 157 photos of the test catalog; other cameras are not verified. When
@@ -214,8 +211,10 @@ Lightroom gives no size, the photo is placed after the name check and the log li
 The SHA-256 is not checked: the SDK has no SHA-256 and Lightroom's Lua has no bit operations; the length and the
 content checks are made instead.
 
-When polling fails ten times in a row, the token is rejected, or the server no longer knows the job, the command stops
-and leaves the job on the server; **Fetch ready smart previews** brings what it builds later.
+Fetching is **resumable**: cancelled, interrupted by an error, or cut off by Lightroom closing, the next fetch simply
+continues, because a photo that already has a smart preview is left out and nothing is ever overwritten. A cancelled
+run remembers what it finished; a run that ended with an error remembers nothing, so the next one reads those items
+again and leaves the placed ones alone.
 
 ### Server status...
 
@@ -227,7 +226,8 @@ catalog yet (an upper bound: some may have been placed in another way). The dial
 
 - **Fetch now**: fetches everything this catalog sent, as the Fetch command does.
 - **Retry** (shown when a job has failed items): picks a job and sends `POST /api/v1/jobs/{id}/retry`; the answer is
-  shown under the button. The server checks each retried file again as it is now.
+  shown under the button. The server checks each retried file again as it is now, and the automatic fetch waits for
+  that job again.
 - **Open the dashboard**: opens the server URL in the browser.
 
 A server URL that is not set or malformed, a server that cannot be reached, a rejected token (401) and an answer that
@@ -272,9 +272,10 @@ hand.
 
 ### Import a folder without the dialog...
 
-New in 0.6.0, **not yet run in Lightroom.** It starts Lightroom's own import of one folder without the import dialog,
-with the settings of the previous import, and optionally sends the imported photos to the server when the import has
-finished. It replaces 0.5.0's «Add a folder without previews...», which added photos one by one with
+New in 0.6.0, which ran once in Lightroom; 0.7.0 cut it down to the check, the dialog and the start of the import, and
+that version **has not been run in Lightroom**. It starts Lightroom's own import of one folder without the import
+dialog, with the settings of the previous import, and leaves the sending to the automatic send. It replaces 0.5.0's
+«Add a folder without previews...», which added photos one by one with
 `catalog:addPhoto` and was far too slow on a NAS (see «What has been tried in Lightroom»). It is Lightroom that changes
 its catalog here, with its own import, on the user's command
 ([decision record 0007](../docs/adr/0007-photos-added-through-lightroom-on-the-users-command.md)); the plug-in never
@@ -295,60 +296,58 @@ lists the folder, never opens, changes, moves or deletes a file, and writes noth
    established).
 3. A dialog (`LrDialogs.presentModalDialog`) shows what Lightroom will do: «Add», the previews (`bthm` is shown as
    «Embedded & Sidecar»; any other code as «Lightroom builds its own», with the code), whether Build Smart Previews is
-   on (with a warning), and a develop or metadata preset of the previous import. **Send the imported photos to the
-   server afterwards** is on by default, offered only when a server URL is set and the folder lies under a path
-   mapping; the choice and the folder are remembered (`Settings.readImportFolder`). With the send on, the plug-in asks
-   the server (`GET /api/v1/info`) whether it can build; if not, it asks whether to import without sending.
-4. **The trigger.** Right before it, the plug-in reads the record again and stops if anything in it changed. With the
-   send on it takes the fetch lock first (and refuses to start while another fetch holds it). Then
+   on (with a warning), and a develop or metadata preset of the previous import. One checkbox, **Send new photos to the
+   server automatically**, shows and sets the plug-in's automatic send (the same setting as in the Plug-in Manager);
+   the line under it says what that does, or names what stands in the way (no server URL, the folder under no path
+   mapping: `ImportPlan.sendProblem`), and that with it off the photos can be sent later with **Build smart previews
+   on the server**. The folder is remembered (`importFolderLast`). The dialog asks the server nothing.
+4. **The trigger.** Right before it, the plug-in reads the record again and stops if anything in it changed. It sets
+   the automatic send as the checkbox says; switched on, it remembers the catalog's largest photo id read in the
+   check as the automatic send's mark (unless the automatic send already has one), so that every photo of this import
+   counts as new however late the first round runs, and starts the background loop. Then
    `catalog:triggerImportFromPathWithPreviousSettings(folder)` ("Triggers an import, bypassing the import dialog, using
-   the settings from the most recent import", SDK 4.0). The log has the time it was called and the time it returned.
-5. **Waiting.** Every 3 seconds (`ImportPlan.POLL_SECONDS`) the plug-in reads with sqlite3 the photos and import
-   records added since the mark (`ImportQuery.newSinceSql`: catalog id, folder as root path plus folder path, name,
-   sidecar extensions) and counts those whose folder is the chosen one or below it. It takes the import as finished
-   when at least one has appeared and the count has not changed for 20 seconds (`SETTLED_SECONDS`); it stops waiting
-   when none has appeared within 5 minutes (`NO_PHOTO_SECONDS`), after 4 hours in any case (`LIMIT_SECONDS`), or after
-   5 failed reads in a row. The progress bar says `Lightroom is importing: N photos so far`; **Cancel** stops the
-   waiting, not Lightroom's import. Between reads the task only sleeps; nothing in it lists the folder or calls
-   anything per file of it, because plug-in tasks run on Lightroom's main thread (see the table at the end). That a
-   sqlite3 process started with `LrTasks.execute` leaves Lightroom's window alone is assumed, not measured.
-6. **Sending**, with the send on and only after a finished import (or the 4-hour limit): the plug-in finds the photos
-   through the SDK by path (`catalog:findPhotoByPath`; 1384 such lookups took 1.86 s in 0.5.0's run), records their
-   catalog ids for the automatic send (`AutoSendPlan.recordSent`), and sends them as **Send to the server** does
-   (`Pipeline.prepareSend`, `Pipeline.sendJobs`), without its confirmation, labelled «Lightroom folder import» with
-   the catalog's `clientId`. Then it releases the fetch lock.
-7. The summary: how many photos of the folder Lightroom imported (and how many have a sidecar recorded, for example
-   a JPEG of a RAW+JPEG pair), how the waiting ended, photos added to other folders meanwhile (not counted), the
-   times, what was sent (job numbers) or why nothing was, and how to take the photos out (select them, Photo > Remove
-   Photos, «Remove from Lightroom»; nothing on disk is touched).
+   the settings from the most recent import", SDK 4.0), and a short notice (`LrDialogs.showBezel`):
+   `Lightroom is importing <folder>; the automatic send sends the new photos`. The command ends there: no progress
+   bar, no waiting, no fetch lock, no summary. Dialogs come only before the trigger and for refusals and errors (the
+   check says no, no sqlite3, Lightroom raised an error).
+5. **Sending** is the automatic send's job (below). It reads the new photos in each of its rounds, takes each in the
+   round after the one that first saw it, at most 500 per round, so an import that arrives in bursts over many minutes
+   is sent a batch at a time, each photo once.
 
-**Its log** (lines start with `import folder:`): every setting read; `trigger called at <time> (catalog ids above
-<mark> are new): <folder>`; `trigger returned after 0.04 s: value nil`; one line per read
-(`poll 5 at 15.2 s: 120 photos under the folder (+40), 0 elsewhere, 1 import record, read in 0.21 s`); one line per
-photo as it appears (`imported Z:\2026\IMG_0001.ARW (catalog id 50478, sidecar JPG)`); `waiting ended (settled) after
-75.3 s: …`; `found 120 of 120 photo(s) through the plug-in interface in 0.18 s`; `sending: …`. The next run in
-Lightroom is how we learn what the trigger really does: whether it returns at once, whether it takes sub-folders,
-what it does with a folder that is partly in the catalog, whether the photos reach the database one by one.
-
-**With the automatic send on.** No photo is sent twice. While the command waits for the import and sends, it holds
-the fetch lock, so every round of the automatic send is skipped («skipped: another fetch holds the lock»); right
-before it sends, it records the photos' catalog ids, and later rounds leave them out («imported and sent by «Import a
-folder without the dialog»»). Without «send afterwards» (or when the server cannot build) the plug-in takes no lock
-and records nothing: the automatic send treats the imported photos like any other new photos. Photos imported after
-the command took the import as finished are not recorded either. When the waiting was cancelled or stopped, nothing is
-sent or recorded.
+**Its log** (lines start with `import folder:`): every setting read; `automatic send: on (was off)`; `trigger called at
+<time> (catalog ids up to <mark> were there before): <folder>`; `trigger returned after 0.16 s: value nil`.
 
 **What the check cannot know.** That the trigger uses exactly the values the catalog records (the names say so; Adobe
-documents nothing about them), whether Lightroom takes sub-folders, what it does with files of the folder that are in
-the catalog already, which previews it builds for a code other than `bthm`, and when its import has finished (the
-plug-in judges that from the count).
+documents nothing about them), whether Lightroom takes sub-folders, and which previews it builds for a code other than
+`bthm`.
 
 ### Automatic fetch
 
-Off by default. When it is switched on in the Plug-in Manager, a background task fetches everything this catalog sent
-every interval (the first time about 20 seconds after it starts), **quietly**: no dialog, no progress bar; one line in
-the log per result (the same result twice in a row is logged once), errors only in the log. A round with nothing new
-costs one request (the job list); the server's info is asked for only when there is something to fetch.
+On by default since 0.7.0 (`Settings.upgrade` switches it on once in settings saved by an older version, which stored
+the old default, off; key `settingsVersion`). A background task fetches what this catalog waits for, every interval
+(the first time about 20 seconds after it starts), **quietly**: no dialog, no progress bar; one line in the log per
+result (the same result twice in a row is logged once), errors only in the log, and a short notice that fades by
+itself when it placed something (`3 smart previews arrived from the server`). It delivers as a manual fetch does
+(every DNG checked, nothing replaced) and never at the same time as one.
+
+**When it talks to the server** (`PendingJobs.lua`), so that an idle Lightroom never wakes a sleeping NAS or keeps it
+awake:
+
+- **Pending jobs.** Every job this catalog creates is recorded as pending, per catalog, in the plug-in's preferences
+  (`pendingJobs`), so the list survives a restart: by **Build smart previews on the server**, by the automatic send,
+  and by **Retry** in **Server status...** (which starts the job's clock again).
+- **Nothing pending: no request at all**, not even the job list or the server's info. The log says once
+  `automatic fetch: nothing pending for this catalog; the server is not asked`.
+- **Something pending:** the round fetches everything this catalog sent, as «Everything this catalog sent» does (the
+  job list, then the items of jobs that may have something new; the server's info only when there is something to
+  fetch). Jobs sent before 0.7.0 are fetched along with them then, but never make the plug-in ask by themselves.
+- **The end of a job's life.** A job stops being pending when a fetch (automatic or manual «everything») finds it done
+  (no longer `active` on the server and every ready item dealt with, as recorded per job), when the server no longer
+  lists it (it deletes jobs some days after they finished), or **7 days after it was sent** (`MAX_AGE_DAYS`), whatever
+  its state. Its files can still be fetched by hand.
+- **Back-off.** A contact that fails (no answer, or an error such as a rejected token) puts off the next one by 1, 2, 5,
+  10 and 30 minutes, then an hour each time (`BACKOFF`, by failures in a row); rounds before then make no request and
+  log `the server did not answer; next try at <HH:MM>` once. No dialog. Adding a job or a successful contact resets it.
 
 - It starts when the plug-in loads (`LrInitPlugin`; `Info.lua` sets `LrForceInitPlugin` so that this happens when
   Lightroom starts), when the plug-in is enabled, and when the setting (or the automatic send, below) is switched on in
@@ -358,9 +357,9 @@ costs one request (the job list); the server's info is asked for only when there
   reports the plug-in as disabled. Two signals reach it: a stop flag in the module `AutoFetch` and a run token in the
   plug-in's preferences (every start writes a new one; a loop whose token is no longer the stored one ends, so a
   reloaded plug-in never leaves two loops running).
-- **The fetch lock.** A manual fetch, the automatic fetch and the build command (while it waits for its job) never run
-  at the same time: each takes a lock kept in the plug-in's preferences and refreshes it while it works. The automatic
-  fetch skips a round when the lock is taken; a manual command says so in a dialog. A lock left behind when Lightroom
+- **The fetch lock.** A manual fetch, the automatic fetch and the automatic send never run at the same time: each
+  takes a lock kept in the plug-in's preferences and refreshes it while it works. The automatic fetch and send skip a
+  round when the lock is taken; a manual fetch says so in a dialog. A lock left behind when Lightroom
   closed in the middle of a fetch frees itself within 3 minutes (a lock claiming a longer life, after the computer's
   clock was set back, is ignored).
 
@@ -372,7 +371,10 @@ photos, then fetches. It sends raw photos **added to the catalog after the optio
 preview and whose path maps to an available server root, as one job labelled «Lightroom import (automatic)» with this
 catalog's `clientId`, so the automatic fetch (or **Fetch ready smart previews**) brings their smart previews in. It
 shows no dialog and logs one line per round that did something; a round with nothing to do logs nothing, and the same
-line twice in a row (for example the same error) is logged once.
+line twice in a row (for example the same error) is logged once. It finds new photos in the catalog itself and asks
+the server only when it has photos to send: photos that are left out by checks that need no server (virtual copies,
+videos, an existing smart preview, no path mapping, a file type the server did not take the last time it was asked,
+remembered as `serverExtensions`) are settled without a request.
 
 How new photos are found. The SDK has no import event; `catalog:findPhotos` has no criterion for the import date or
 for smart previews (its documented date criteria are `captureTime` and `touchTime`, «Edit Date»); and the «Previous
@@ -393,10 +395,14 @@ The rules (`AutoSendPlan.lua`):
 
 - The first round for a catalog only records the mark: what is in the catalog when the option is switched on is never
   sent. Switching the option off forgets the marks of all catalogs, so switching it on again starts from that moment.
-- A photo is taken in the round **after** the one that first saw it, so that an import in progress has settled.
+- **Import a folder without the dialog...** with its checkbox on sets the mark to the catalog's largest photo id read
+  before the import, when the automatic send has none yet, so that all photos of that import count as new.
+- A photo is taken in the round **after** the one that first saw it, so that an import in progress has settled. An
+  import that arrives in bursts (as Lightroom's did in the one run: about a hundred photos every 22–26 s) is simply
+  sent a part per round; the stand-in run sent 150 photos arriving in five bursts as five jobs, each photo once.
 - Left out for good: virtual copies, videos, photos that already have a smart preview, file types the server does not
-  take, photos under no path mapping or whose server root is not available, photos whose catalog record names another
-  file, and photos that **Import a folder without the dialog...** sent itself (see there).
+  take, photos under no path mapping or whose server root is not available, and photos whose catalog record names
+  another file.
 - A photo whose file record cannot be read from the catalog database yet (sqlite3) waits, together with the photos
   after it, for the next round; after 3 rounds it is left out and the others go ahead.
 - At most 500 photos per round (and at most the server's `maxItemsPerJob`); the rest follow in the next rounds.
@@ -473,22 +479,23 @@ Lua 5.1:
 | `HttpJson.lua` | yes | JSON request headers, turning an HTTP answer into a decoded body or a problem |
 | `Jobs.lua` | yes | Job, item, lookup and file URLs, the request bodies, checking job, item and lookup objects |
 | `JobTracker.lua` | yes | Item states as they arrive; the largest `seq` seen |
-| `JobRunner.lua` | yes | The polling loop with back-off and cancel, with Lightroom and the network passed in |
+| `JobRunner.lua` | yes | The polling loop with back-off and cancel (used by the check), with Lightroom and the network passed in |
 | `DownloadQueue.lua` | yes | Several downloads at once, placing one at a time in the owning task, cancel, with tasks passed in |
 | `ClientId.lua` | yes | Making up a catalog's `clientId` |
 | `CatalogState.lua` | yes | The `clientId` and the job records of each catalog, in a key-value store |
 | `FetchPlan.lua` | yes | Which of the catalog's jobs to read, and what to remember about each afterwards |
 | `Lease.lua` | yes | The fetch lock in a key-value store: take, refresh, release, expiry |
 | `AutoFetchLoop.lua` | yes | The loop of the automatic fetch and send, with Lightroom passed in |
-| `AutoSendPlan.lua` | yes | The automatic send: which photos are new, when they are taken, the mark per catalog, the log line |
+| `AutoSendPlan.lua` | yes | The automatic send: which photos are new, when they are taken, the mark per catalog, the file types the server took, the log line |
+| `PendingJobs.lua` | yes | The jobs each catalog waits for, when the automatic fetch may ask the server, the back-off, the end of a job's life |
 | `StatusReport.lua` | yes | The texts of the status dialog |
 | `DngReader.lua` | yes | `DNGVersion`, `OriginalRawFileName`, `OriginalDefaultFinalSize` from a DNG's first IFD, both byte orders; the directories, entries and tiles a comparison needs |
 | `DngCompare.lua` | yes | Comparing two DNGs: raw image structure, every tile, identity tags, expected and unexpected differences, the texts |
 | `CompatCheck.lua` | yes | «Check the server against Lightroom»: which photo can be checked, what to do with the server's answers, the result text |
 | `Delivery.lua` | yes | Checking a downloaded DNG, placing it (temporary name, rename, no overwrite), `buildSmartPreview()` |
-| `RunSummary.lua` | yes | Counts per outcome and reason, the dialog texts, the per-photo log lines |
-| `ImportQuery.lua` | yes | «Import a folder without the dialog...»: the two read-only `SELECT`s (the record of the previous import and the mark; the photos and imports added since) and parsing their output |
-| `ImportPlan.lua` | yes | «Import a folder without the dialog...»: judging the record of the previous import, whether it can send, which new photos lie under the folder, when the import is taken as finished, the dialog, summary and log texts |
+| `RunSummary.lua` | yes | Counts per outcome and reason, the dialog texts and short notices, whether a send needs a dialog, the per-photo log lines |
+| `ImportQuery.lua` | yes | «Import a folder without the dialog...»: the read-only `SELECT` (the record of the previous import and the mark) and parsing its output |
+| `ImportPlan.lua` | yes | «Import a folder without the dialog...»: judging the record of the previous import, whether the automatic send can send, the dialog, notice and log texts |
 | `Json.lua` | yes | JSON, [rxi/json.lua](https://github.com/rxi/json.lua) unmodified (see [THIRD-PARTY.md](THIRD-PARTY.md)) |
 | `Log.lua` | no | `LrLogger` wrapper |
 | `ServerClient.lua` | no | `LrHttp` calls to the server |
@@ -499,7 +506,7 @@ Lua 5.1:
 | `AutoFetch.lua` | no | Starting and stopping the automatic loop (fetch and send) |
 | `AutoSend.lua` | no | One round of the automatic send: finding new photos (scan, fallback), sending them |
 | `PluginInfoProvider.lua` | no | The Plug-in Manager section |
-| `ImportFolder.lua`, `SendToServer.lua`, `FetchSmartPreviews.lua`, `BuildSmartPreviews.lua`, `ServerStatus.lua`, `CheckServer.lua`, `Diagnostics*.lua` | no | The menu commands |
+| `ImportFolder.lua`, `BuildSmartPreviews.lua`, `FetchSmartPreviews.lua`, `ServerStatus.lua`, `CheckServer.lua`, `Diagnostics*.lua` | no | The menu commands |
 | `InitPlugin.lua`, `EnablePlugin.lua`, `DisablePlugin.lua`, `ShutdownPlugin.lua` | no | Start and stop the automatic loop |
 
 A smart preview lives at `<catalog folder>\<catalog name> Smart Previews.lrdata\<U[0]>\<U[0..3]>\<U>.dng`, where `U`
@@ -542,7 +549,7 @@ pull request on which Lightroom version and platform.
 - Finding the jobs of a catalog that was moved or renamed (it gets a new `clientId`); fetch by selection instead.
 - Refusing to deliver when the compatibility check fails (the plan's stage 5); the check is a command run by hand.
 - Detecting an import as it happens: the SDK has no import event; the automatic send looks for new photos every
-  interval, and **Import a folder without the dialog...** judges the end of its import from the count.
+  interval, and **Import a folder without the dialog...** does not know when its import has finished.
 - Importing several folders in one go with **Import a folder without the dialog...** (one folder per run), or with
   settings other than those of the previous import.
 
@@ -622,16 +629,28 @@ removed in 0.6.0 (decision record 0007).
 | `LrDate.currentTime()` | has fractions of a second (the log's timings) |
 | For comparison: Lightroom's import dialog on the same folder (Add, «Embedded & Sidecar») | 0.17 s per photo, window responsive |
 
-Version 0.6.0: «Import a folder without the dialog...» has not been tried in Lightroom yet. What to look at when it
-is:
+Version 0.6.0, Lightroom Classic 15.6 on Windows, 2026-11-14: «Import a folder without the dialog...» ran once, on a
+test catalog and a network folder with 1384 raw files and 1384 JPEGs (9 of the photos in the catalog already), with
+«send afterwards». Its waiting and sending were removed in 0.7.0 (decision record 0007).
 
 | What | Result |
 |---|---|
-| The menu item; `LrDialogs.runOpenPanel` with one folder; the dialog with the settings and the send checkbox | not tried |
-| Reading `Adobe_variablesTable` with sqlite3 while Lightroom has the catalog open; the refusal when the previous import was not «Add» | not tried in Lightroom (the `SELECT`s ran, read-only, against test catalogs of Lightroom Classic 15.6) |
-| `catalog:triggerImportFromPathWithPreviousSettings`: whether it returns at once or after the import, what it returns, whether it shows anything | not tried |
-| Whether the import started this way uses exactly the settings the catalog records for the previous import | not checked |
-| Sub-folders of the chosen folder; files of the folder that are in the catalog already | not seen |
-| Whether the photos reach the catalog database one by one while Lightroom imports (the reads' counts), and whether 20 seconds without a new photo is a fair sign that the import has finished | not seen |
-| Whether the window stays responsive while the plug-in waits (sqlite3 processes every 3 seconds, `LrTasks.sleep` between) | not seen |
-| The send afterwards: `findPhotoByPath` for the imported photos, the job, the automatic send leaving them out | not tried |
+| The menu item; `LrDialogs.runOpenPanel` with one folder; the dialog with the settings and the send checkbox | worked |
+| Reading `Adobe_variablesTable` with sqlite3 while Lightroom has the catalog open | worked: the settings line in the log was right (`refInPlace`, `bthm`) |
+| `catalog:triggerImportFromPathWithPreviousSettings` | returned after 0.16 s with `nil`; Lightroom then imported by itself, with its own two progress bars (import, initial previews) |
+| How Lightroom imported | about 2 min 20 s before the first photo (its scan of the folder), then photos committed to the catalog in bursts of roughly a hundred every 22–26 s: 1375 photos in 288 s (0.21 s per photo). One `AgLibraryImport` row was created at the trigger and filled as it went |
+| The JPEGs; the photos already in the catalog | the JPEGs were recorded as sidecars; the 9 photos were left alone |
+| «Settled after 20 s without a new photo» | failed: it fired between two bursts, so the wait ended at 425 of 1384 photos and only those were sent |
+| The send afterwards while Lightroom imported | `findPhotoByPath` for the 425 photos took 45.8 s and the whole preparation of the send 226 s |
+| The plug-in's own progress bar | it moved weakly, it was unclear what it showed, and it looked useless next to Lightroom's two bars |
+| Sub-folders of the chosen folder; whether the import uses exactly the settings the catalog records | not seen |
+
+Version 0.7.0: nothing has been tried in Lightroom yet. What to look at when it is:
+
+| What | Result |
+|---|---|
+| The menus: three items in Library > Plug-in Extras, the status, the check and the diagnostics in Help > Plug-in Extras (`LrHelpMenuItems`), every title with `LRRP: ` | not tried |
+| «Build smart previews on the server» without a confirmation; the short notice (`LrDialogs.showBezel`) when every photo was taken; the dialog when photos were left out | not tried |
+| The automatic fetch on by default (also after an update from older settings); no request with nothing pending (watch the server's log); a fetch while a job is pending; the notice when it placed something | not tried |
+| The pending jobs across a restart of Lightroom; the back-off with the server switched off or asleep | not tried |
+| «Import a folder without the dialog...»: the checkbox for the automatic send, the notice after the trigger; the automatic send keeping up with Lightroom's bursts | not tried |

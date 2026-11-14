@@ -102,7 +102,9 @@ The thinnest path through every part, usable for real work.
   previews» for the selection or for everything this catalog sent, resumable, several downloads at once; the
   send-and-wait command stays; optional automatic fetch while Lightroom runs; a status dialog with retry and a link
   to the dashboard. (A download of many files in one stream was planned here; several downloads at once do the job
-  without a new format. It comes back only if measurements ask for it.)
+  without a new format. It comes back only if measurements ask for it.) Plug-in 0.7.0 dropped the send-and-wait
+  command: «Build smart previews on the server» now sends and returns at once, and the automatic fetch, on by default,
+  asks the server only while the catalog waits for something.
 - Done when: 2000 photos are sent, Lightroom is closed, and the next day one command delivers all; an interrupted
   fetch continues; a server restart in the middle loses nothing.
 
@@ -161,9 +163,10 @@ The thinnest path through every part, usable for real work.
     module off the originals in this workflow (one run without a restart of Lightroom still read them).
   - Answered: adding photos with the SDK's `catalog:addPhoto` instead of the import (plug-in 0.5.0) took about 37 s
     per photo on a NAS folder of 2768 files, with Lightroom's window frozen (decision record 0007).
-  - Still open: the plug-in's «Import a folder without the dialog...» (plug-in 0.6.0) starts Lightroom's own import
-    with the previous settings, without the dialog. How it behaves (whether the call returns at once, sub-folders,
-    files already in the catalog) has not been seen yet.
+  - Partly answered: the plug-in's «Import a folder without the dialog...» starts Lightroom's own import with the
+    previous settings, without the dialog. In its one run (plug-in 0.6.0) the call returned at once, Lightroom
+    imported in bursts over several minutes and left the photos already in the catalog alone; waiting for the end of
+    the import failed, so 0.7.0 leaves the sending to the automatic send. Sub-folders have not been seen yet.
 - GPU for the converter in the container. The two CPU-wasting modes (`-mp`, exactly two processes). A newer Wine.
 - Adobe's installer under Wine. Converters newer than 17.4, whose GPU switch changed. Passing `-dng1.7` explicitly,
   as Adobe's command-line examples for lossy JPEG XL do (we rely on the default).

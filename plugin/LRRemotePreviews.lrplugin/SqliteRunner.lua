@@ -1,10 +1,8 @@
 -- Runs the sqlite3 command-line tool with LrTasks.execute. The SDK cannot capture a command's output, so the
 -- command line (built by SqliteCommand, pure and unit tested) reads a script file and redirects stdout and
 -- stderr to two files, all in the temporary folder; they are deleted afterwards. The catalog is opened
--- read-only and only the SELECT from SqliteCommand.lookupSql or ImportQuery's SELECTs are passed (decision record
--- 0002). Must run inside an LrTasks task. That LrTasks.execute lets Lightroom's window go on while the process runs
--- is assumed, not measured; it is why «Import a folder without the dialog...» reads the catalog this way while
--- Lightroom imports.
+-- read-only and only the SELECT from SqliteCommand.lookupSql or ImportQuery's SELECT is passed (decision record
+-- 0002). Must run inside an LrTasks task.
 local LrFileUtils = import 'LrFileUtils'
 local LrPathUtils = import 'LrPathUtils'
 local LrTasks = import 'LrTasks'
