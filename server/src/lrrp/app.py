@@ -15,6 +15,7 @@ from collections.abc import AsyncIterator, Callable, Iterable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, Literal, Protocol
 
@@ -23,6 +24,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import AfterValidator, BaseModel, Field, ValidationInfo, field_validator
+from starlette.concurrency import run_in_threadpool
 
 from lrrp import __version__, converter, folders, runtime, sensors, sources
 from lrrp.autoscan import AutoScanner, ScanBusy
@@ -40,18 +42,26 @@ from lrrp.store import (
     DATABASE_NAME,
     ITEM_STATES,
     USE_RESOLUTION,
+    AppendRefused,
     Item,
     Job,
     NewItem,
     NewJob,
     Store,
 )
+from lrrp.waits import Waits, Watch
 
 log = logging.getLogger(__name__)
 
 NAME = "LR Remote Previews"
 API_VERSION = 1
 MAX_ITEMS_PER_JOB = 5000
+MAX_WAIT_SECONDS = 55
+"""The longest ``wait`` of ``GET /api/v1/jobs/{id}/items``: below the 60 s that reverse proxies
+commonly allow for an answer (nginx's ``proxy_read_timeout``, for one)."""
+WAIT_DRAIN_SECONDS = 10.0
+"""At shutdown, how long the lifespan lets the waiting requests answer before it closes the
+database."""
 MAX_LISTED_FOLDERS = 5000
 """The most sub-folders ``GET /api/v1/browse`` lists."""
 MAX_FOLDER_FILES = 50000
@@ -170,6 +180,8 @@ class Capabilities(BaseModel):
     preview_long_edge: int = Field(serialization_alias="previewLongEdge")
     max_items_per_job: int = Field(serialization_alias="maxItemsPerJob")
     job_retention_days: int = Field(serialization_alias="jobRetentionDays")
+    append_items: bool = Field(serialization_alias="appendItems")
+    max_wait_seconds: int = Field(serialization_alias="maxWaitSeconds")
 
 
 class Info(BaseModel):
@@ -195,6 +207,10 @@ class JobRequest(BaseModel):
     priority: Priority | None = Field(
         default=None, description='"normal" (default) or "background"'
     )
+    items: list[ItemRequest] = Field(min_length=1)
+
+
+class AddItemsRequest(BaseModel):
     items: list[ItemRequest] = Field(min_length=1)
 
 
@@ -251,6 +267,11 @@ class JobOut(BaseModel):
 
 
 class JobCreated(BaseModel):
+    job: JobOut
+    items: list[ItemOut]
+
+
+class ItemsAdded(BaseModel):
     job: JobOut
     items: list[ItemOut]
 
@@ -488,7 +509,8 @@ class LogAnswer(BaseModel):
 @dataclass
 class Services:
     """What runs behind the API: the database, the cache, the converter runner, the scheduler,
-    the runtime settings, the self-test, the automatic scan and the cache clean-up."""
+    the runtime settings, the self-test, the automatic scan, the cache clean-up and the requests
+    that wait for a change."""
 
     store: Store
     cache: Cache
@@ -499,6 +521,7 @@ class Services:
     selftest: SelfTest
     autoscan: AutoScanner
     cleaner: CacheCleaner
+    waits: Waits
     clock: Callable[[], float]
     """The time (seconds since the epoch) of everything the server records."""
     sysfs: Path | None
@@ -520,7 +543,8 @@ class Services:
         settings.data_dir.mkdir(parents=True, exist_ok=True)
         cache = Cache(settings.cache_dir)
         cache.prepare()
-        store = Store(settings.data_dir / DATABASE_NAME)
+        waits = Waits()
+        store = Store(settings.data_dir / DATABASE_NAME, on_change=waits.changed)
         recovered = store.recover(clock())
         if recovered:
             log.info("put %d item(s) left building by the last run back into the queue", recovered)
@@ -573,15 +597,18 @@ class Services:
             selftest=SelfTest(settings, runner, scheduler, converter_version),
             autoscan=autoscan,
             cleaner=cleaner,
+            waits=waits,
             clock=clock,
             sysfs=sysfs,
         )
 
     def close(self) -> None:
+        self.waits.close()
         self.autoscan.stop()
         self.cleaner.stop()
         self.scheduler.stop()
         self.display.stop()
+        self.waits.stop()
         self.store.close()
 
     def touch(self, entries: Iterable[CacheEntry]) -> None:
@@ -609,21 +636,23 @@ class Services:
 
 
 # --- Dependencies ----------------------------------------------------------------------------
+# Coroutines, though nothing in them waits: FastAPI runs a plain function dependency in a worker
+# thread, which would cost every request (also each waiting one) a few trips to the thread pool.
 
 
-def get_settings(request: Request) -> Settings:
+async def get_settings(request: Request) -> Settings:
     return request.app.state.settings
 
 
-def get_services(request: Request) -> Services:
+async def get_services(request: Request) -> Services:
     return request.app.state.services
 
 
-def get_versions(request: Request) -> VersionCache:
+async def get_versions(request: Request) -> VersionCache:
     return request.app.state.converter_versions
 
 
-def get_log_ring(request: Request) -> LogRing:
+async def get_log_ring(request: Request) -> LogRing:
     return request.app.state.log_ring
 
 
@@ -635,7 +664,7 @@ LogRingDep = Annotated[LogRing, Depends(get_log_ring)]
 _bearer = HTTPBearer(auto_error=False, description="The server's token (LRRP_TOKEN).")
 
 
-def require_token(
+async def require_token(
     settings: SettingsDep,
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
 ) -> None:
@@ -679,6 +708,8 @@ def get_info(settings: SettingsDep, versions: VersionsDep) -> Info:
             preview_long_edge=converter.PREVIEW_LONG_EDGE,
             max_items_per_job=MAX_ITEMS_PER_JOB,
             job_retention_days=settings.job_retention_days,
+            append_items=True,
+            max_wait_seconds=MAX_WAIT_SECONDS,
         ),
     )
 
@@ -686,11 +717,69 @@ def get_info(settings: SettingsDep, versions: VersionsDep) -> Info:
 @api.post("/v1/jobs", status_code=201)
 def create_job(body: JobRequest, settings: SettingsDep, services: ServicesDep) -> JobCreated:
     _check_requests(body.items, "A job")
-    checked, keys = _identify(settings, body.items)
+    new_items, to_build = _new_items(settings, services, body.items)
+    if to_build and not converter.is_installed(settings.wineprefix, settings.converter_exe):
+        raise _converter_not_installed()
+    # An empty label, client or clientId counts as none (null in the job object).
+    job, items = services.store.create_job(
+        body.client or None,
+        body.label or None,
+        new_items,
+        services.clock(),
+        client_id=body.client_id or None,
+        priority=body.priority or "normal",
+    )
+    services.touch(item.result for item in items if item.result is not None)
+    if job.state == "active":
+        services.scheduler.wake()
+    return JobCreated(job=_job_out(job), items=_items_out(items))
+
+
+@api.post("/v1/jobs/{job_id}/items")
+def add_job_items(
+    job_id: int, body: AddItemsRequest, settings: SettingsDep, services: ServicesDep
+) -> ItemsAdded:
+    # The cheap refusals come before the files are looked at; the store checks them all again in
+    # the transaction that adds the items, so a change meanwhile cannot slip through.
+    job = _existing_job(services, job_id)
+    if job.state == "cancelled":
+        raise _job_cancelled()
+    _check_requests(body.items, "A request")
+    refs = [item.ref for item in body.items]
+    used = services.store.used_refs(job_id, refs)
+    if used:
+        raise _ref_in_job(next(ref for ref in refs if ref in used))
+    total = sum(job.counts.values())
+    if total + len(body.items) > MAX_ITEMS_PER_JOB:
+        raise _job_too_big(total, len(body.items))
+    new_items, to_build = _new_items(settings, services, body.items)
+    if to_build and not converter.is_installed(settings.wineprefix, settings.converter_exe):
+        raise _converter_not_installed()
+    outcome = services.store.append_items(job_id, new_items, services.clock(), MAX_ITEMS_PER_JOB)
+    if isinstance(outcome, AppendRefused):
+        if outcome.reason == "unknown":
+            raise _no_job()
+        if outcome.reason == "cancelled":
+            raise _job_cancelled()
+        if outcome.reason == "duplicate_ref":
+            raise _ref_in_job(outcome.ref or "")
+        raise _job_too_big(outcome.total, len(new_items))
+    services.touch(item.result for item in outcome.items if item.result is not None)
+    if any(item.state == "queued" for item in outcome.items):
+        services.scheduler.wake()
+    return ItemsAdded(job=_job_out(outcome.job), items=_items_out(outcome.items))
+
+
+def _new_items(
+    settings: Settings, services: Services, requested: Sequence[ItemRequest]
+) -> tuple[list[NewItem], bool]:
+    """Each requested file checked as it is now: rejected, ready (its DNG is in the cache) or
+    queued; and whether any is queued."""
+    checked, keys = _identify(settings, requested)
     entries = services.store.cache_entries(key for key in keys if key is not None)
     new_items: list[NewItem] = []
     to_build = False
-    for item, found, key in zip(body.items, checked, keys, strict=True):
+    for item, found, key in zip(requested, checked, keys, strict=True):
         if isinstance(found, sources.Rejection):
             new_items.append(
                 NewItem(
@@ -718,21 +807,7 @@ def create_job(body: JobRequest, settings: SettingsDep, services: ServicesDep) -
                 mtime_ns=found.mtime_ns,
             )
         )
-    if to_build and not converter.is_installed(settings.wineprefix, settings.converter_exe):
-        raise _converter_not_installed()
-    # An empty label, client or clientId counts as none (null in the job object).
-    job, items = services.store.create_job(
-        body.client or None,
-        body.label or None,
-        new_items,
-        services.clock(),
-        client_id=body.client_id or None,
-        priority=body.priority or "normal",
-    )
-    services.touch(item.result for item in items if item.result is not None)
-    if job.state == "active":
-        services.scheduler.wake()
-    return JobCreated(job=_job_out(job), items=_items_out(items))
+    return new_items, to_build
 
 
 @api.get("/v1/jobs")
@@ -751,20 +826,79 @@ def get_job(job_id: int, services: ServicesDep) -> JobEnvelope:
     return JobEnvelope(job=_job_out(_existing_job(services, job_id)))
 
 
-@api.get("/v1/jobs/{job_id}/items")
-def get_job_items(
+@api.get("/v1/jobs/{job_id}/items", response_model=ItemPage)
+async def get_job_items(
     job_id: int,
+    request: Request,
     services: ServicesDep,
     since: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=1000)] = 500,
     state: ItemState | None = None,
+    wait: Annotated[
+        float,
+        Query(
+            ge=0,
+            le=MAX_WAIT_SECONDS,
+            description="Seconds to wait for a change when there is nothing to return "
+            f"(0 to {MAX_WAIT_SECONDS})",
+        ),
+    ] = 0,
+) -> ItemPage | Response:
+    look = partial(_item_page, services, job_id, since, limit, state)
+    if wait == 0:
+        return await run_in_threadpool(look)
+    return await _wait_for_items(request, services.waits, job_id, state, wait, look)
+
+
+def _item_page(
+    services: Services, job_id: int, since: int, limit: int, state: str | None
 ) -> ItemPage:
-    _existing_job(services, job_id)
     items, more = services.store.items_since(job_id, since, limit, state)
     # Read the job after its items, so that its seq is never behind theirs.
     return ItemPage(
         job=_job_out(_existing_job(services, job_id)), items=_items_out(items), more=more
     )
+
+
+async def _wait_for_items(
+    request: Request,
+    waits: Waits,
+    job_id: int,
+    state: str | None,
+    wait: float,
+    look: Callable[[], ItemPage],
+) -> ItemPage | Response:
+    """Look until a look finds items, the job is gone (the look answers 404), ``wait`` seconds
+    have passed or the server stops; between looks, sleep until the job changes (``lrrp.waits``).
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + wait
+    watch = waits.watch(job_id, state)
+    listener = asyncio.create_task(_until_disconnected(request, watch))
+    try:
+        while True:
+            watch.clear()
+            page = await waits.look(look)
+            if page.items or watch.closing or loop.time() >= deadline:
+                return page
+            await watch.sleep(deadline - loop.time())
+            if watch.client_gone:
+                return Response(status_code=204)  # nobody reads it
+    finally:
+        listener.cancel()
+        waits.forget(watch)
+
+
+async def _until_disconnected(request: Request, watch: Watch) -> None:
+    """Wake ``watch`` when the client closes its connection."""
+    try:
+        while (await request.receive())["type"] != "http.disconnect":
+            pass
+    except Exception:  # the server's affair; the request then just waits its time
+        log.debug("cannot follow the connection of a waiting request", exc_info=True)
+        return
+    watch.client_gone = True
+    watch.wake()
 
 
 @api.post("/v1/jobs/{job_id}/retry")
@@ -1170,6 +1304,19 @@ def _job_cancelled() -> ApiError:
     return ApiError(409, "The job is cancelled; ask for its files in a new job", "job_cancelled")
 
 
+def _ref_in_job(ref: str) -> ApiError:
+    return ApiError(422, f"The job already has an item with the ref {ref!r}", "duplicate_ref")
+
+
+def _job_too_big(total: int, added: int) -> ApiError:
+    return ApiError(
+        413,
+        f"The job has {total} items; {added} more would make more than {MAX_ITEMS_PER_JOB}."
+        " Start another job for the rest",
+        "too_many_items",
+    )
+
+
 def _not_in_cache() -> ApiError:
     return ApiError(404, "The DNG is not in the server's cache", "not_in_cache")
 
@@ -1353,6 +1500,14 @@ def _is_file(path: Path) -> bool:
         return False
 
 
+def end_waits(app: FastAPI) -> None:
+    """The server begins to stop: every request that waits for a change answers now, and later
+    ones do not wait. From any thread."""
+    services: Services | None = getattr(app.state, "services", None)
+    if services is not None:
+        services.waits.close()
+
+
 def create_app(
     settings: Settings,
     *,
@@ -1392,6 +1547,10 @@ def create_app(
             try:
                 yield
             finally:
+                # The waiting requests answer now, while the database is still open.
+                services.waits.close()
+                if not await services.waits.drained(WAIT_DRAIN_SECONDS):
+                    log.warning("stopping with %d waiting request(s)", services.waits.watching())
                 await asyncio.to_thread(services.close)
         finally:
             server_log.removeHandler(ring)

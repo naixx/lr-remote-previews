@@ -10,6 +10,7 @@ from typing import Any, TypeVar
 
 import pytest
 import yaml
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from lrrp.app import create_app
@@ -111,7 +112,11 @@ class Harness:
         file.write_bytes(path.encode("utf-8") if content is None else content)
         return file
 
-    def client(
+    def client(self, **options: Any) -> TestClient:
+        """A test client of ``app(**options)``."""
+        return TestClient(self.app(**options))
+
+    def app(
         self,
         *,
         workers: int | str = 3,
@@ -124,8 +129,9 @@ class Harness:
         clock: Callable[[], float] | None = None,
         sysfs: Path | None = None,
         **variables: str,
-    ) -> TestClient:
-        """``sysfs`` defaults to an empty folder: no CPU temperature, whatever the machine has."""
+    ) -> FastAPI:
+        """The server with the fake converter. ``sysfs`` defaults to an empty folder: no CPU
+        temperature, whatever the machine has."""
         settings = Settings.from_env(
             {
                 **self.settings_env,
@@ -150,7 +156,7 @@ class Harness:
             gpu_config=self.gpu_config,
             warm_up_timeout=30.0,
         )
-        app = create_app(
+        return create_app(
             settings,
             runner_config=config,
             display=display or NoDisplay(),
@@ -158,7 +164,6 @@ class Harness:
             clock=clock,
             sysfs=sysfs or self.tmp / "no-sysfs",
         )
-        return TestClient(app)
 
     def set_mtime(self, path: str, moment: float) -> None:
         """Give a file under the root ``archive`` this modification time (seconds)."""
@@ -274,6 +279,24 @@ def post_job(
     """Create a job with one item per path (refs "0", "1", ...) and return the answer."""
     items = [{"ref": str(index), "root": root, "path": path} for index, path in enumerate(paths)]
     response = http.post("/api/v1/jobs", json={"items": items, **fields})
+    assert response.status_code == expect, response.text
+    return response.json()
+
+
+def add_items(
+    http: TestClient,
+    job_id: int,
+    paths: Iterable[str],
+    *,
+    prefix: str,
+    root: str = "archive",
+    expect: int = 200,
+) -> dict[str, Any]:
+    """Add one item per path to a job (refs "<prefix>0", "<prefix>1", ...); return the answer."""
+    items = [
+        {"ref": f"{prefix}{index}", "root": root, "path": path} for index, path in enumerate(paths)
+    ]
+    response = http.post(f"/api/v1/jobs/{job_id}/items", json={"items": items})
     assert response.status_code == expect, response.text
     return response.json()
 

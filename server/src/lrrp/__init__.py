@@ -1,3 +1,3 @@
 """LR Remote Previews server: builds Lightroom Classic smart previews next to the originals."""
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"

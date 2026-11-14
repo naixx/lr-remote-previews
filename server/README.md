@@ -8,7 +8,8 @@ dashboard (stage 3) it also reports its state, takes settings that change while 
 working hours), browses the roots and queues whole folders, tests the converter step by step and keeps its recent log.
 For automation (stage 4) jobs have a priority (`normal` jobs are built before `background` ones), an optional
 automatic scan queues new raw files by itself, and a clean-up keeps the cache within limits of age and size and drops
-the DNGs of originals that are gone or changed.
+the DNGs of originals that are gone or changed. Since 0.6.0 a job can grow (items are added to a job that exists, so
+that one Lightroom import is one job), and a client can wait for a change of a job instead of asking again and again.
 
 In production it runs in the container built from [`deploy/`](../deploy/). This page is about running it from source.
 
@@ -48,7 +49,10 @@ input, exits with code 1 when an input is missing, and can be told through envir
 skip an output, hang, record a wrong original name, behave like a fresh Wine prefix, or record how many copies of
 itself run at the same time. Through files in a switches folder a test can change that behaviour while the server
 runs, and hold the runs of chosen files until it lets them go (`Harness.switch`, `Harness.hold`). The end-to-end
-tests drive the HTTP API with it, including restarts of the server in the middle of a job. The server's wall clock is
+tests drive the HTTP API with it, including restarts of the server in the middle of a job. The tests of waiting
+requests also serve the application with uvicorn on a local port (`tests/test_wait.py`), for what only a real server
+shows: a hundred clients waiting at once, a client that goes away, a stop; they wait for evidence that a request is
+asleep (`Waits.waiting`) before they change anything. The server's wall clock is
 injectable (`create_app(clock=...)`, `conftest.FakeClock`), so the tests of the automatic scan, the last uses of
 cached DNGs and the daily clean-up move time by hours and days without waiting; the background threads' polling
 interval is shortened for them (`autoscan.POLL`, `cleanup.POLL`), and they wait for evidence that a thread has looked
@@ -129,11 +133,33 @@ the entry.
   `<LRRP_CACHE_DIR>/<key[0:2]>/<key>.dng`, renamed into place from the batch folder (same file system), and indexed in
   the database with their size, SHA-256 and the original name and size the DNG records.
 - **Priority.** A job is `normal` (the default) or `background`. Every queued file of `normal` jobs is taken before
-  any of `background` jobs, and within a priority the oldest request first. A file that jobs of both priorities want
-  is built once, as `normal`. A wave that runs is not interrupted when a `normal` job arrives; the next wave takes it
-  first. The automatic scan makes `background` jobs. Choosing the files of a wave reads the queued items job by job,
-  oldest job first, and stops when the wave is full, so it reads about as many items as the wave takes however long
-  the queue is (0.4 ms with 120 000 queued items in a measurement; the single query of 0.4.0 took about 90 ms).
+  any of `background` jobs, and within a priority the oldest job first, each job's items in the order they were
+  requested (items added to a job later come after its earlier ones, and before the items of newer jobs). A file that
+  jobs of both priorities want is built once, as `normal`. A wave that runs is not interrupted when a `normal` job
+  arrives; the next wave takes it first. The automatic scan makes `background` jobs. Choosing the files of a wave reads
+  the queued items job by job, oldest job first, and stops when the wave is full, so it reads about as many items as
+  the wave takes however long the queue is (0.4 ms with 120 000 queued items in a measurement; the single query of
+  0.4.0 took about 90 ms).
+- **Adding items to a job** (`POST /api/v1/jobs/{id}/items`) checks each file exactly as a new job does (rejected,
+  ready from the cache, or queued); the added items get the next values of the job's `seq`, in request order, in one
+  transaction. A `done` job with a queued item among them becomes `active` again (`finished` back to `null`) and is
+  `done` again, with a new `finished`, when they are built, so the retention counts from then; items that need no
+  build leave a `done` job as it was. The scheduler is woken at once, as for a new job. The refusals (no such job,
+  `job_cancelled`, a `ref` the job has, more than `maxItemsPerJob` items in all) are checked first and once more in
+  the transaction that adds the items, so a job deleted, cancelled or added to meanwhile cannot slip through. A file
+  that another item is queued or building for is built once for all of them.
+- **Waiting for a change** (`wait` of `GET /api/v1/jobs/{id}/items`, up to 55 s). A waiting request holds no thread:
+  its handler is a coroutine on the event loop that sleeps until the store reports a committed change of its job
+  (`src/lrrp/waits.py`). The store reports which jobs a transaction changed and the states their items went to; only
+  the requests that care are woken (one that asks for `state=ready` is not woken when items become `building`), each
+  looks at the database again and answers if the look finds something, else sleeps again. The looks of all waiting
+  requests run in a pool of 4 threads of their own, so waiting requests never take the worker threads the other
+  calls run in; a waiting request costs a connection, a small coroutine and a task that notices when the client goes
+  away (the request then ends at once). A request registers before its first look and forgets earlier wake-ups
+  before each look, and the store reports a change only after it is committed, so a change between a look and the
+  sleep is never missed. When the server stops, every waiting request answers at once as if its time were up (`200`
+  with what there is): `python -m lrrp` runs uvicorn with a server class that does this when the shutdown begins,
+  because uvicorn by itself lets open requests finish first and a stop could take 55 s.
 - **One scheduler thread** works in waves. Before each wave it reads the settings above: paused or outside the
   working hours, it starts none. It takes up to `workers × batchSize` distinct files from the head
   of the queue (two jobs that ask for the same file share one build), picks the number of converter processes for the
@@ -234,9 +260,10 @@ The contract is [docs/protocol.md](../docs/protocol.md); every call in it is imp
 | `GET /healthz` | never | `{"status": "ok", "busy": false}`; `busy` while `status.state` is `running` |
 | `GET /api/v1/info` | when configured | Name, version, protocol version, auth mode, converter state and version, roots, capabilities |
 | `POST /api/v1/jobs` | when configured | Create a job from a list of files, optionally with the client's `clientId` and a `priority` |
+| `POST /api/v1/jobs/{id}/items` | when configured | Add files to a job that exists |
 | `GET /api/v1/jobs` | when configured | Jobs, newest first; `state` and `clientId` filter them |
 | `GET /api/v1/jobs/{id}` | when configured | One job |
-| `GET /api/v1/jobs/{id}/items` | when configured | A job's items changed since `since` |
+| `GET /api/v1/jobs/{id}/items` | when configured | A job's items changed since `since`; with `wait`, held until there is one (at most `wait` seconds) |
 | `POST /api/v1/jobs/{id}/retry` | when configured | Queue a job's failed items again |
 | `DELETE /api/v1/jobs/{id}` | when configured | Cancel a job |
 | `GET /api/v1/items/{id}/file` | when configured | The DNG of a ready item |
@@ -258,7 +285,7 @@ The contract is [docs/protocol.md](../docs/protocol.md); every call in it is imp
 ```json
 {
   "name": "LR Remote Previews",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "api": 1,
   "auth": "token",
   "converter": {
@@ -271,10 +298,20 @@ The contract is [docs/protocol.md](../docs/protocol.md); every call in it is imp
     "extensions": [".arw", ".cr2", "..."],
     "previewLongEdge": 2560,
     "maxItemsPerJob": 5000,
-    "jobRetentionDays": 30
+    "jobRetentionDays": 30,
+    "appendItems": true,
+    "maxWaitSeconds": 55
   }
 }
 ```
+
+`wait` in `GET /api/v1/jobs/{id}/items` is a number of seconds from 0 to 55 (fractions allowed; anything else is
+`422`). A waiting request ends with the usual answer when an item it would return appears (with `state`, one in that
+state), with `404` when the job is deleted, with no items when the time is up or the server stops; a client's own HTTP
+timeout must be longer than its `wait`. In `POST /api/v1/jobs/{id}/items` the refusals are checked in this order:
+`404`, `409 job_cancelled`, `413 too_many_items` for a request of more than 5000 items, `422 duplicate_ref` within
+the request, then against the job's items, `413 too_many_items` for the job's total, `409 converter_not_installed`
+(a malformed body is `422` before all of them).
 
 `converter.version` is the `ProductVersion` recorded in the executable's version resource (`17.2` for Adobe DNG
 Converter 17.2), read without running it and with a few small reads (the file is about 227 MB); it is read again only
@@ -306,7 +343,7 @@ Every other `GET` path serves the dashboard from `LRRP_WEB_DIR`: an existing fil
 
 | File | What |
 |---|---|
-| `src/lrrp/__main__.py` | `python -m lrrp`: reads the settings, sets up logging and starts uvicorn |
+| `src/lrrp/__main__.py` | `python -m lrrp`: reads the settings, sets up logging and starts uvicorn, with a server class that ends the waiting requests when it stops |
 | `src/lrrp/settings.py` | Settings from the environment and the roots file |
 | `src/lrrp/runtime.py` | The settings that change while the server runs: checks, keeping them, working hours, whether a wave may start |
 | `src/lrrp/app.py` | The FastAPI application: the API, the dashboard, the background services' lifespan |
@@ -319,6 +356,7 @@ Every other `GET` path serves the dashboard from `LRRP_WEB_DIR`: an existing fil
 | `src/lrrp/runner.py` | Running the converter: wave planning, processes, timeouts, the warm-up, checking outputs |
 | `src/lrrp/display.py` | The one Xvfb the converter uses |
 | `src/lrrp/scheduler.py` | The background thread that turns the queue into waves and publishes the results |
+| `src/lrrp/waits.py` | The requests that wait for a change of a job: waking them when the store reports a change, their looks, the stop |
 | `src/lrrp/autoscan.py` | The automatic scan: its thread, the walk of the roots and the choice of the files to queue |
 | `src/lrrp/cleanup.py` | The cache clean-up and its daily run |
 | `src/lrrp/selftest.py` | The converter self-test |

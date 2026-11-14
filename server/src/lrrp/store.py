@@ -3,12 +3,15 @@ settings changed through the API, the files the automatic scan leaves alone beca
 and a few records of the background work (``state``).
 
 One connection, used from the API threads and the background threads, serialised by a lock.
-Every change runs in one ``BEGIN IMMEDIATE`` transaction.
+Every change runs in one ``BEGIN IMMEDIATE`` transaction. After a transaction that changed items
+or deleted jobs has been committed, the store says which (``Changes``) to ``on_change``, for the
+requests that wait for a change (``lrrp.waits``).
 
 The change counter (``seq``, ``docs/protocol.md``): every state change of an item, including its
-creation, adds one to its job's ``seq`` and gives the item the new value. So the items of a job
-have distinct ``seq`` values, and a client that asks for ``seq > since`` sees every change once.
-The counter lives in the database, so a restart of the server never sets it back.
+creation (also when it is added to a job that exists), adds one to its job's ``seq`` and gives the
+item the new value. So the items of a job have distinct ``seq`` values, and a client that asks for
+``seq > since`` sees every change once. The counter lives in the database, so a restart of the
+server never sets it back.
 
 A cache entry records the original it was built from (root, path, size, modification time), for
 the clean-up, and when it was last used (built, found by a job or a lookup, downloaded), at most
@@ -23,6 +26,7 @@ points to them (unknown when their jobs have expired) and count as used at the u
 """
 
 import json
+import logging
 import sqlite3
 import threading
 import time
@@ -33,6 +37,8 @@ from pathlib import Path
 from typing import Any, Literal
 
 from lrrp.cache import CacheEntry
+
+log = logging.getLogger(__name__)
 
 DATABASE_NAME = "lrrp.sqlite3"
 SCHEMA_VERSION = 4
@@ -49,6 +55,7 @@ USE_RESOLUTION = 24 * 3600.0
 """The last use of a cache entry is written again only when it is at least this old."""
 
 RetryOutcome = Literal["unknown", "cancelled", "unchanged", "retried"]
+AppendRefusal = Literal["unknown", "cancelled", "duplicate_ref", "too_many"]
 
 _TABLES = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -232,6 +239,34 @@ class CacheRow:
 
 
 @dataclass(frozen=True)
+class Changes:
+    """What one committed transaction did to jobs, for those who wait for a change."""
+
+    items: Mapping[int, frozenset[str]]
+    """By job id: the states that items of the job were put in (created in or moved to)."""
+    deleted: frozenset[int]
+    """The jobs deleted with their items."""
+
+
+@dataclass(frozen=True)
+class Appended:
+    """Items added to a job that exists: the job and the added items, as they were created."""
+
+    job: Job
+    items: list[Item]
+
+
+@dataclass(frozen=True)
+class AppendRefused:
+    """Nothing was added. ``reason``: no such job, a cancelled job, a ``ref`` the job has
+    already (``ref``), or more items in all than the limit (``total``: the job's items)."""
+
+    reason: AppendRefusal
+    ref: str | None = None
+    total: int = 0
+
+
+@dataclass(frozen=True)
 class Status:
     queued: int
     building: int
@@ -250,7 +285,12 @@ class StoreError(RuntimeError):
 
 
 class Store:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, on_change: Callable[[Changes], None] | None = None) -> None:
+        """``on_change`` is told what each committed transaction did to items and jobs, from
+        the thread that made the change, after the commit (so a reader sees the change)."""
+        self._on_change = on_change
+        self._changed_items: dict[int, set[str]] = {}
+        self._deleted_jobs: set[int] = set()
         self._lock = threading.RLock()
         self._db = sqlite3.connect(path, check_same_thread=False, isolation_level=None, timeout=30)
         self._db.row_factory = sqlite3.Row
@@ -301,6 +341,9 @@ class Store:
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Connection]:
         with self._lock:
+            # Nothing noted by a transaction that did not commit is reported.
+            self._changed_items.clear()
+            self._deleted_jobs.clear()
             self._db.execute("BEGIN IMMEDIATE")
             try:
                 yield self._db
@@ -308,6 +351,23 @@ class Store:
                 self._db.execute("ROLLBACK")
                 raise
             self._db.execute("COMMIT")
+            changes = None
+            if self._changed_items or self._deleted_jobs:
+                changes = Changes(
+                    items={job: frozenset(states) for job, states in self._changed_items.items()},
+                    deleted=frozenset(self._deleted_jobs),
+                )
+                self._changed_items.clear()
+                self._deleted_jobs.clear()
+        if changes is not None and self._on_change is not None:
+            try:
+                self._on_change(changes)
+            except Exception:
+                log.exception("cannot report a change of the jobs")
+
+    def _note(self, job_id: int, states: Iterable[str]) -> None:
+        """Items of this job were put in these states by the transaction that is open."""
+        self._changed_items.setdefault(job_id, set()).update(states)
 
     @contextmanager
     def _reading(self) -> Iterator[sqlite3.Connection]:
@@ -337,7 +397,8 @@ class Store:
         """
         with self._lock:
             with self._transaction() as db:
-                job_id = _insert_job(db, NewJob(client, label, items, client_id, priority), now)
+                new = NewJob(client, label, items, client_id, priority)
+                job_id = self._insert_job(db, new, now)
             job = self.get_job(job_id)
             assert job is not None
             return job, self.items_of_job(job_id)
@@ -346,9 +407,64 @@ class Store:
         """Add several jobs in one transaction; return them as created."""
         with self._lock:
             with self._transaction() as db:
-                ids = [_insert_job(db, job, now) for job in jobs]
+                ids = [self._insert_job(db, job, now) for job in jobs]
             created = [self.get_job(job_id) for job_id in ids]
         return [job for job in created if job is not None]
+
+    def append_items(
+        self, job_id: int, items: Sequence[NewItem], now: float, max_items: int
+    ) -> Appended | AppendRefused:
+        """Add items to a job that exists; return the job and the added items as created (in
+        the order given), before the scheduler can touch them.
+
+        The items get the next values of the job's ``seq``. A ``done`` job becomes ``active``
+        again when an added item is queued (``finished`` back to null); it is ``done`` again,
+        with a new ``finished``, once nothing is queued or building. An item given as ``ready``
+        whose cache entry is gone by now is queued instead, as in ``create_job``. Refused, with
+        nothing changed: an unknown or cancelled job, a ``ref`` the job has already, or more
+        than ``max_items`` items in all; checked in that order, in the same transaction as the
+        insertion.
+        """
+        with self._lock:
+            with self._transaction() as db:
+                row = db.execute("SELECT state, seq FROM jobs WHERE id = ?", (job_id,)).fetchone()
+                if row is None:
+                    return AppendRefused("unknown")
+                if row["state"] == "cancelled":
+                    return AppendRefused("cancelled")
+                used = self._used_refs(db, job_id, [item.ref for item in items])
+                if used:
+                    first = next(item.ref for item in items if item.ref in used)
+                    return AppendRefused("duplicate_ref", ref=first)
+                (total,) = db.execute(
+                    "SELECT COUNT(*) FROM items WHERE job_id = ?", (job_id,)
+                ).fetchone()
+                if total + len(items) > max_items:
+                    return AppendRefused("too_many", total=total)
+                self._add_items(db, job_id, items, now)
+            job = self.get_job(job_id)
+            added, _ = self.items_since(job_id, row["seq"], len(items))
+        assert job is not None
+        return Appended(job, added)
+
+    def used_refs(self, job_id: int, refs: Sequence[str]) -> set[str]:
+        """The refs among ``refs`` that items of this job have."""
+        with self._reading() as db:
+            return self._used_refs(db, job_id, refs)
+
+    @staticmethod
+    def _used_refs(db: sqlite3.Connection, job_id: int, refs: Sequence[str]) -> set[str]:
+        found: set[str] = set()
+        for chunk in _chunks(list(set(refs))):
+            marks = ",".join("?" * len(chunk))
+            found.update(
+                ref
+                for (ref,) in db.execute(
+                    f"SELECT ref FROM items WHERE job_id = ? AND ref IN ({marks})",
+                    [job_id, *chunk],
+                )
+            )
+        return found
 
     def get_job(self, job_id: int) -> Job | None:
         with self._lock:
@@ -443,7 +559,7 @@ class Store:
             rows = db.execute(
                 "SELECT id, job_id FROM items WHERE job_id = ? AND state = 'queued'", (job_id,)
             ).fetchall()
-            _change(db, rows, "cancelled", now)
+            self._change(db, rows, "cancelled", now)
         return True
 
     def retry_job(
@@ -471,7 +587,7 @@ class Store:
                 [(*identities[item_id], item_id) for item_id, _ in rows if item_id in identities],
             )
             db.execute("UPDATE jobs SET state = 'active', finished = NULL WHERE id = ?", (job_id,))
-            _change(db, rows, "queued", now)
+            self._change(db, rows, "queued", now)
         return "retried"
 
     def delete_expired_jobs(self, finished_before: float) -> int:
@@ -494,7 +610,98 @@ class Store:
                 marks = ",".join("?" * len(chunk))
                 db.execute(f"DELETE FROM items WHERE job_id IN ({marks})", chunk)
                 db.execute(f"DELETE FROM jobs WHERE id IN ({marks})", chunk)
+            self._deleted_jobs.update(ids)
         return len(ids)
+
+    # --- Writing items (inside a transaction) ---------------------------------------------------
+
+    def _insert_job(self, db: sqlite3.Connection, job: NewJob, now: float) -> int:
+        cursor = db.execute(
+            "INSERT INTO jobs (client, label, client_id, priority, state, created, seq)"
+            " VALUES (?, ?, ?, ?, 'active', ?, 0)",
+            (job.client, job.label, job.client_id, job.priority, now),
+        )
+        job_id = cursor.lastrowid or 0
+        self._add_items(db, job_id, job.items, now)
+        return job_id
+
+    def _add_items(
+        self, db: sqlite3.Connection, job_id: int, items: Sequence[NewItem], now: float
+    ) -> None:
+        """Insert items into a job with the next values of its ``seq``; a ``done`` job with a
+        queued item among them becomes ``active``, an ``active`` one with nothing queued or
+        building ``done``."""
+        cached = {item.cache_key for item in items if item.state == "ready" and item.cache_key}
+        present: set[str] = set()
+        for chunk in _chunks(list(cached)):
+            marks = ",".join("?" * len(chunk))
+            present.update(
+                key for (key,) in db.execute(f"SELECT key FROM cache WHERE key IN ({marks})", chunk)
+            )
+        items = [
+            replace(item, state="queued")
+            if item.state == "ready" and item.cache_key not in present
+            else item
+            for item in items
+        ]
+        (seq,) = db.execute("SELECT seq FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        db.executemany(
+            "INSERT INTO items (job_id, ref, root, path, state, seq, error_code, error_message,"
+            " cache_key, size, mtime_ns, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    job_id,
+                    item.ref,
+                    item.root,
+                    item.path,
+                    item.state,
+                    item_seq,
+                    item.error_code,
+                    item.error_message,
+                    item.cache_key,
+                    item.size,
+                    item.mtime_ns,
+                    now,
+                )
+                for item_seq, item in enumerate(items, start=seq + 1)
+            ],
+        )
+        db.execute("UPDATE jobs SET seq = ? WHERE id = ?", (seq + len(items), job_id))
+        if any(item.state == "queued" for item in items):
+            db.execute(
+                "UPDATE jobs SET state = 'active', finished = NULL WHERE id = ? AND state = 'done'",
+                (job_id,),
+            )
+        self._note(job_id, {item.state for item in items})
+        _settle(db, [job_id], now)
+
+    def _change(
+        self,
+        db: sqlite3.Connection,
+        rows: Iterable[Sequence[int]],
+        state: str,
+        now: float,
+        code: str | None = None,
+        message: str | None = None,
+    ) -> None:
+        """Move items to ``state``, one ``seq`` step each, and settle their jobs."""
+        by_job: dict[int, list[int]] = {}
+        for item_id, job_id in rows:
+            by_job.setdefault(job_id, []).append(item_id)
+        for job_id, item_ids in by_job.items():
+            (seq,) = db.execute("SELECT seq FROM jobs WHERE id = ?", (job_id,)).fetchone()
+            updates = []
+            for item_id in sorted(item_ids):
+                seq += 1
+                updates.append((state, seq, code, message, now, item_id))
+            db.executemany(
+                "UPDATE items SET state = ?, seq = ?, error_code = ?, error_message = ?,"
+                " updated = ? WHERE id = ?",
+                updates,
+            )
+            db.execute("UPDATE jobs SET seq = ? WHERE id = ?", (seq, job_id))
+            self._note(job_id, (state,))
+        _settle(db, list(by_job), now)
 
     # --- The queue, for the scheduler -----------------------------------------------------------
 
@@ -502,7 +709,7 @@ class Store:
         """Put items a stopped server left ``building`` back into the queue; return how many."""
         with self._transaction() as db:
             rows = db.execute("SELECT id, job_id FROM items WHERE state = 'building'").fetchall()
-            _change(db, rows, "queued", now)
+            self._change(db, rows, "queued", now)
         return len(rows)
 
     def queued_candidates(self, limit: int) -> list[Candidate]:
@@ -512,9 +719,10 @@ class Store:
         A file is placed by its first request in a ``normal`` job if it has one, so a file wanted
         by a ``background`` and a ``normal`` job is built as ``normal``.
 
-        Items are numbered in the order they were requested and a job's items are numbered
-        together, so reading the queued items of the active jobs one job after the other, oldest
-        job first and each job's items in order, gives the requests in order. The reading stops
+        Items are numbered in the order they were requested, so reading the queued items of the
+        active jobs one job after the other, oldest job first and each job's items in order,
+        gives the requests in order; items added to a job later (``append_items``) are read with
+        their job, so an older job's added items come before a newer job's. The reading stops
         once ``limit`` files are found, so a wave reads about as many items as it takes, however
         long the queue (index ``items_by_job_state``).
         """
@@ -552,7 +760,7 @@ class Store:
                     f" WHERE state = 'queued' AND cache_key IN ({marks})",
                     chunk,
                 ).fetchall()
-                _change(db, rows, "building", now)
+                self._change(db, rows, "building", now)
 
     def complete(self, key: str, entry: CacheEntry | None, now: float) -> None:
         """The DNG for ``key`` is in the cache: its pending items become ``ready``.
@@ -600,7 +808,7 @@ class Store:
                 " WHERE cache_key = ? AND state IN ('queued', 'building')",
                 (key,),
             ).fetchall()
-            _change(db, rows, "ready", now)
+            self._change(db, rows, "ready", now)
 
     def fail(self, key: str, code: str, message: str, now: float, *, remember: bool = True) -> None:
         """Building the DNG for ``key`` failed: its ``building`` items become ``failed``.
@@ -622,7 +830,7 @@ class Store:
             rows = db.execute(
                 "SELECT id, job_id FROM items WHERE cache_key = ? AND state = 'building'", (key,)
             ).fetchall()
-            _change(db, rows, "failed", now, code, message)
+            self._change(db, rows, "failed", now, code, message)
 
     # --- Settings --------------------------------------------------------------------------------
 
@@ -837,79 +1045,6 @@ class Store:
             cache_bytes=size,
             active_jobs=active,
         )
-
-
-def _insert_job(db: sqlite3.Connection, job: NewJob, now: float) -> int:
-    cursor = db.execute(
-        "INSERT INTO jobs (client, label, client_id, priority, state, created, seq)"
-        " VALUES (?, ?, ?, ?, 'active', ?, 0)",
-        (job.client, job.label, job.client_id, job.priority, now),
-    )
-    job_id = cursor.lastrowid or 0
-    cached = {item.cache_key for item in job.items if item.state == "ready" and item.cache_key}
-    present: set[str] = set()
-    for chunk in _chunks(list(cached)):
-        marks = ",".join("?" * len(chunk))
-        present.update(
-            key for (key,) in db.execute(f"SELECT key FROM cache WHERE key IN ({marks})", chunk)
-        )
-    items = [
-        replace(item, state="queued")
-        if item.state == "ready" and item.cache_key not in present
-        else item
-        for item in job.items
-    ]
-    db.executemany(
-        "INSERT INTO items (job_id, ref, root, path, state, seq, error_code, error_message,"
-        " cache_key, size, mtime_ns, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        [
-            (
-                job_id,
-                item.ref,
-                item.root,
-                item.path,
-                item.state,
-                seq,
-                item.error_code,
-                item.error_message,
-                item.cache_key,
-                item.size,
-                item.mtime_ns,
-                now,
-            )
-            for seq, item in enumerate(items, start=1)
-        ],
-    )
-    db.execute("UPDATE jobs SET seq = ? WHERE id = ?", (len(items), job_id))
-    _settle(db, [job_id], now)
-    return job_id
-
-
-def _change(
-    db: sqlite3.Connection,
-    rows: Iterable[Sequence[int]],
-    state: str,
-    now: float,
-    code: str | None = None,
-    message: str | None = None,
-) -> None:
-    """Move items to ``state``, one ``seq`` step each, and settle their jobs."""
-    by_job: dict[int, list[int]] = {}
-    for item_id, job_id in rows:
-        by_job.setdefault(job_id, []).append(item_id)
-    for job_id, item_ids in by_job.items():
-        (seq,) = db.execute("SELECT seq FROM jobs WHERE id = ?", (job_id,)).fetchone()
-        updates = []
-        for item_id in sorted(item_ids):
-            seq += 1
-            updates.append((state, seq, code, message, now, item_id))
-        db.executemany(
-            "UPDATE items SET state = ?, seq = ?, error_code = ?, error_message = ?, updated = ?"
-            " WHERE id = ?",
-            updates,
-        )
-        db.execute("UPDATE jobs SET seq = ? WHERE id = ?", (seq, job_id))
-    _settle(db, list(by_job), now)
 
 
 def _settle(db: sqlite3.Connection, job_ids: Sequence[int], now: float) -> None:

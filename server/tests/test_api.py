@@ -30,7 +30,7 @@ def test_info_without_a_token_configured(make_client: MakeClient) -> None:
     assert response.status_code == 200
     assert response.json() == {
         "name": "LR Remote Previews",
-        "version": "0.5.0",
+        "version": "0.6.0",
         "api": 1,
         "auth": "none",
         "converter": {"installed": False, "path": DEFAULT_CONVERTER_EXE, "version": None},
@@ -40,6 +40,8 @@ def test_info_without_a_token_configured(make_client: MakeClient) -> None:
             "previewLongEdge": 2560,
             "maxItemsPerJob": 5000,
             "jobRetentionDays": 30,
+            "appendItems": True,
+            "maxWaitSeconds": 55,
         },
     }
 
