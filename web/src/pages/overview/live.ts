@@ -3,6 +3,7 @@ import { isMissingEndpoint, toApiError } from '../../api/errors';
 import type { Job } from '../../api/jobs';
 import type { ServerSettings } from '../../api/settings';
 import { isQueueBusy, type ServerStatus } from '../../api/status';
+import { loadTogether } from '../../api/together';
 
 /** How many jobs the overview lists. */
 export const RECENT_JOBS_LIMIT = 10;
@@ -24,31 +25,18 @@ export interface LiveOverview {
  * Loads status, jobs and settings side by side. If one request fails the others are cancelled,
  * so a failed refresh leaves nothing in flight behind it.
  */
-export async function loadLiveOverview(
-  client: ApiClient,
-  signal: AbortSignal,
-): Promise<LiveOverview> {
-  const controller = new AbortController();
-  const forwardAbort = () => controller.abort(signal.reason);
-  if (signal.aborted) forwardAbort();
-  else signal.addEventListener('abort', forwardAbort, { once: true });
-
-  try {
+export function loadLiveOverview(client: ApiClient, signal: AbortSignal): Promise<LiveOverview> {
+  return loadTogether(signal, async (shared) => {
     const [status, list, settings] = await Promise.all([
-      client.getStatus(controller.signal),
-      client.getJobs({ limit: RECENT_JOBS_LIMIT }, controller.signal),
-      client.getSettings(controller.signal).catch((error: unknown) => {
+      client.getStatus(shared),
+      client.getJobs({ limit: RECENT_JOBS_LIMIT }, shared),
+      client.getSettings(shared).catch((error: unknown) => {
         if (isMissingEndpoint(toApiError(error))) return null;
         throw error;
       }),
     ]);
     return { status, jobs: list.jobs, settings };
-  } catch (error) {
-    controller.abort();
-    throw error;
-  } finally {
-    signal.removeEventListener('abort', forwardAbort);
-  }
+  });
 }
 
 export function refreshInterval(data: LiveOverview | null): number {

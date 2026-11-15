@@ -19,6 +19,7 @@ Each page sets the document title; after a navigation, focus moves to the page h
 | `#/settings` | **Settings**: converter processes (automatic or a number, never 2), files per process, working hours, pause; the **automatic scan** (on or off, the roots to scan, interval, settle time, files per scan; the last and the next scan; **Scan now**); the **cache** (its size and files, the size and age limits, and **Clean up now**: a count of what would be removed, then a confirmation); the access token (**Forget token**); the server's facts (versions, roots, raw formats, limits, retention). Each form saves on its own: the automatic scan and the cache limits as whole objects. |
 | `#/converter` | **Converter**: whether Adobe DNG Converter is installed, the path the server expects, its version, and a **self-test**, optionally converting one raw file, shown as a checklist. |
 | `#/log` | **Log**: the server's recent log lines, refreshed every 3 s with a pause switch; it stays at the newest line unless you scrolled up. |
+| `#/widget`, `#/widget?theme=dark` | **Widget**: a compact status page for a frame in another dashboard or a small pinned tab, without the header and the navigation: the state badge, what is queued and built now (the pace, the time left, the job being built), today's built and failed, the cache, and a line only when something is wrong; at about 540×400 also up to three active jobs, the converter processes and the automatic scan. `theme=light` or `dark` overrides the system's colour scheme. It only reads; its links open the dashboard in a new tab. |
 
 Live data refreshes by itself: the overview every 2 s while anything is queued or building and
 every 10 s when idle (status, jobs and settings together), the job list and a job page every 2 s
@@ -28,6 +29,11 @@ scan runs and for 10 s after **Scan now**.
 A refresh starts only after the previous one has finished; polling pauses while the tab is hidden
 and resumes at once when it is shown again. If a refresh fails, the last data stays on screen with
 a "Connection lost, retrying" note.
+
+The widget polls like the overview (and `GET /api/v1/info` once a minute), with one difference:
+when the server gives no answer at all, it tries again after 5, 15 and 60 s and then stops, until
+**Check again** is pressed; neither a timer nor showing the tab again sends a request. The server
+often runs on a NAS that sleeps when idle and wakes on requests, and a widget stays open for days.
 
 Buttons that change something on the server are disabled while their request runs and show the
 server's own error text when it fails. Cancelling a job and queueing a folder ask first; **Clean up
@@ -90,7 +96,8 @@ src/
   main.tsx                 Entry point: the global styles, then <App />.
   env.d.ts                 __APP_VERSION__, the dashboard's version from package.json.
   app/
-    App.tsx                Composition root: provider, layout, the page the hash names.
+    App.tsx                Composition root: provider, layout, the page the hash names; the
+                           widget without the layout.
     router.ts              parseRoute(), hrefFor(), links, useRoute(): the hash routes.
     Layout.tsx, layout.css Header (brand, section navigation), skip link, content area; the
                            token form in place of the page after a 401.
@@ -104,12 +111,15 @@ src/
     autoscan.ts, cache.ts  Response types and their parse…() runtime shape checks.
                            autoscan.ts: Scan now; cache.ts: the clean-up.
     validate.ts            Small validators that name the failing field (roots[0].available).
+    together.ts            loadTogether(): requests side by side, the others cancelled when one
+                           fails.
     token.ts               Token storage in localStorage, every access guarded.
   hooks/
     useApiResource.ts      Loads one resource: loading / ready / error, reload, abort on change.
     usePolling.ts          Loads a resource again and again: never overlapping, paused while
                            hidden, keeps the last data when a refresh fails, stops on 401;
-                           with keepPrevious, keeps the old page on screen while the next loads.
+                           with keepPrevious, keeps the old page on screen while the next loads;
+                           with retryDelays, gives up after network failures in a row.
     useAction.ts           One request a button starts: pending, error, never two at once.
     usePageTitle.ts        The document title per page.
   lib/
@@ -121,15 +131,19 @@ src/
                            ConnectionNote, JobList (job rows, progress bar, state badge),
                            PauseButton, Fact, TokenForm, BrandMark.
   pages/
-    overview/ jobs/ folders/ settings/ converter/ log/
+    overview/ jobs/ folders/ settings/ converter/ log/ widget/
                            One folder per page: its components, what it polls and how often,
                            its styles and its tests. NotFoundPage.tsx for unknown routes.
+    widget/                WidgetPage.tsx (no layout; the compact token form after a 401),
+                           live.ts (what it loads, the retries and why it stops), widget.css
+                           (the frame sizes, and how the least important blocks give way).
     settings/              SettingsPage.tsx with AutoScanCard.tsx and CacheCard.tsx; the form
                            rules in form.ts, scanForm.ts and cacheForm.ts (sizes in GB with one
                            decimal, a saved limit sent back to the byte while its text is
                            unchanged).
   styles/
-    index.css              Design tokens (light and dark), base styles, shared primitives.
+    index.css              Design tokens (light and dark; data-theme on the root element forces
+                           one), base styles, shared primitives.
   test/
     fixtures.ts            Sample responses for every endpoint; fakeServer(): a fetch mock that
                            tells endpoints apart by method and path and answers each with what
@@ -157,16 +171,18 @@ src/
   action cannot be undone or puts load on the server.
 - **Page:** create `src/pages/<name>/`, start it with `<PageHeader>`, load data with
   `useApiResource` or `usePolling`, show failures with `<ErrorPanel>` (pass `feature` so an older
-  server gets the older-server note). The layout handles 401. Add the route to `router.ts`, the
-  page to `CurrentPage` in `App.tsx` and the section to `SECTIONS` in `Layout.tsx`. Keep request
+  server gets the older-server note). The layout handles 401 (the widget, outside it, does so
+  itself). Add the route to `router.ts`, the page to `CurrentPage` in `App.tsx` and the section
+  to `SECTIONS` in `Layout.tsx`. Keep request
   paths relative (no leading slash) and links as `hrefFor(...)` hashes.
 
 ## Styling
 
 Plain CSS with custom properties; no UI library, no CSS framework, no web fonts, nothing loaded
 from a CDN. Colours, spacing and radii are tokens in `src/styles/index.css`; dark mode redefines
-the colour tokens under `prefers-color-scheme: dark`. Component styles sit next to their
-components and use only the tokens; they load after `index.css`, so they can refine it.
+the colour tokens under `prefers-color-scheme: dark`, and `data-theme="light"` or `"dark"` on the
+root element overrides the system (the widget sets it from `?theme=`). Component styles sit next
+to their components and use only the tokens; they load after `index.css`, so they can refine it.
 
 Figures that change while the page is open use tabular digits, and space for them is reserved
 where their growth would move something else (the progress bars of all jobs end at the same

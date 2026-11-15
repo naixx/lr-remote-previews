@@ -88,8 +88,12 @@ after a reload.
 
 ## Things specific to TrueNAS
 
-- **The Web UI button** comes from the `x-portals` block, which TrueNAS reads only when the app is created. To
+- **The Web UI button** (the globe on the app's card, also on the TrueNAS dashboard) and the menu next to it
+  (Jobs, Folders, Log) come from the `x-portals` block, which TrueNAS reads only when the app is created. To
   change the port, delete the app (the folders stay, nothing is lost) and install the YAML again.
+- **The TrueNAS dashboard** shows the same card for every app: its state, CPU, memory and network. It cannot show
+  an app's own numbers. For those, open the [widget page](guide.md) (`http://THIS-NAS:8787/#/widget`) or put it
+  into a dashboard that can show a page in a frame.
 - **A NAS that sleeps when idle** has to know that the server is working. `GET /healthz` answers without a token
   and includes `"busy": true` while the queue is being built.
 - **Updating:** build (later: pull) the new image and restart the app. The database is migrated in place. The

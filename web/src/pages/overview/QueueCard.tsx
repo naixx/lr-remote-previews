@@ -2,7 +2,7 @@ import type { ReactNode } from 'react';
 import type { ApiError } from '../../api/errors';
 import type { ServerSettings } from '../../api/settings';
 import {
-  isQueueBusy,
+  serverState,
   type AutoScanStatus,
   type ServerState,
   type ServerStatus,
@@ -82,12 +82,8 @@ const STATE_WORDS: Record<ServerState, { label: string; tone: Tone }> = {
   waiting: { label: 'Waiting for working hours', tone: 'neutral' },
 };
 
-/** The state as the server reports it; an older server without `state` gets it from the queue. */
-function stateOf(status: ServerStatus): ServerState {
-  return status.state ?? (isQueueBusy(status) ? 'running' : 'idle');
-}
-
-function QueueBadge({
+/** The server's state in a badge; also the widget's. */
+export function QueueBadge({
   status,
   converterInstalled,
 }: {
@@ -96,7 +92,7 @@ function QueueBadge({
 }) {
   if (!converterInstalled) return <StatusBadge tone="warn">Converter missing</StatusBadge>;
   if (!status) return null;
-  const { label, tone } = STATE_WORDS[stateOf(status)];
+  const { label, tone } = STATE_WORDS[serverState(status)];
   return <StatusBadge tone={tone}>{label}</StatusBadge>;
 }
 
@@ -124,7 +120,7 @@ function QueueState({
   paused: boolean | null | undefined;
   onSettingsChanged: (settings: ServerSettings) => void;
 }) {
-  const state = stateOf(status);
+  const state = serverState(status);
   const details = [
     state !== 'idle' ? `${formatCount(status.queue.queued + status.queue.building)} left` : null,
     status.cpuTemperature !== null ? `CPU ${formatTemperature(status.cpuTemperature)}` : null,
@@ -193,14 +189,22 @@ function QueueStats({ status }: { status: ServerStatus }) {
 
 /** The automatic scan in one line; the Settings page has the details. */
 function AutoScanLine({ scan, now }: { scan: AutoScanStatus; now: number }) {
+  return (
+    <p className="queue-autoscan">
+      <a href={links.settings()}>Automatic scan</a>: <AutoScanSummary scan={scan} now={now} />
+    </p>
+  );
+}
+
+/** «next at 10:00 (in 27 min) · last at 09:00 (33 min ago), 120 files queued»; also the widget's. */
+export function AutoScanSummary({ scan, now }: { scan: AutoScanStatus; now: number }) {
   const at = (iso: string) => (
     <time dateTime={iso} title={formatFullTime(iso)}>
       {formatLocalTime(iso, now)}
     </time>
   );
   return (
-    <p className="queue-autoscan">
-      <a href={links.settings()}>Automatic scan</a>:{' '}
+    <>
       {scan.running ? (
         'running now'
       ) : scan.nextRun ? (
@@ -216,7 +220,7 @@ function AutoScanLine({ scan, now }: { scan: AutoScanStatus; now: number }) {
           {plural(scan.lastQueued, 'file', 'files')} queued
         </>
       )}
-    </p>
+    </>
   );
 }
 

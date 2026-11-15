@@ -282,6 +282,56 @@ Until then, the server's settings are environment variables in `compose.yaml` (`
 `LRRP_JOB_RETENTION_DAYS`; all of them in [server/README.md](../server/README.md)). After a change,
 `docker compose up -d` starts the container again with the new values.
 
+### 3.6 The status widget
+
+The dashboard has a compact page for a frame inside another dashboard (the TrueNAS SCALE dashboard, Homepage, Homarr,
+Home Assistant) or for a small pinned browser tab:
+
+```
+http://nas.example:8787/#/widget
+http://nas.example:8787/#/widget?theme=dark
+```
+
+`theme=light` or `theme=dark` sets its colours to match the page around it; without it the widget follows the system
+setting, as the dashboard does. It is designed for frames of about 265×150, 540×195 and 540×400 CSS pixels and fits
+the sizes in between. It never scrolls: in a smaller frame the less important lines give way first. In that order it
+shows:
+
+- the name, which opens the full dashboard in a new tab, and the state the Overview shows (Running, Idle, Paused,
+  Waiting for working hours, Converter missing);
+- a line only when something is wrong: the server cannot be reached or answered with an error, Adobe DNG Converter is
+  not installed, a root is unavailable;
+- what is queued and being built, the photos per minute, the time left and the progress of the job being built, or
+  «Nothing is queued.»;
+- the photos built and failed today (the failures link to the Jobs page);
+- the cache: its files and size;
+- at about 540×400 also up to three active jobs, the converter processes at work and the automatic scan's last and
+  next run.
+
+It only reads; nothing on it changes the server. In a page of your own:
+
+```html
+<iframe src="http://nas.example:8787/#/widget?theme=dark"
+        width="540" height="195" style="border: 0"
+        title="LR Remote Previews"></iframe>
+```
+
+A page served over HTTPS cannot show a frame over plain HTTP (browsers block it), so such a dashboard needs the
+server behind an HTTPS address too.
+
+**When the server stops answering, the widget stops asking.** The server often runs on a NAS that sleeps when idle and
+wakes up on requests, and a widget stays open for days. While the server answers, the widget asks as often as the
+Overview does (every 2 s while building, every 10 s otherwise, the server's facts once a minute), and only while the
+page that shows it is visible. When no answer comes, which usually means the NAS went to sleep, it tries three more
+times, after 5, 15 and 60 seconds, then shows «Server not reachable» with a **Check again** button and sends nothing
+more by itself: no timer and no showing of the tab sends a request that could wake the NAS. Press **Check again** to
+see it again. An error answer from a running server does not count: the widget goes on asking and shows the error.
+
+**The token.** When the server needs one, the widget asks for it once, in the frame, unless the browser already keeps
+it for that address. Browsers keep the storage of a page shown inside another site apart from that of the same page
+opened directly, so the widget may ask once in each dashboard that shows it. As in the dashboard, the token stays in
+that browser only.
+
 ## 4. Provide Adobe DNG Converter
 
 The server needs Adobe DNG Converter, and you provide it. [converter.md](converter.md) is the full description: what

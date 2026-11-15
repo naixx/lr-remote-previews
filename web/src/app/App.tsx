@@ -6,6 +6,7 @@ import { LogPage } from '../pages/log/LogPage';
 import { NotFoundPage } from '../pages/NotFoundPage';
 import { OverviewPage } from '../pages/overview/OverviewPage';
 import { SettingsPage } from '../pages/settings/SettingsPage';
+import { WidgetPage } from '../pages/widget/WidgetPage';
 import { ApiProvider } from './ApiProvider';
 import { Layout } from './Layout';
 import { useRoute } from './router';
@@ -13,10 +14,23 @@ import { useRoute } from './router';
 export function App() {
   return (
     <ApiProvider>
-      <Layout>
-        <CurrentPage />
-      </Layout>
+      <AppContent />
     </ApiProvider>
+  );
+}
+
+/**
+ * The page the hash names, in the layout. The widget stands alone, with its own token form,
+ * because other dashboards show it in a small frame where a header and navigation do not fit.
+ */
+export function AppContent() {
+  const { page } = useRoute();
+  return page === 'widget' ? (
+    <CurrentPage />
+  ) : (
+    <Layout>
+      <CurrentPage />
+    </Layout>
   );
 }
 
@@ -40,6 +54,8 @@ export function CurrentPage() {
       return <ConverterPage />;
     case 'log':
       return <LogPage />;
+    case 'widget':
+      return <WidgetPage theme={route.theme} />;
     case 'not-found':
       return <NotFoundPage path={route.path} />;
   }

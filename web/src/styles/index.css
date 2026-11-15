@@ -1,6 +1,7 @@
 /*
  * Design tokens, base styles and shared primitives (buttons, cards, badges, panels, inputs,
- * tables, messages). Light is the default; dark follows the system setting. Feature styles live
+ * tables, messages). Light is the default; dark follows the system setting unless the root
+ * element has `data-theme="light"` or `"dark"` (the widget's `?theme=`). Feature styles live
  * next to their components and use only these tokens.
  */
 
@@ -48,8 +49,9 @@
   --content-width: 1040px;
 }
 
+/* The dark tokens twice: as the system's choice, and when a page asks for dark. Keep both equal. */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme='light']) {
     --color-bg: #0f1114;
     --color-surface: #171a1f;
     --color-surface-muted: #1d2127;
@@ -73,6 +75,37 @@
 
     --shadow-card: none;
   }
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --color-bg: #0f1114;
+  --color-surface: #171a1f;
+  --color-surface-muted: #1d2127;
+  --color-border: #2a2f37;
+  --color-border-strong: #3b424d;
+  --color-text: #e6e8eb;
+  --color-text-muted: #9ba4b0;
+  --color-accent: #6b9cff;
+  --color-accent-hover: #8fb4ff;
+  --color-accent-soft: rgb(107 156 255 / 0.14);
+  --color-on-accent: #0b1220;
+  --color-focus: #8fb4ff;
+
+  --color-ok: #63d18d;
+  --color-ok-soft: rgb(99 209 141 / 0.12);
+  --color-warn: #f0b95c;
+  --color-warn-soft: rgb(240 185 92 / 0.12);
+  --color-bad: #ff8d84;
+  --color-bad-hover: #ffaba4;
+  --color-bad-soft: rgb(255 141 132 / 0.12);
+
+  --shadow-card: none;
 }
 
 /* Base */

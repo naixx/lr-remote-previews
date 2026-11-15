@@ -2,8 +2,7 @@ import { act, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import { fullServer } from '../test/fixtures';
 import { ApiProvider } from './ApiProvider';
-import { CurrentPage } from './App';
-import { Layout } from './Layout';
+import { AppContent } from './App';
 import { hrefFor, parseRoute, type Route } from './router';
 
 afterEach(() => {
@@ -29,15 +28,33 @@ describe('parseRoute', () => {
     expect(parseRoute('#/settings')).toEqual({ page: 'settings' });
     expect(parseRoute('#/converter')).toEqual({ page: 'converter' });
     expect(parseRoute('#/log/')).toEqual({ page: 'log' });
+    expect(parseRoute('#/widget')).toEqual({ page: 'widget', theme: null });
+  });
+
+  it('reads the colour scheme the widget is told to use', () => {
+    expect(parseRoute('#/widget?theme=light')).toEqual({ page: 'widget', theme: 'light' });
+    expect(parseRoute('#/widget?theme=dark')).toEqual({ page: 'widget', theme: 'dark' });
+    expect(parseRoute('#/widget/?theme=dark')).toEqual({ page: 'widget', theme: 'dark' });
   });
 
   it('ignores a filter it does not know', () => {
     expect(parseRoute('#/jobs?state=paused')).toEqual({ page: 'jobs', state: null });
     expect(parseRoute('#/jobs/7?state=lost')).toEqual({ page: 'job', id: 7, itemState: null });
+    // An unknown scheme follows the system, as no `theme` does.
+    expect(parseRoute('#/widget?theme=blue')).toEqual({ page: 'widget', theme: null });
+    expect(parseRoute('#/widget?theme=')).toEqual({ page: 'widget', theme: null });
   });
 
   it('sends anything else to «not found»', () => {
-    for (const hash of ['#/nope', '#/jobs/0', '#/jobs/x', '#/jobs/7/items', '#/log/more', '#/%E0%A4%A']) {
+    for (const hash of [
+      '#/nope',
+      '#/jobs/0',
+      '#/jobs/x',
+      '#/jobs/7/items',
+      '#/log/more',
+      '#/widget/large',
+      '#/%E0%A4%A',
+    ]) {
       expect(parseRoute(hash).page).toBe('not-found');
     }
   });
@@ -53,6 +70,8 @@ describe('parseRoute', () => {
       { page: 'settings' },
       { page: 'converter' },
       { page: 'log' },
+      { page: 'widget', theme: null },
+      { page: 'widget', theme: 'dark' },
     ];
     for (const route of routes) {
       const href = hrefFor(route);
@@ -62,6 +81,7 @@ describe('parseRoute', () => {
     expect(hrefFor({ page: 'folders', root: 'archive', path: '2026/a b' })).toBe(
       '#/folders/archive/2026/a%20b',
     );
+    expect(hrefFor({ page: 'widget', theme: 'light' })).toBe('#/widget?theme=light');
   });
 });
 
@@ -70,9 +90,7 @@ function renderApp(hash: string) {
   const server = fullServer();
   render(
     <ApiProvider fetch={server.fetch}>
-      <Layout>
-        <CurrentPage />
-      </Layout>
+      <AppContent />
     </ApiProvider>,
   );
   return server;
@@ -112,6 +130,20 @@ describe('pages by route', () => {
     expect(await screen.findByRole('heading', { level: 1, name: 'Folders' })).toBeTruthy();
     navigateTo('#/jobs');
     expect(await screen.findByRole('heading', { level: 1, name: 'Jobs' })).toBeTruthy();
+  });
+
+  it('shows the widget on its own, without the header and the navigation', async () => {
+    renderApp('#/widget');
+    expect(await screen.findByText('300 queued · 8 building')).toBeTruthy();
+    expect(screen.getByRole('heading', { level: 1, name: 'LR Remote Previews' })).toBeTruthy();
+    expect(screen.queryByRole('navigation', { name: 'Sections' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Skip to content' })).toBeNull();
+    expect(document.title).toBe('Widget · LR Remote Previews');
+
+    // Back in the dashboard, the layout returns.
+    navigateTo('#/');
+    expect(await screen.findByRole('heading', { level: 1, name: 'Overview' })).toBeTruthy();
+    expect(screen.getByRole('navigation', { name: 'Sections' })).toBeTruthy();
   });
 
   it('says so for an unknown route and links to the overview', async () => {

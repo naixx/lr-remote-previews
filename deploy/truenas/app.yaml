@@ -54,14 +54,30 @@ services:
         target: /sources/archive
         read_only: true
 
-# The "Web UI" button in Apps and on the dashboard. TrueNAS reads this block when the app is created,
-# not when it is edited: to change it, delete the app (its folders stay) and install it again.
+# The "Web UI" button in Apps and on the dashboard, and the menu of other links next to it. TrueNAS
+# reads this block when the app is created, not when it is edited: to change it, delete the app (its
+# folders stay) and install it again.
 x-portals:
   - name: Web UI
     scheme: http
     host: 0.0.0.0
     port: 8787
     path: /
+  - name: Jobs
+    scheme: http
+    host: 0.0.0.0
+    port: 8787
+    path: /#/jobs
+  - name: Folders
+    scheme: http
+    host: 0.0.0.0
+    port: 8787
+    path: /#/folders
+  - name: Log
+    scheme: http
+    host: 0.0.0.0
+    port: 8787
+    path: /#/log
 
 x-notes: |
   LR Remote Previews builds Lightroom Classic smart previews next to the originals.

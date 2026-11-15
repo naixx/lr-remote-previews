@@ -135,3 +135,8 @@ export function parseServerStatus(data: unknown): ServerStatus {
 export function isQueueBusy(status: ServerStatus): boolean {
   return status.queue.queued > 0 || status.queue.building > 0 || status.workers.busy > 0;
 }
+
+/** The state as the server reports it; an older server without `state` gets it from the queue. */
+export function serverState(status: ServerStatus): ServerState {
+  return status.state ?? (isQueueBusy(status) ? 'running' : 'idle');
+}

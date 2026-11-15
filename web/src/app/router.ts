@@ -1,6 +1,10 @@
 import { useMemo, useSyncExternalStore } from 'react';
 import { ITEM_STATES, JOB_STATES, type ItemState, type JobState } from '../api/jobs';
 
+export const COLOR_SCHEMES = ['light', 'dark'] as const;
+/** A colour scheme a page can be told to use instead of the system's. */
+export type ColorScheme = (typeof COLOR_SCHEMES)[number];
+
 /**
  * Hash routes (`#/jobs/7`), so the dashboard works under any path prefix a reverse proxy gives
  * it and a reload of a deep link never reaches the server as an unknown path. Links are plain
@@ -15,6 +19,11 @@ export type Route =
   | { page: 'settings' }
   | { page: 'converter' }
   | { page: 'log' }
+  /**
+   * The compact status page other dashboards show in a frame, without the layout. `theme`
+   * (`#/widget?theme=dark`) overrides the system's colour scheme; null follows it.
+   */
+  | { page: 'widget'; theme: ColorScheme | null }
   | { page: 'not-found'; path: string };
 
 export type Page = Route['page'];
@@ -64,6 +73,10 @@ export function parseRoute(hash: string): Route {
     case 'converter':
     case 'log':
       return second === undefined ? { page: first } : notFound;
+    case 'widget':
+      return second === undefined
+        ? { page: 'widget', theme: oneOf(query.get('theme'), COLOR_SCHEMES) }
+        : notFound;
     default:
       return notFound;
   }
@@ -94,6 +107,8 @@ export function hrefFor(route: Route): string {
     case 'converter':
     case 'log':
       return `#/${route.page}`;
+    case 'widget':
+      return route.theme ? `#/widget?theme=${route.theme}` : '#/widget';
     case 'not-found':
       return `#${route.path}`;
   }

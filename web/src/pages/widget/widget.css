@@ -1,0 +1,294 @@
+/*
+ * The widget (#/widget): a status page inside another dashboard's frame, where the frame is the
+ * viewport. Designed for about 265×150, 540×195 and 540×400 CSS pixels, fluid in between.
+ *
+ * It never scrolls and never cuts a line of text off. Its blocks come in order of importance
+ * (title, problem, now, today, cache, then what only the largest size shows) and are stacked in
+ * a column that wraps: a block that does not fit below the others moves into a second column,
+ * which lies outside the frame. So the least important blocks give way first, whatever the
+ * frame's size, the browser's font size or the length of a text. Media queries decide what the
+ * wider and the largest frames add.
+ */
+
+/* No room kept for a scroll bar, which the dashboard keeps so that its header does not shift
+   between pages; the card colour as the background, as the widget usually sits in a card. */
+:root[data-view='widget'] {
+  scrollbar-gutter: auto;
+}
+
+:root[data-view='widget'] body {
+  min-height: 0;
+  background: var(--color-surface);
+}
+
+.widget {
+  display: flex;
+  flex-direction: column;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  /* Puts the second column well beyond the right padding, so that none of it shows. */
+  column-gap: 64px;
+  row-gap: 6px;
+  /* A full window, as a pinned tab, gets a column of a readable width. */
+  max-width: 720px;
+  height: 100vh;
+  height: 100dvh;
+  padding: var(--space-2);
+  overflow: clip;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.widget > * {
+  flex: none;
+  width: 100%;
+  min-width: 0;
+}
+
+/* Title row: the brand, which opens the dashboard, and the state badge. */
+
+.widget-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-1) var(--space-2);
+}
+
+.widget-title__name {
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.widget-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--color-text);
+  text-decoration: none;
+}
+
+.widget-brand:hover {
+  color: var(--color-accent);
+}
+
+.widget-brand__mark {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  color: var(--color-accent);
+}
+
+/* Something is wrong: the server cannot be reached, cannot build, or lacks a root. */
+
+.widget-problem {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  border-left: 3px solid var(--color-warn);
+  border-radius: var(--radius-sm);
+  background: var(--color-warn-soft);
+  font-size: 12px;
+}
+
+.widget-problem--bad {
+  border-left-color: var(--color-bad);
+  background: var(--color-bad-soft);
+}
+
+.widget-problem__text {
+  flex: 1 1 12em;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.widget-problem .button {
+  min-height: 24px;
+  padding: 0 var(--space-2);
+  font-size: 12px;
+}
+
+/* Now: the queue, the pace, and the job being built. */
+
+.widget-now {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-variant-numeric: tabular-nums;
+}
+
+.widget-now__headline {
+  font-weight: 600;
+}
+
+.widget-now__detail {
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+.widget-jobs {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.widget-job {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+/* Below the largest size only the first job, the one being built, is shown. */
+.widget-job + .widget-job {
+  display: none;
+}
+
+.widget-job__head {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-2);
+  font-size: 12px;
+}
+
+/* A job's label is free text: one line, shortened with an ellipsis, in full on hover. */
+.widget-job__title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.widget-job__fraction {
+  flex: none;
+  color: var(--color-text-muted);
+}
+
+.widget-job .progress {
+  flex: none;
+  height: 6px;
+}
+
+/* Today, cache and the details of the largest size: a label column and the figures. */
+
+.widget-figure {
+  display: flex;
+  gap: var(--space-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.widget-figure dt {
+  flex: none;
+  width: 3.6em;
+  color: var(--color-text-muted);
+}
+
+.widget-figure dd {
+  min-width: 0;
+}
+
+.widget-failed:hover {
+  color: var(--color-bad-hover);
+}
+
+.widget-large {
+  display: none;
+}
+
+/* The last answer stays on screen, dimmed, while the server cannot be reached. */
+.widget--stale .widget-title .badge,
+.widget--stale .widget-now,
+.widget--stale .widget-figure {
+  opacity: 0.6;
+}
+
+/* The token form, when the server asks for one, in a frame of the smallest size. */
+
+.token-form--compact {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.token-form--compact .panel__title {
+  font-size: 14px;
+}
+
+.token-form--compact .panel__body {
+  gap: 2px;
+  font-size: 12px;
+}
+
+.token-form--compact .field-row {
+  flex-wrap: nowrap;
+}
+
+.token-form--compact .input {
+  flex-basis: 0;
+  min-height: 30px;
+}
+
+.token-form--compact .button {
+  min-height: 30px;
+  padding: 0 var(--space-3);
+}
+
+.token-form--compact .field-hint {
+  font-size: 12px;
+}
+
+@media (max-height: 179px) {
+  .token-form--compact .field-hint {
+    display: none;
+  }
+}
+
+/* From about 540×195: more room around, larger type. */
+@media (min-width: 400px) {
+  .widget {
+    row-gap: var(--space-2);
+    padding: var(--space-3);
+    font-size: 14px;
+  }
+
+  .widget-title__name {
+    font-size: 14px;
+  }
+
+  .widget-brand__mark {
+    width: 20px;
+    height: 20px;
+  }
+
+  .widget-now__headline {
+    font-size: 15px;
+  }
+
+  .widget-now__detail,
+  .widget-job__head,
+  .widget-problem {
+    font-size: 13px;
+  }
+
+  .widget-job .progress {
+    height: 8px;
+  }
+}
+
+/* About 540×400: up to three active jobs, the converter processes and the automatic scan. */
+@media (min-width: 400px) and (min-height: 340px) {
+  .widget-job + .widget-job,
+  .widget-large {
+    display: flex;
+  }
+
+  .widget-figure dt {
+    width: 7.5em;
+  }
+}
