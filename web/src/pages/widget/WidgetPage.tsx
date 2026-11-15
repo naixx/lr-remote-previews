@@ -34,8 +34,15 @@ import './widget.css';
  * Homarr, Home Assistant) or to keep as a small pinned tab. It only reads: its controls are two
  * links into the dashboard, which open in a new tab, and «Check again».
  */
-export function WidgetPage({ theme }: { theme: ColorScheme | null }) {
-  useWidgetDocument(theme);
+export function WidgetPage({
+  theme,
+  background = null,
+}: {
+  theme: ColorScheme | null;
+  /** `'none'`: transparent, for a frame that sits in a card of another dashboard. */
+  background?: 'none' | null;
+}) {
+  useWidgetDocument(theme, background);
   usePageTitle('Widget');
   const { authRequired } = useApi();
 
@@ -52,18 +59,20 @@ export function WidgetPage({ theme }: { theme: ColorScheme | null }) {
 
 /**
  * Marks the document for the widget's styles (no room kept for a scroll bar, the card colour as
- * the background) and sets a colour scheme given in the address, before the first paint.
+ * the background, or none) and sets a colour scheme given in the address, before the first paint.
  */
-function useWidgetDocument(theme: ColorScheme | null) {
+function useWidgetDocument(theme: ColorScheme | null, background: 'none' | null) {
   useLayoutEffect(() => {
     const root = document.documentElement;
     root.setAttribute('data-view', 'widget');
     if (theme) root.setAttribute('data-theme', theme);
+    if (background) root.setAttribute('data-background', background);
     return () => {
       root.removeAttribute('data-view');
       root.removeAttribute('data-theme');
+      root.removeAttribute('data-background');
     };
-  }, [theme]);
+  }, [theme, background]);
 }
 
 function LiveWidget() {

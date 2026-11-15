@@ -21,6 +21,14 @@
   background: var(--color-surface);
 }
 
+/* `background=none`: the card of the dashboard around the frame shows through. A browser lets a
+   framed page be transparent only when the frame element and the page use the same colour
+   scheme, so the embedding page gives `theme` too and sets `color-scheme` on its iframe. */
+:root[data-view='widget'][data-background='none'],
+:root[data-view='widget'][data-background='none'] body {
+  background: transparent;
+}
+
 .widget {
   display: flex;
   flex-direction: column;

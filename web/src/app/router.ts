@@ -22,8 +22,10 @@ export type Route =
   /**
    * The compact status page other dashboards show in a frame, without the layout. `theme`
    * (`#/widget?theme=dark`) overrides the system's colour scheme; null follows it.
+   * `background` `'none'` (`&background=none`) leaves the page transparent, so the card of the
+   * dashboard around the frame shows through; null paints the widget's own card colour.
    */
-  | { page: 'widget'; theme: ColorScheme | null }
+  | { page: 'widget'; theme: ColorScheme | null; background: 'none' | null }
   | { page: 'not-found'; path: string };
 
 export type Page = Route['page'];
@@ -75,7 +77,11 @@ export function parseRoute(hash: string): Route {
       return second === undefined ? { page: first } : notFound;
     case 'widget':
       return second === undefined
-        ? { page: 'widget', theme: oneOf(query.get('theme'), COLOR_SCHEMES) }
+        ? {
+            page: 'widget',
+            theme: oneOf(query.get('theme'), COLOR_SCHEMES),
+            background: oneOf(query.get('background'), ['none'] as const),
+          }
         : notFound;
     default:
       return notFound;
@@ -107,8 +113,13 @@ export function hrefFor(route: Route): string {
     case 'converter':
     case 'log':
       return `#/${route.page}`;
-    case 'widget':
-      return route.theme ? `#/widget?theme=${route.theme}` : '#/widget';
+    case 'widget': {
+      const query = [
+        route.theme ? `theme=${route.theme}` : null,
+        route.background ? `background=${route.background}` : null,
+      ].filter((part) => part !== null);
+      return query.length > 0 ? `#/widget?${query.join('&')}` : '#/widget';
+    }
     case 'not-found':
       return `#${route.path}`;
   }

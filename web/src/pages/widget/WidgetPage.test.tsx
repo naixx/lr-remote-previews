@@ -256,6 +256,21 @@ describe('WidgetPage', () => {
     expect(root.hasAttribute('data-theme')).toBe(false);
     expect(root.getAttribute('data-view')).toBe('widget');
   });
+
+  it('leaves the page transparent when the address asks for no background', async () => {
+    const root = document.documentElement;
+    const server = idleServer();
+    const { unmount } = render(
+      <ApiProvider fetch={server.fetch}>
+        <WidgetPage theme="dark" background="none" />
+      </ApiProvider>,
+    );
+    await settle();
+    expect(root.getAttribute('data-background')).toBe('none');
+
+    unmount();
+    expect(root.hasAttribute('data-background')).toBe(false);
+  });
 });
 
 describe('a server that stops answering', () => {

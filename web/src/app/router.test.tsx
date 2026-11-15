@@ -28,21 +28,31 @@ describe('parseRoute', () => {
     expect(parseRoute('#/settings')).toEqual({ page: 'settings' });
     expect(parseRoute('#/converter')).toEqual({ page: 'converter' });
     expect(parseRoute('#/log/')).toEqual({ page: 'log' });
-    expect(parseRoute('#/widget')).toEqual({ page: 'widget', theme: null });
+    expect(parseRoute('#/widget')).toEqual({ page: 'widget', theme: null, background: null });
   });
 
-  it('reads the colour scheme the widget is told to use', () => {
-    expect(parseRoute('#/widget?theme=light')).toEqual({ page: 'widget', theme: 'light' });
-    expect(parseRoute('#/widget?theme=dark')).toEqual({ page: 'widget', theme: 'dark' });
-    expect(parseRoute('#/widget/?theme=dark')).toEqual({ page: 'widget', theme: 'dark' });
+  it('reads the colour scheme and the background the widget is told to use', () => {
+    const widget = { page: 'widget', theme: null, background: null };
+    expect(parseRoute('#/widget?theme=light')).toEqual({ ...widget, theme: 'light' });
+    expect(parseRoute('#/widget?theme=dark')).toEqual({ ...widget, theme: 'dark' });
+    expect(parseRoute('#/widget/?theme=dark')).toEqual({ ...widget, theme: 'dark' });
+    expect(parseRoute('#/widget?background=none')).toEqual({ ...widget, background: 'none' });
+    expect(parseRoute('#/widget?theme=dark&background=none')).toEqual({
+      page: 'widget',
+      theme: 'dark',
+      background: 'none',
+    });
   });
 
   it('ignores a filter it does not know', () => {
     expect(parseRoute('#/jobs?state=paused')).toEqual({ page: 'jobs', state: null });
     expect(parseRoute('#/jobs/7?state=lost')).toEqual({ page: 'job', id: 7, itemState: null });
-    // An unknown scheme follows the system, as no `theme` does.
-    expect(parseRoute('#/widget?theme=blue')).toEqual({ page: 'widget', theme: null });
-    expect(parseRoute('#/widget?theme=')).toEqual({ page: 'widget', theme: null });
+    // An unknown scheme follows the system, as no `theme` does; an unknown background is the
+    // widget's own.
+    const widget = { page: 'widget', theme: null, background: null };
+    expect(parseRoute('#/widget?theme=blue')).toEqual(widget);
+    expect(parseRoute('#/widget?theme=')).toEqual(widget);
+    expect(parseRoute('#/widget?background=red')).toEqual(widget);
   });
 
   it('sends anything else to «not found»', () => {
@@ -70,8 +80,10 @@ describe('parseRoute', () => {
       { page: 'settings' },
       { page: 'converter' },
       { page: 'log' },
-      { page: 'widget', theme: null },
-      { page: 'widget', theme: 'dark' },
+      { page: 'widget', theme: null, background: null },
+      { page: 'widget', theme: 'dark', background: null },
+      { page: 'widget', theme: null, background: 'none' },
+      { page: 'widget', theme: 'dark', background: 'none' },
     ];
     for (const route of routes) {
       const href = hrefFor(route);
@@ -81,7 +93,9 @@ describe('parseRoute', () => {
     expect(hrefFor({ page: 'folders', root: 'archive', path: '2026/a b' })).toBe(
       '#/folders/archive/2026/a%20b',
     );
-    expect(hrefFor({ page: 'widget', theme: 'light' })).toBe('#/widget?theme=light');
+    expect(hrefFor({ page: 'widget', theme: 'light', background: null })).toBe(
+      '#/widget?theme=light',
+    );
   });
 });
 

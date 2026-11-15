@@ -290,10 +290,13 @@ Home Assistant) or for a small pinned browser tab:
 ```
 http://nas.example:8787/#/widget
 http://nas.example:8787/#/widget?theme=dark
+http://nas.example:8787/#/widget?theme=dark&background=none
 ```
 
 `theme=light` or `theme=dark` sets its colours to match the page around it; without it the widget follows the system
-setting, as the dashboard does. It is designed for frames of about 265×150, 540×195 and 540×400 CSS pixels and fits
+setting, as the dashboard does. `background=none` makes the page transparent, so the card it sits in shows through
+instead of the widget's own card colour; browsers allow that only when the frame and the page use the same colour
+scheme, so give `theme` as well and set the same `color-scheme` on the `<iframe>`. It is designed for frames of about 265×150, 540×195 and 540×400 CSS pixels and fits
 the sizes in between. It never scrolls: in a smaller frame the less important lines give way first. In that order it
 shows:
 

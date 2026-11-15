@@ -55,7 +55,7 @@ export function CurrentPage() {
     case 'log':
       return <LogPage />;
     case 'widget':
-      return <WidgetPage theme={route.theme} />;
+      return <WidgetPage theme={route.theme} background={route.background} />;
     case 'not-found':
       return <NotFoundPage path={route.path} />;
   }
